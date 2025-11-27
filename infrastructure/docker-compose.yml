@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL 資料庫
+  db:
+    image: postgres:15-alpine
+    container_name: power_iot_db
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: power_iot
+      TZ: Asia/Taipei
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # 2. MQTT Broker (Mosquitto) - 用於接收 IoT 設備數據
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: power_iot_mqtt
+    restart: always
+    ports:
+      - "1883:1883" # MQTT 通訊埠
+      - "9001:9001" # WebSockets 通訊埠 (給網頁用)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    # 建立一個預設設定檔，允許匿名登入 (開發用)
+    entrypoint: >
+      sh -c "echo 'listener 1883' > /mosquitto/config/mosquitto.conf &&
+             echo 'allow_anonymous true' >> /mosquitto/config/mosquitto.conf &&
+             /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+
+volumes:
+  pgdata:

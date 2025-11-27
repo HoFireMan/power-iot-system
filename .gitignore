@@ -1,0 +1,87 @@
+==========================
+
+1. 通用 / IDE
+
+==========================
+
+.DS_Store
+.vscode/
+.idea/
+*.log
+*.tmp
+
+==========================
+
+2. Go Backend
+
+==========================
+
+編譯出的二進位檔 (Windows/Linux/Mac)
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+backend/main
+backend/server
+
+測試覆蓋率報告
+
+*.out
+
+環境變數 (內含密碼，絕對不能上傳)
+
+.env
+config.yaml
+
+==========================
+
+3. Flutter Mobile
+
+==========================
+
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.pub-cache/
+mobile/.packages
+mobile/pubspec.lock
+
+Android 產物
+
+mobile/android/.gradle
+mobile/android/local.properties
+mobile/android/key.properties
+mobile/android/app/build
+mobile/android/.idea
+mobile/android/app/src/main/assets/
+
+iOS 產物
+
+mobile/ios/Flutter/App.framework
+mobile/ios/Flutter/Flutter.framework
+mobile/ios/Flutter/Generated.xcconfig
+mobile/ios/ServiceDefinitions.json
+mobile/ios/Runner/GeneratedPluginRegistrant.*
+mobile/ios/.generated/
+mobile/ios/Pods/
+mobile/ios/Podfile.lock
+
+==========================
+
+4. Infrastructure (Docker)
+
+==========================
+
+Mosquitto 的數據與Log，不需要上傳
+
+infrastructure/mosquitto/data/*
+infrastructure/mosquitto/log/*
+!infrastructure/mosquitto/data/.gitkeep
+!infrastructure/mosquitto/log/.gitkeep
+
+Postgres 的數據掛載點 (如果是在專案內)
+
+infrastructure/pgdata/
