@@ -1,7 +1,7 @@
 ==========================
 
 通用 / IDE
-==========================
+
 .DS_Store
 Thumbs.db
 .vscode/
@@ -10,7 +10,8 @@ Thumbs.db
 *.tmp
 
 ==========================
-2. Go Backend
+
+Go Backend
 
 編譯出的二進位檔 (Windows/Linux/Mac)
 
@@ -33,7 +34,8 @@ backend/config.yaml
 backend/config/*.yaml
 
 ==========================
-3. Flutter Mobile
+
+Flutter Mobile
 
 mobile/build/
 mobile/.dart_tool/
@@ -61,7 +63,8 @@ mobile/ios/.generated/
 mobile/ios/Pods/
 
 ==========================
-4. Infrastructure (Docker)
+
+Infrastructure (Docker)
 
 Mosquitto 的數據與Log，不需要上傳
 
@@ -77,3 +80,12 @@ infrastructure/pgdata/
 開發者本機端的 Docker 覆寫檔 (如果有用到)
 
 docker-compose.override.yml
+
+==========================
+
+專案機密/規劃文件 (不需上傳)
+
+==========================
+
+Power IoT System - 專案需求與規格書 (PRD).md
+Power IoT System - 軟體開發生命週期 (SDLC).md
