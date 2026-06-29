@@ -1,20 +1,16 @@
 ==========================
 
-1. 通用 / IDE
-
+通用 / IDE
 ==========================
-
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/
 *.log
 *.tmp
 
 ==========================
-
 2. Go Backend
-
-==========================
 
 編譯出的二進位檔 (Windows/Linux/Mac)
 
@@ -33,13 +29,11 @@ backend/server
 環境變數 (內含密碼，絕對不能上傳)
 
 .env
-config.yaml
+backend/config.yaml
+backend/config/*.yaml
 
 ==========================
-
 3. Flutter Mobile
-
-==========================
 
 mobile/build/
 mobile/.dart_tool/
@@ -47,7 +41,6 @@ mobile/.flutter-plugins
 mobile/.flutter-plugins-dependencies
 mobile/.pub-cache/
 mobile/.packages
-mobile/pubspec.lock
 
 Android 產物
 
@@ -56,7 +49,6 @@ mobile/android/local.properties
 mobile/android/key.properties
 mobile/android/app/build
 mobile/android/.idea
-mobile/android/app/src/main/assets/
 
 iOS 產物
 
@@ -67,13 +59,9 @@ mobile/ios/ServiceDefinitions.json
 mobile/ios/Runner/GeneratedPluginRegistrant.*
 mobile/ios/.generated/
 mobile/ios/Pods/
-mobile/ios/Podfile.lock
 
 ==========================
-
 4. Infrastructure (Docker)
-
-==========================
 
 Mosquitto 的數據與Log，不需要上傳
 
@@ -82,6 +70,10 @@ infrastructure/mosquitto/log/*
 !infrastructure/mosquitto/data/.gitkeep
 !infrastructure/mosquitto/log/.gitkeep
 
-Postgres 的數據掛載點 (如果是在專案內)
+Postgres 的數據掛載點
 
 infrastructure/pgdata/
+
+開發者本機端的 Docker 覆寫檔 (如果有用到)
+
+docker-compose.override.yml

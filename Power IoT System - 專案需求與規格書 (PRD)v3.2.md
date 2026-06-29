@@ -134,28 +134,30 @@
 ### **5.2 Shops**
 
 * GET /api/shops/my: 取得我能看的所有店家。  
-* POST /api/shops/switch: 切換當前店家。  
-* GET /api/shops/:id: 取得店家詳情 (含 QR Code)。
+* POST /api/shops/switch: 切換當前店家 (更新 current\_shop\_id)。  
+* GET /api/shops/:id: 取得店家詳情 (含 QR Code 字串)。
 
 ### **5.3 Devices**
 
-* GET /api/shops/:id/devices: 取得設備列表 (含 is\_online)。  
+* GET /api/shops/:id/devices: 取得某店家的設備列表 (含 is\_online)。  
 * POST /api/devices: (Admin) 綁定新設備。  
 * PUT /api/devices/:id/alert-settings: 更新警報設定。
 
 ### **5.4 Dashboard**
 
-* GET /api/dashboard/summary: 取得首頁聚合數據。  
-* GET /api/dashboard/chart: 取得歷史趨勢。
+* GET /api/dashboard/summary: 取得首頁數據 (今日用電、碳排、即時功率)。  
+* GET /api/dashboard/chart: 取得圖表數據。
 
 ## **6\. 非功能性需求 (NFR)**
 
 ### **6.1 資料生命週期 (Data Retention)**
 
-* **power\_readings (Raw Data):** 保留 **3 個月** (CronJob 每日清除)。  
-* **daily\_usages (統計數據):** 保留 **5 年以上**。  
-* **alert\_logs:** 保留 **1 年**。  
+* **power\_readings (Raw Data):** 保留 3 個月 (可透過排程清除，CronJob 每日清除)。  
+* **daily\_usages (統計數據):** 保留 5 年以上。  
+* **alert\_logs:** 保留 1 年。
+* **離線容錯:** 若網路中斷，App 應顯示快取數據或明確的離線提示，不可崩潰。  
 * **Docker Log:** 設定 Log Rotation (單檔 100MB, 保留 5 份)。
+
 
 ### **6.2 時間同步與校正 (Time Synchronization)**
 
