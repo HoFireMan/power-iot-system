@@ -23,7 +23,8 @@ class DashboardScreen extends ConsumerWidget {
               const SizedBox(height: 24),
               _buildEnergySummaryCard(),
               const SizedBox(height: 24),
-              const Text("即時監控", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const Text("即時監控",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
               _buildDeviceGrid(context),
             ],
@@ -54,7 +55,8 @@ class DashboardScreen extends ConsumerWidget {
             const SizedBox(height: 4),
             Row(
               children: [
-                const Icon(Icons.store_mall_directory_rounded, size: 18, color: AppTheme.textSecondary),
+                const Icon(Icons.store_mall_directory_rounded,
+                    size: 18, color: AppTheme.textSecondary),
                 const SizedBox(width: 4),
                 Text(
                   shopName,
@@ -74,7 +76,7 @@ class DashboardScreen extends ConsumerWidget {
             shape: BoxShape.circle,
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.05),
+                color: Colors.black.withValues(alpha: 0.05),
                 blurRadius: 10,
                 offset: const Offset(0, 4),
               ),
@@ -104,7 +106,7 @@ class DashboardScreen extends ConsumerWidget {
         borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF43A047).withOpacity(0.4),
+            color: const Color(0xFF43A047).withValues(alpha: 0.4),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -121,9 +123,10 @@ class DashboardScreen extends ConsumerWidget {
                 style: TextStyle(color: Colors.white70, fontSize: 16),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
+                  color: Colors.white.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: const Row(
@@ -132,7 +135,10 @@ class DashboardScreen extends ConsumerWidget {
                     SizedBox(width: 4),
                     Text(
                       "0.07 kg CO₂",
-                      style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold),
                     ),
                   ],
                 ),
@@ -169,25 +175,24 @@ class DashboardScreen extends ConsumerWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               _StatItem(label: "即時功率", value: "7.59 W", icon: Icons.bolt),
-              _StatItem(label: "本月用電量", value: "0.66 度", icon: Icons.calendar_today),
+              _StatItem(
+                  label: "本月用電量", value: "0.66 度", icon: Icons.calendar_today),
             ],
           ),
           const SizedBox(height: 16),
           const Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-               _StatItem(label: "本月碳排放", value: "0.33 kg", icon: Icons.cloud_queue),
-               SizedBox(),
+              _StatItem(
+                  label: "本月碳排放", value: "0.33 kg", icon: Icons.cloud_queue),
+              SizedBox(),
             ],
           ),
           const SizedBox(height: 24),
-          
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: () {
-                print("計算電費");
-              },
+              onPressed: () {},
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.white,
                 foregroundColor: AppTheme.primaryColor,
@@ -230,17 +235,15 @@ class DashboardScreen extends ConsumerWidget {
       itemBuilder: (context, index) {
         final device = devices[index];
         final isOnline = device['status'] == 'online';
-        
+
         return Container(
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(20),
-            border: isOnline 
-                ? null 
-                : Border.all(color: Colors.grey.shade200),
+            border: isOnline ? null : Border.all(color: Colors.grey.shade200),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.05),
+                color: Colors.black.withValues(alpha: 0.05),
                 blurRadius: 10,
                 offset: const Offset(0, 4),
               ),
@@ -258,8 +261,8 @@ class DashboardScreen extends ConsumerWidget {
                     Container(
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: isOnline 
-                            ? AppTheme.primaryColor.withOpacity(0.1) 
+                        color: isOnline
+                            ? AppTheme.primaryColor.withValues(alpha: 0.1)
                             : Colors.grey.shade100,
                         shape: BoxShape.circle,
                       ),
@@ -318,7 +321,7 @@ class DashboardScreen extends ConsumerWidget {
         borderRadius: BorderRadius.circular(35),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -328,16 +331,32 @@ class DashboardScreen extends ConsumerWidget {
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           // 1. 首頁 (當前頁, isSelected: true)
-          _NavIcon(icon: Icons.home_rounded, isSelected: true, label: "首頁", onTap: () {}),
-          
+          _NavIcon(
+              icon: Icons.home_rounded,
+              isSelected: true,
+              label: "首頁",
+              onTap: () {}),
+
           // 2. 設備 (跳轉)
-          _NavIcon(icon: Icons.electrical_services_rounded, isSelected: false, label: "設備", onTap: () => context.go('/devices')),
-          
+          _NavIcon(
+              icon: Icons.electrical_services_rounded,
+              isSelected: false,
+              label: "設備",
+              onTap: () => context.go('/devices')),
+
           // 3. 個人 (跳轉) - 修正這裡！
-          _NavIcon(icon: Icons.person_rounded, isSelected: false, label: "個人", onTap: () => context.go('/profile')),
-          
+          _NavIcon(
+              icon: Icons.person_rounded,
+              isSelected: false,
+              label: "個人",
+              onTap: () => context.go('/profile')),
+
           // 4. 店家 (跳轉) - 修正這裡！
-          _NavIcon(icon: Icons.store_rounded, isSelected: false, label: "店家", onTap: () => context.go('/shops')),
+          _NavIcon(
+              icon: Icons.store_rounded,
+              isSelected: false,
+              label: "店家",
+              onTap: () => context.go('/shops')),
         ],
       ),
     );
@@ -345,10 +364,14 @@ class DashboardScreen extends ConsumerWidget {
 
   IconData _getIcon(String type) {
     switch (type) {
-      case 'ac': return Icons.ac_unit;
-      case 'fridge': return Icons.kitchen;
-      case 'plug': return Icons.power;
-      default: return Icons.lightbulb;
+      case 'ac':
+        return Icons.ac_unit;
+      case 'fridge':
+        return Icons.kitchen;
+      case 'plug':
+        return Icons.power;
+      default:
+        return Icons.lightbulb;
     }
   }
 }
@@ -360,7 +383,11 @@ class _NavIcon extends StatelessWidget {
   final bool isSelected;
   final VoidCallback onTap;
 
-  const _NavIcon({required this.icon, required this.label, required this.isSelected, required this.onTap});
+  const _NavIcon(
+      {required this.icon,
+      required this.label,
+      required this.isSelected,
+      required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -376,14 +403,13 @@ class _NavIcon extends StatelessWidget {
             size: 26,
           ),
           const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
-            )
-          ),
+          Text(label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color:
+                    isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
+              )),
         ],
       ),
     );
@@ -396,7 +422,8 @@ class _StatItem extends StatelessWidget {
   final String value;
   final IconData icon;
 
-  const _StatItem({required this.label, required this.value, required this.icon});
+  const _StatItem(
+      {required this.label, required this.value, required this.icon});
 
   @override
   Widget build(BuildContext context) {
@@ -407,8 +434,11 @@ class _StatItem extends StatelessWidget {
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-            Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            Text(label,
+                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            Text(value,
+                style: const TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.bold)),
           ],
         ),
       ],

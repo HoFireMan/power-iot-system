@@ -33,7 +33,8 @@ class ShopListScreen extends ConsumerWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  const Icon(Icons.star_rounded, color: AppTheme.accentColor, size: 20),
+                  const Icon(Icons.star_rounded,
+                      color: AppTheme.accentColor, size: 20),
                   const SizedBox(width: 6),
                   Text(
                     "為目前檢視店家",
@@ -61,9 +62,7 @@ class ShopListScreen extends ConsumerWidget {
               padding: const EdgeInsets.all(16),
               alignment: Alignment.center,
               child: Text(
-                shopState.isAdmin 
-                    ? "管理員模式：顯示所有已註冊店家" 
-                    : "使用者模式：僅顯示您已綁定的店家",
+                shopState.isAdmin ? "管理員模式：顯示所有已註冊店家" : "使用者模式：僅顯示您已綁定的店家",
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
               ),
             ),
@@ -75,7 +74,8 @@ class ShopListScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildShopCard(BuildContext context, WidgetRef ref, Shop shop, bool isSelected) {
+  Widget _buildShopCard(
+      BuildContext context, WidgetRef ref, Shop shop, bool isSelected) {
     return GestureDetector(
       onTap: () {
         ref.read(shopProvider.notifier).selectShop(shop.id);
@@ -95,10 +95,14 @@ class ShopListScreen extends ConsumerWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
-          border: isSelected ? Border.all(color: AppTheme.primaryColor, width: 2) : null,
+          border: isSelected
+              ? Border.all(color: AppTheme.primaryColor, width: 2)
+              : null,
           boxShadow: [
             BoxShadow(
-              color: isSelected ? AppTheme.primaryColor.withOpacity(0.1) : Colors.black.withOpacity(0.05),
+              color: isSelected
+                  ? AppTheme.primaryColor.withValues(alpha: 0.1)
+                  : Colors.black.withValues(alpha: 0.05),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -110,20 +114,26 @@ class ShopListScreen extends ConsumerWidget {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
                 color: isSelected ? AppTheme.primaryColor : Colors.grey.shade50,
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(18)),
               ),
               child: Row(
                 children: [
                   Icon(
                     isSelected ? Icons.star_rounded : Icons.star_border_rounded,
-                    color: isSelected ? AppTheme.accentColor : Colors.grey.shade400,
+                    color: isSelected
+                        ? AppTheme.accentColor
+                        : Colors.grey.shade400,
                     size: 24,
                   ),
                   const SizedBox(width: 8),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
-                      color: isSelected ? Colors.white.withOpacity(0.2) : Colors.grey.shade200,
+                      color: isSelected
+                          ? Colors.white.withValues(alpha: 0.2)
+                          : Colors.grey.shade200,
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
@@ -144,13 +154,17 @@ class ShopListScreen extends ConsumerWidget {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: isSelected ? AppTheme.primaryColor.withOpacity(0.1) : AppTheme.backgroundColor,
+                      color: isSelected
+                          ? AppTheme.primaryColor.withValues(alpha: 0.1)
+                          : AppTheme.backgroundColor,
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Icon(
                       Icons.storefront_rounded,
                       size: 32,
-                      color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
+                      color: isSelected
+                          ? AppTheme.primaryColor
+                          : Colors.grey.shade400,
                     ),
                   ),
                   const SizedBox(width: 16),
@@ -169,12 +183,14 @@ class ShopListScreen extends ConsumerWidget {
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            Icon(Icons.location_on_outlined, size: 14, color: Colors.grey.shade500),
+                            Icon(Icons.location_on_outlined,
+                                size: 14, color: Colors.grey.shade500),
                             const SizedBox(width: 4),
                             Expanded(
                               child: Text(
                                 shop.address,
-                                style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                                style: TextStyle(
+                                    fontSize: 13, color: Colors.grey.shade600),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -203,7 +219,7 @@ class ShopListScreen extends ConsumerWidget {
         borderRadius: BorderRadius.circular(35),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -214,32 +230,29 @@ class ShopListScreen extends ConsumerWidget {
         children: [
           // 1. 首頁 (跳轉)
           _NavIcon(
-            icon: Icons.home_rounded, 
-            isSelected: false, 
-            label: "首頁", 
-            onTap: () => context.go('/dashboard')
-          ),
+              icon: Icons.home_rounded,
+              isSelected: false,
+              label: "首頁",
+              onTap: () => context.go('/dashboard')),
           // 2. 設備 (跳轉)
           _NavIcon(
-            icon: Icons.electrical_services_rounded, 
-            isSelected: false, 
-            label: "設備", 
-            onTap: () => context.go('/devices')
-          ),
+              icon: Icons.electrical_services_rounded,
+              isSelected: false,
+              label: "設備",
+              onTap: () => context.go('/devices')),
           // 3. 個人 (跳轉)
           _NavIcon(
-            icon: Icons.person_rounded, 
-            isSelected: false, 
-            label: "個人", 
-            onTap: () => context.go('/profile')
-          ),
+              icon: Icons.person_rounded,
+              isSelected: false,
+              label: "個人",
+              onTap: () => context.go('/profile')),
           // 4. 店家 (當前頁，isSelected: true)
           _NavIcon(
-            icon: Icons.store_rounded, 
-            isSelected: true, 
-            label: "店家", 
-            onTap: () {} // 已經在店家頁，不需動作
-          ),
+              icon: Icons.store_rounded,
+              isSelected: true,
+              label: "店家",
+              onTap: () {} // 已經在店家頁，不需動作
+              ),
         ],
       ),
     );
@@ -253,7 +266,11 @@ class _NavIcon extends StatelessWidget {
   final bool isSelected;
   final VoidCallback onTap;
 
-  const _NavIcon({required this.icon, required this.label, required this.isSelected, required this.onTap});
+  const _NavIcon(
+      {required this.icon,
+      required this.label,
+      required this.isSelected,
+      required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -269,14 +286,13 @@ class _NavIcon extends StatelessWidget {
             size: 26,
           ),
           const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
-            )
-          ),
+          Text(label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color:
+                    isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
+              )),
         ],
       ),
     );

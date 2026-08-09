@@ -9,8 +9,8 @@ class Shop {
   final bool isHead; // 是否為總部
 
   Shop({
-    required this.id, 
-    required this.name, 
+    required this.id,
+    required this.name,
     required this.address,
     this.isHead = false,
   });
@@ -46,11 +46,12 @@ class ShopNotifier extends StateNotifier<ShopState> {
     // [備註] 權限邏輯模擬：
     // true  = 管理員 (可以看到 allShops)
     // false = 一般使用者 (只能看到 subset，例如 s1 和 s2)
-    const bool isSimulatedAdmin = true; 
+    const bool isSimulatedAdmin = true;
 
-    final visibleShops = isSimulatedAdmin 
-        ? allShops 
-        : [allShops[0], allShops[1]]; // 一般人只看得到前兩家
+    // Keep the future non-admin mock branch while admin simulation is fixed.
+    final visibleShops =
+        // ignore: dead_code
+        isSimulatedAdmin ? allShops : [allShops[0], allShops[1]]; // 一般人只看得到前兩家
 
     return ShopState(
       currentShop: visibleShops[0], // 預設選中第一家
