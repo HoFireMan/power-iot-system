@@ -88,5 +88,24 @@ docker-compose.override.yml
 ==========================
 
 Power IoT System - 專案需求與規格書 (PRD).md
+Power IoT System - 專案需求與規格書 (PRD)v*.md
 Power IoT System - 軟體開發生命週期 (SDLC).md
+Power IoT System - 軟體開發生命週期 (SDLC)v*.md
+CONTEXT.md
+docs/archive/
 後端開發草稿*.md
+
+# Device Protocol v1 development secrets and generated artifacts
+firmware/**/data/ca.pem
+infrastructure/mosquitto/certs/*.key
+infrastructure/mosquitto/certs/*.srl
+infrastructure/mosquitto/certs/*.crt
+infrastructure/mosquitto/config/password_file
+infrastructure/mosquitto/config/password_file.example
+infrastructure/firmware/certs/*.key
+infrastructure/firmware/certs/*.crt
+infrastructure/firmware/*.bin
+.pi/
+tools/device-simulator/power-iot-device-simulator
+*:Zone.Identifier
+.env
