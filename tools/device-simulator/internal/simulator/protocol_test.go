@@ -35,6 +35,27 @@ func TestParseACK(t *testing.T) {
 	}
 }
 
+func TestAckTerminalClassification(t *testing.T) {
+	for _, test := range []struct {
+		status   string
+		terminal bool
+	}{
+		{status: "stored", terminal: true},
+		{status: "duplicate", terminal: true},
+		{status: "unknown_device", terminal: false},
+		{status: "unknown_assignment", terminal: false},
+		{status: "invalid", terminal: false},
+		{status: "failed", terminal: false},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			ack := Ack{Status: test.status}
+			if got := ack.IsTerminal(); got != test.terminal {
+				t.Fatalf("status %q terminal=%v, want %v", test.status, got, test.terminal)
+			}
+		})
+	}
+}
+
 func TestParseCommand(t *testing.T) {
 	command, err := ParseCommand([]byte(`{"command_id":"cmd-1","action":"diagnostics","expires_at":1786107600}`))
 	if err != nil {

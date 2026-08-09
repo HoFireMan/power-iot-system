@@ -37,6 +37,38 @@ func TestNextTelemetryUsesConfiguredRecordedAt(t *testing.T) {
 	}
 }
 
+func TestAckWaiterIdentityIsolation(t *testing.T) {
+	device := &deviceSimulator{pending: make(map[ackKey][]chan simulator.Ack)}
+	wanted := simulator.TelemetryIdentity{BootCounter: 7, Sequence: 11}
+	waiter := device.registerAck(wanted)
+
+	device.resolveAck(simulator.Ack{BootCounter: 8, Sequence: 11, Status: "stored"})
+	assertNoAck(t, waiter, "different boot counter")
+	device.resolveAck(simulator.Ack{BootCounter: 7, Sequence: 12, Status: "stored"})
+	assertNoAck(t, waiter, "different sequence")
+	device.resolveAck(simulator.Ack{BootCounter: 99, Sequence: 99, Status: "stored"})
+	assertNoAck(t, waiter, "unknown identity")
+
+	device.resolveAck(simulator.Ack{BootCounter: 7, Sequence: 11, Status: "stored"})
+	select {
+	case ack := <-waiter:
+		if ack.BootCounter != wanted.BootCounter || ack.Sequence != wanted.Sequence {
+			t.Fatalf("resolved wrong waiter identity: %+v", ack)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("matching ACK did not resolve waiter")
+	}
+}
+
+func assertNoAck(t *testing.T, waiter <-chan simulator.Ack, reason string) {
+	t.Helper()
+	select {
+	case ack := <-waiter:
+		t.Fatalf("ACK for %s resolved waiter: %+v", reason, ack)
+	default:
+	}
+}
+
 func TestOfflineQueuePreservesConfiguredRecordedAt(t *testing.T) {
 	recordedAt := time.Unix(1786021200, 0).UTC()
 	generator, err := simulator.NewGenerator(simulator.DefaultMAC, "test-fw", 1, 20)

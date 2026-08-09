@@ -54,10 +54,7 @@ type deviceSimulator struct {
 	offlineQueue []simulator.Telemetry
 }
 
-type ackKey struct {
-	boot int64
-	seq  int64
-}
+type ackKey = simulator.TelemetryIdentity
 
 type ackWaitError struct {
 	status  string
@@ -405,39 +402,40 @@ func (s *deviceSimulator) publishAndWait(ctx context.Context, telemetry simulato
 	if err != nil {
 		return err
 	}
-	waiter := s.registerAck(telemetry.BootCounter, telemetry.Sequence)
+	identity := telemetry.Identity()
+	waiter := s.registerAck(identity)
 	token := s.client.Publish("device/upload/data", 0, false, body)
 	if !token.WaitTimeout(5*time.Second) || token.Error() != nil {
-		s.removeAck(telemetry.BootCounter, telemetry.Sequence, waiter)
+		s.removeAck(identity, waiter)
 		return fmt.Errorf("telemetry publish failed: %v", token.Error())
 	}
 	log.Printf("PUBLISHED boot=%d seq=%d", telemetry.BootCounter, telemetry.Sequence)
 	select {
 	case <-ctx.Done():
-		s.removeAck(telemetry.BootCounter, telemetry.Sequence, waiter)
+		s.removeAck(identity, waiter)
 		return ctx.Err()
 	case ack := <-waiter:
-		if ack.Status != "stored" && ack.Status != "duplicate" {
+		if !ack.IsTerminal() {
 			return &ackWaitError{status: ack.Status}
 		}
 		return nil
 	case <-time.After(s.config.AckTimeout):
-		s.removeAck(telemetry.BootCounter, telemetry.Sequence, waiter)
+		s.removeAck(identity, waiter)
 		log.Printf("ACK timeout")
 		return &ackWaitError{timeout: true}
 	}
 }
 
-func (s *deviceSimulator) registerAck(boot, seq int64) chan simulator.Ack {
+func (s *deviceSimulator) registerAck(identity simulator.TelemetryIdentity) chan simulator.Ack {
 	waiter := make(chan simulator.Ack, 1)
 	s.mu.Lock()
-	s.pending[ackKey{boot: boot, seq: seq}] = append(s.pending[ackKey{boot: boot, seq: seq}], waiter)
+	s.pending[identity] = append(s.pending[identity], waiter)
 	s.mu.Unlock()
 	return waiter
 }
 
 func (s *deviceSimulator) resolveAck(ack simulator.Ack) {
-	key := ackKey{boot: ack.BootCounter, seq: ack.Sequence}
+	key := ack.Identity()
 	s.mu.Lock()
 	waiters := s.pending[key]
 	if len(waiters) == 0 {
@@ -457,16 +455,15 @@ func (s *deviceSimulator) resolveAck(ack simulator.Ack) {
 	}
 }
 
-func (s *deviceSimulator) removeAck(boot, seq int64, target chan simulator.Ack) {
-	key := ackKey{boot: boot, seq: seq}
+func (s *deviceSimulator) removeAck(identity simulator.TelemetryIdentity, target chan simulator.Ack) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	waiters := s.pending[key]
+	waiters := s.pending[identity]
 	for i, waiter := range waiters {
 		if waiter == target {
-			s.pending[key] = append(waiters[:i], waiters[i+1:]...)
-			if len(s.pending[key]) == 0 {
-				delete(s.pending, key)
+			s.pending[identity] = append(waiters[:i], waiters[i+1:]...)
+			if len(s.pending[identity]) == 0 {
+				delete(s.pending, identity)
 			}
 			return
 		}

@@ -16,6 +16,17 @@ type Ack struct {
 	Status      string `json:"status"`
 }
 
+// Identity returns the ACK identity used to match a telemetry waiter.
+func (a Ack) Identity() TelemetryIdentity {
+	return TelemetryIdentity{BootCounter: a.BootCounter, Sequence: a.Sequence}
+}
+
+// IsTerminal reports whether the ACK authorizes local success handling.
+// Unknown, invalid, and failed statuses remain non-terminal.
+func (a Ack) IsTerminal() bool {
+	return a.Status == "stored" || a.Status == "duplicate"
+}
+
 func ParseAck(payload []byte) (Ack, error) {
 	var ack Ack
 	decoder := json.NewDecoder(bytes.NewReader(payload))

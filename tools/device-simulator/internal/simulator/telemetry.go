@@ -9,6 +9,13 @@ import (
 
 const DefaultMAC = "AABBCCDDEEFF"
 
+// TelemetryIdentity is the simulator's replay and ACK matching identity.
+// It mirrors the protocol's boot_counter + sequence pair.
+type TelemetryIdentity struct {
+	BootCounter int64
+	Sequence    int64
+}
+
 // Telemetry is the exact Device Protocol v1 telemetry envelope. Keep the wire
 // names aligned with docs/iot/DEVICE_PROTOCOL_V1.md.
 type Telemetry struct {
@@ -28,6 +35,11 @@ type Telemetry struct {
 	ValidSamples    int     `json:"valid_samples"`
 	InvalidSamples  int     `json:"invalid_samples"`
 	FirmwareVersion string  `json:"fw"`
+}
+
+// Identity returns the stable replay identity carried by this sample.
+func (t Telemetry) Identity() TelemetryIdentity {
+	return TelemetryIdentity{BootCounter: t.BootCounter, Sequence: t.Sequence}
 }
 
 // Generator produces internally consistent, deterministic electrical samples.

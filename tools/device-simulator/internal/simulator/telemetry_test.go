@@ -59,6 +59,43 @@ func TestDuplicateIdentityCanBeReusedByCaller(t *testing.T) {
 	}
 }
 
+func TestTelemetryIdentityPreservesReplay(t *testing.T) {
+	generator, err := NewGenerator(DefaultMAC, "test-fw", 7, 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := generator.Next(time.Unix(1786021200, 0), time.Second)
+	sequenceAfterFirst := generator.Sequence
+	replay := first
+
+	if replay.Identity() != first.Identity() {
+		t.Fatalf("replay changed identity: first=%+v replay=%+v", first.Identity(), replay.Identity())
+	}
+	if generator.Sequence != sequenceAfterFirst {
+		t.Fatalf("replay allocated a new sequence: got %d, want %d", generator.Sequence, sequenceAfterFirst)
+	}
+}
+
+func TestTelemetryIdentitySeparatesBootCounters(t *testing.T) {
+	firstGenerator, err := NewGenerator(DefaultMAC, "test-fw", 1, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGenerator, err := NewGenerator(DefaultMAC, "test-fw", 2, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstGenerator.Next(time.Unix(1786021200, 0), time.Second)
+	second := secondGenerator.Next(time.Unix(1786021200, 0), time.Second)
+
+	if first.Sequence != second.Sequence {
+		t.Fatalf("test setup did not reuse sequence: %d vs %d", first.Sequence, second.Sequence)
+	}
+	if first.Identity() == second.Identity() {
+		t.Fatalf("different boot counters share identity: first=%+v second=%+v", first.Identity(), second.Identity())
+	}
+}
+
 func contains(value, needle string) bool {
 	for i := 0; i+len(needle) <= len(value); i++ {
 		if value[i:i+len(needle)] == needle {
