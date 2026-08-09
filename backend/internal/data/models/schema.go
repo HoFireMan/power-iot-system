@@ -90,16 +90,26 @@ type Device struct {
 	ShopID uint `gorm:"index"`
 	TypeID uint `gorm:"index"`
 
-	MacAddress string `gorm:"uniqueIndex;size:17;not null"`
-	Name       string `gorm:"size:100;not null"` // devicecode/devicename
+	// MacAddress is stored in canonical form: uppercase, no separators, 12 hex chars.
+	// Canonicalization and uniqueness are enforced by versioned SQL migrations.
+	MacAddress   string  `gorm:"size:17;not null"`
+	SerialNumber *string `gorm:"column:serial_number;size:128"`
+	Name         string  `gorm:"size:100;not null"` // devicecode/devicename
 
 	// [整合舊欄位]
 	Location string `gorm:"size:100"` // 安裝位置 (location)
 	Memo     string // 備註
 
-	IsOnline  bool `gorm:"default:false"`
-	LastSeen  *time.Time
-	CreatedAt time.Time
+	IsOnline        bool `gorm:"default:false"`
+	LastSeen        *time.Time
+	BootID          string `gorm:"size:80"`
+	FirmwareVersion string `gorm:"column:firmware_version;size:80"`
+	IPAddress       string `gorm:"column:ip_address;size:45"`
+	RSSI            *int   `gorm:"column:rssi"`
+	QueueCount      *int   `gorm:"column:queue_count"`
+	SafeMode        bool   `gorm:"column:safe_mode;default:false"`
+	TimeSynced      bool   `gorm:"column:time_synced;default:false"`
+	CreatedAt       time.Time
 
 	AlertSettings DeviceAlertSetting `gorm:"foreignKey:DeviceID;constraint:OnDelete:CASCADE"`
 }
@@ -140,16 +150,63 @@ type AlertLog struct {
 // 3. 數據模組 (Telemetry Context)
 // ==========================================
 
+// PowerReading mirrors domain.PowerReading for legacy consumers. Runtime
+// migrations and MQTT processing use internal/core/domain as the canonical model.
+// Keep these fields and tags in lockstep until this package is retired.
 // PowerReading 電力數據 (Raw Data)
 type PowerReading struct {
-	ID       uint64    `gorm:"primaryKey"`
-	Time     time.Time `gorm:"index;not null"`
-	DeviceID uint      `gorm:"index;not null"`
+	ID                    uint64     `gorm:"primaryKey"`
+	Time                  time.Time  `gorm:"column:time"`
+	RecordedAt            time.Time  `gorm:"column:recorded_at;not null"`
+	ReceivedAt            time.Time  `gorm:"column:received_at"`
+	MeasurementPointID    *uuid.UUID `gorm:"column:measurement_point_id;index"`
+	DeviceID              uint       `gorm:"index;not null"`
+	Voltage               float64    `gorm:"type:numeric(5,2)"`
+	Current               float64    `gorm:"type:numeric(5,2)"`
+	Power                 float64    `gorm:"type:numeric(8,2)"`
+	ActivePower           float64    `gorm:"column:active_power;type:numeric(8,2)"`
+	KwhTotal              float64    `gorm:"type:numeric(10,3)"`
+	EnergyDeltaKwh        *float64   `gorm:"type:numeric(10,6)"`
+	PowerFactor           *float64   `gorm:"type:numeric(5,4)"`
+	RSSI                  *int       `gorm:"column:rssi"`
+	ProtocolVersion       int        `gorm:"default:0"`
+	BootID                string     `gorm:"size:80"`
+	BootCounter           *int64
+	Sequence              *int64 `gorm:"column:sequence"`
+	ValidSamples          *int   `gorm:"column:valid_samples"`
+	InvalidSamples        *int   `gorm:"column:invalid_samples"`
+	FirmwareVersion       string `gorm:"column:firmware_version;size:80"`
+	LegacyFirmwareVersion string `gorm:"column:fw;size:80"`
+}
 
-	Voltage  float64 `gorm:"type:numeric(5,2)"`
-	Current  float64 `gorm:"type:numeric(5,2)"`
-	Power    float64 `gorm:"type:numeric(8,2)"`
-	KwhTotal float64 `gorm:"type:numeric(10,3)"` // 設備回傳的累計度數
+// MeasurementPoint is the permanent logical identity for a monitored point.
+type MeasurementPoint struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	ShopID    uint      `gorm:"column:shop_id;not null;index"`
+	Name      string    `gorm:"size:100;not null"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// DeviceAssignment records the historical half-open [ValidFrom, ValidTo)
+// relationship. Exclusion constraints are owned by SQL migrations.
+type DeviceAssignment struct {
+	ID                 uuid.UUID `gorm:"type:uuid;primaryKey"`
+	DeviceID           uint      `gorm:"index;not null"`
+	MeasurementPointID uuid.UUID `gorm:"column:measurement_point_id;index;not null"`
+	ValidFrom          time.Time `gorm:"not null"`
+	ValidTo            *time.Time
+	CreatedAt          time.Time
+}
+
+// TelemetryIngestKey is the ordinary PostgreSQL idempotency boundary.
+type TelemetryIngestKey struct {
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey"`
+	DeviceID    uint      `gorm:"not null"`
+	BootCounter int64     `gorm:"not null"`
+	Sequence    int64     `gorm:"column:sequence;not null"`
+	CreatedAt   time.Time
+	ReceivedAt  time.Time
 }
 
 // DailyUsage 每日用電統計 (對應 basic.report)

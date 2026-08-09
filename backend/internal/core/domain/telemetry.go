@@ -2,48 +2,117 @@ package domain
 
 import (
 	"time"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
-// AlertLog 警報紀錄 (對應 basic.warn)
-// 這裡我們雖然正規化了，但為了保留「案發當下」的數據，還是會存 Voltage/Current
+// AlertLog records a notification generated from a telemetry reading.
 type AlertLog struct {
-	ID        uint64    `gorm:"primaryKey"`
-	DeviceID  uint      `gorm:"index;not null"`
-	
-	Type      string    `gorm:"size:50"` // 警報類型 (e.g., OVER_USAGE, CURFEW)
-	Message   string    // 備註/訊息 (memo)
-	
-	// 案發當下的快照 (Snapshot)
+	ID        uint64 `gorm:"primaryKey"`
+	DeviceID  uint   `gorm:"index;not null"`
+	Type      string `gorm:"size:50"`
+	Message   string
 	Voltage   float64   `gorm:"type:numeric(5,2)"`
 	Current   float64   `gorm:"type:numeric(5,2)"`
 	Power     float64   `gorm:"type:numeric(8,2)"`
-	
-	IsRead    bool      `gorm:"default:false"` // 是否已讀
-	CreatedAt time.Time `gorm:"index"`         // 發生時間
+	IsRead    bool      `gorm:"default:false"`
+	CreatedAt time.Time `gorm:"index"`
 }
 
-// PowerReading 電力數據 (Raw Data)
+// PowerReading is the canonical persisted telemetry model. The domain package
+// is the runtime source of truth; data/models/schema.go mirrors it for the
+// legacy schema package until that package is removed.
 type PowerReading struct {
-	ID        uint64    `gorm:"primaryKey"`
-	Time      time.Time `gorm:"index;not null"`
-	DeviceID  uint      `gorm:"index;not null"`
-	
-	Voltage   float64   `gorm:"type:numeric(5,2)"`
-	Current   float64   `gorm:"type:numeric(5,2)"`
-	Power     float64   `gorm:"type:numeric(8,2)"`
-	KwhTotal  float64   `gorm:"type:numeric(10,3)"` // 設備回傳的累計度數
+	ID uint64 `gorm:"primaryKey"`
+	// Time is retained for compatibility with the pre-migration backend.
+	Time               time.Time  `gorm:"column:time"`
+	RecordedAt         time.Time  `gorm:"column:recorded_at;not null"`
+	ReceivedAt         time.Time  `gorm:"column:received_at"`
+	MeasurementPointID *uuid.UUID `gorm:"column:measurement_point_id;index"`
+	DeviceID           uint       `gorm:"index;not null"`
+
+	Voltage        float64  `gorm:"type:numeric(5,2)"`
+	Current        float64  `gorm:"type:numeric(5,2)"`
+	Power          float64  `gorm:"type:numeric(8,2)"` // legacy name
+	ActivePower    float64  `gorm:"column:active_power;type:numeric(8,2)"`
+	KwhTotal       float64  `gorm:"type:numeric(10,3)"`
+	EnergyDeltaKwh *float64 `gorm:"type:numeric(10,6)"`
+
+	PowerFactor           *float64 `gorm:"type:numeric(5,4)"`
+	RSSI                  *int     `gorm:"column:rssi"`
+	ProtocolVersion       int      `gorm:"default:0"`
+	BootID                string   `gorm:"size:80"`
+	BootCounter           *int64
+	Sequence              *int64 `gorm:"column:sequence"`
+	ValidSamples          *int   `gorm:"column:valid_samples"`
+	InvalidSamples        *int   `gorm:"column:invalid_samples"`
+	FirmwareVersion       string `gorm:"column:firmware_version;size:80"`
+	LegacyFirmwareVersion string `gorm:"column:fw;size:80"`
 }
 
-// DailyUsage 每日用電統計 (對應 basic.report)
-// 這是透過排程計算出來的結果，查詢速度快
+// BeforeCreate keeps legacy writers compatible while the runtime ingest path
+// is migrated. It does not resolve assignments or perform deduplication.
+func (p *PowerReading) BeforeCreate(_ *gorm.DB) error {
+	if p.RecordedAt.IsZero() {
+		if !p.Time.IsZero() {
+			p.RecordedAt = p.Time
+		} else {
+			p.RecordedAt = time.Now().UTC()
+		}
+	}
+	if p.Time.IsZero() {
+		p.Time = p.RecordedAt
+	}
+	if p.ReceivedAt.IsZero() {
+		p.ReceivedAt = time.Now().UTC()
+	}
+	if p.ActivePower == 0 && p.Power != 0 {
+		p.ActivePower = p.Power
+	}
+	return nil
+}
+
+// MeasurementPoint is the permanent logical identity for a monitored point.
+// Shop is the current compatibility implementation of the Site role.
+type MeasurementPoint struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	ShopID    uint      `gorm:"column:shop_id;not null;index"`
+	Name      string    `gorm:"size:100;not null"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// DeviceAssignment records a historical half-open [ValidFrom, ValidTo)
+// relationship. Exclusion constraints are owned by SQL migrations.
+type DeviceAssignment struct {
+	ID                 uuid.UUID `gorm:"type:uuid;primaryKey"`
+	DeviceID           uint      `gorm:"index;not null"`
+	MeasurementPointID uuid.UUID `gorm:"column:measurement_point_id;index;not null"`
+	ValidFrom          time.Time `gorm:"not null"`
+	ValidTo            *time.Time
+	CreatedAt          time.Time
+}
+
+// TelemetryIngestKey is the ordinary PostgreSQL idempotency boundary.
+type TelemetryIngestKey struct {
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey"`
+	DeviceID    uint      `gorm:"not null"`
+	BootCounter int64     `gorm:"not null"`
+	Sequence    int64     `gorm:"column:sequence;not null"`
+	CreatedAt   time.Time
+	ReceivedAt  time.Time
+}
+
+// DailyUsage is a derived daily aggregate.
 type DailyUsage struct {
-	ID        uint64    `gorm:"primaryKey"`
-	Date      string    `gorm:"index;size:10"` // YYYY-MM-DD
-	DeviceID  uint      `gorm:"index;uniqueIndex:idx_daily_device"` // 複合唯一索引: 每天每設備只有一筆
-	
-	KwhUsage  float64   `gorm:"type:numeric(10,3)"` // 當日用電量 (degree)
-	CarbonKg  float64   `gorm:"type:numeric(10,3)"` // 當日碳排
-	
+	ID       uint64 `gorm:"primaryKey"`
+	Date     string `gorm:"index;size:10"`
+	DeviceID uint   `gorm:"index;uniqueIndex:idx_daily_device"`
+
+	KwhUsage float64 `gorm:"type:numeric(10,3)"`
+	CarbonKg float64 `gorm:"type:numeric(10,3)"`
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

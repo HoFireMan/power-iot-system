@@ -1,0 +1,69 @@
+package simulator
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+func TestGeneratorProducesProtocolV1Telemetry(t *testing.T) {
+	generator, err := NewGenerator("aa:bb:cc:dd:ee:ff", "test-fw", 7, 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := generator.Next(time.Unix(1786021200, 0), 5*time.Second)
+	if !telemetry.IsPhysicallyConsistent() {
+		t.Fatalf("inconsistent telemetry: %+v", telemetry)
+	}
+	if telemetry.MAC != "AABBCCDDEEFF" || telemetry.ProtocolVersion != 1 || telemetry.Sequence != 123 || telemetry.BootCounter != 7 {
+		t.Fatalf("unexpected identity: %+v", telemetry)
+	}
+	body, err := json.Marshal(telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"mac"`, `"v"`, `"c"`, `"p"`, `"kwh"`, `"ts"`, `"protocol_version"`, `"boot_id"`, `"boot_counter"`, `"seq"`, `"pf"`, `"energy_delta_kwh"`, `"rssi"`, `"valid_samples"`, `"invalid_samples"`, `"fw"`} {
+		if !contains(string(body), field) {
+			t.Errorf("missing field %s in %s", field, body)
+		}
+	}
+}
+
+func TestGeneratorSequenceAndKwhIncrease(t *testing.T) {
+	generator, err := NewGenerator(DefaultMAC, "test-fw", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := generator.Next(time.Now(), time.Second)
+	second := generator.Next(time.Now().Add(time.Second), time.Second)
+	if first.Sequence != 0 || second.Sequence != 1 {
+		t.Fatalf("sequence did not increment: %d, %d", first.Sequence, second.Sequence)
+	}
+	if second.Kwh < first.Kwh {
+		t.Fatalf("kWh decreased: %f -> %f", first.Kwh, second.Kwh)
+	}
+}
+
+func TestDuplicateIdentityCanBeReusedByCaller(t *testing.T) {
+	generator, err := NewGenerator(DefaultMAC, "test-fw", 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := generator.Next(time.Now(), time.Second)
+	duplicate := first
+	if duplicate.BootCounter != first.BootCounter || duplicate.Sequence != first.Sequence {
+		t.Fatalf("duplicate identity changed: %+v vs %+v", first, duplicate)
+	}
+	if generator.Sequence != 11 {
+		t.Fatalf("generator should advance only once, got %d", generator.Sequence)
+	}
+}
+
+func contains(value, needle string) bool {
+	for i := 0; i+len(needle) <= len(value); i++ {
+		if value[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}

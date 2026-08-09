@@ -83,6 +83,15 @@ docker-compose.override.yml
 
 ==========================
 
+Public documentation policy
+
+# Internal documentation stays local; only the repository landing page is public.
+/docs/
+*.md
+!/README.md
+
+==========================
+
 專案機密/規劃文件 (不需上傳)
 
 ==========================

@@ -1,176 +1,455 @@
-// #C:\Code\PowerWork\power-iot-system\backend\internal\core\iot\mqtt_service.go
 package iot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"gorm.io/gorm"
-	
-	// ✅ 正確引用：使用新的 domain package
+
 	"power-iot-backend/internal/core/domain"
 )
 
-// MqttPayload 定義硬體傳來的 JSON 格式
-type MqttPayload struct {
-	MacAddress string  `json:"mac"`
-	Voltage    float64 `json:"v"`
-	Current    float64 `json:"c"`
-	Power      float64 `json:"p"`
-	KwhTotal   float64 `json:"kwh"`
-	Timestamp  int64   `json:"ts"` // Unix Timestamp
+type messagePublisher interface {
+	Publish(topic string, qos byte, retained bool, payload interface{}) mqtt.Token
+}
+
+type queuedMessage struct {
+	message    mqtt.Message
+	receivedAt time.Time
 }
 
 type MqttService struct {
-	client mqtt.Client
-	db     *gorm.DB
+	client             mqtt.Client
+	ackPublisher       messagePublisher
+	db                 *gorm.DB // retained for the legacy compatibility path
+	ingestor           *TelemetryIngestor
+	config             MqttConfig
+	work               chan queuedMessage
+	workersOnce        sync.Once
+	clock              func() time.Time
+	stateMu            sync.RWMutex
+	connected          bool
+	subscriptionsReady bool
 }
 
-// NewMqttService 初始化 MQTT 客戶端
+// NewMqttService is retained for callers that used the old constructor. New
+// deployments should use NewMqttServiceWithConfig and a tls:// broker URL.
 func NewMqttService(brokerURL string, db *gorm.DB) *MqttService {
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(brokerURL)
-	opts.SetClientID("go_backend_subscriber")
-	opts.SetAutoReconnect(true)
-	
-	// 連線成功的回調
-	opts.SetOnConnectHandler(func(c mqtt.Client) {
-		fmt.Println("📡 MQTT Broker 已連線！")
-	})
-	// 連線丟失的回調
-	opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
-		fmt.Printf("⚠️ MQTT 連線中斷: %v\n", err)
-	})
-
-	client := mqtt.NewClient(opts)
-	return &MqttService{
-		client: client,
-		db:     db,
+	config := MqttConfig{BrokerURL: brokerURL, ClientID: "power-iot-backend-" + time.Now().UTC().Format("20060102150405.000000000"), TelemetryTopic: TelemetryTopic, CommandPrefix: CommandPrefix, ConnectTimeout: 10 * time.Second, WorkerCount: 4, QueueSize: 64}
+	s := &MqttService{db: db, ingestor: NewTelemetryIngestor(db), config: config, work: make(chan queuedMessage, config.QueueSize), clock: func() time.Time { return time.Now().UTC() }}
+	client, err := newMQTTClient(config, s.onConnect, s.onConnectionLost)
+	if err != nil {
+		log.Printf("MQTT client setup failed: %v", err)
+		return s
 	}
+	s.client = client
+	return s
 }
 
-// Connect 建立連線
 func (s *MqttService) Connect() error {
-	if token := s.client.Connect(); token.Wait() && token.Error() != nil {
-		return token.Error()
+	s.setConnected(false)
+	if s.client == nil {
+		return errors.New("MQTT client is not configured")
+	}
+	token := s.client.Connect()
+	if !token.Wait() {
+		return errors.New("MQTT connection timed out")
+	}
+	if err := token.Error(); err != nil {
+		s.setConnected(false)
+		return err
 	}
 	return nil
 }
 
-// Subscribe 訂閱設備數據主題
+// Ready reports whether MQTT is connected and all required subscriptions are established.
+func (s *MqttService) Ready() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.connected && s.subscriptionsReady
+}
+
+func (s *MqttService) setConnected(connected bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.connected = connected
+	if !connected {
+		s.subscriptionsReady = false
+	}
+}
+
+func (s *MqttService) setSubscriptionsReady(ready bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.subscriptionsReady = ready
+}
+
+// Subscribe subscribes at QoS 1 and starts a bounded worker pool. MQTT's
+// callback only enqueues work; it never creates a goroutine per message.
 func (s *MqttService) Subscribe() {
-	// 假設硬體上傳的主題是 "device/upload/data"
-	topic := "device/upload/data"
-	token := s.client.Subscribe(topic, 0, s.handleMessage)
-	token.Wait()
-	fmt.Printf("🎧 已訂閱主題: %s\n", topic)
+	s.startWorkers()
+	if !s.Ready() {
+		s.subscribeTopics()
+	}
 }
 
-// handleMessage 處理接收到的訊息 (核心邏輯)
-func (s *MqttService) handleMessage(client mqtt.Client, msg mqtt.Message) {
-	payload := msg.Payload()
-	// fmt.Printf("收到訊息: %s\n", payload) // Debug 用
-
-	var data MqttPayload
-	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Printf("❌ JSON 解析失敗: %v", err)
-		return
-	}
-
-	// 使用 Goroutine 非同步處理，避免阻塞 MQTT 接收線程
-	go s.processData(data)
-}
-
-func (s *MqttService) processData(data MqttPayload) {
-	// 1. 時間校正邏輯
-	// 如果硬體時間 < 2020-01-01 (Timestamp: 1577836800)，視為異常 (NTP 失敗)
-	// 強制使用 Server 當下時間
-	recordTime := time.Unix(data.Timestamp, 0)
-	if data.Timestamp < 1577836800 {
-		fmt.Printf("⚠️ [Time Sync] 設備 %s 時間異常 (%v), 使用 Server Time 校正\n", data.MacAddress, recordTime)
-		recordTime = time.Now()
-	}
-
-	// 2. 查找設備 (使用新的 domain.Device)
-	var device domain.Device
-	// Preload AlertSettings 是為了後續檢查警報用
-	if err := s.db.Preload("AlertSettings").Where("mac_address = ?", data.MacAddress).First(&device).Error; err != nil {
-		// 如果找不到設備，暫時忽略 (或是可以實作自動註冊邏輯)
-		// log.Printf("⚠️ 收到未知設備數據: %s", data.MacAddress)
-		return
-	}
-
-	// 3. 更新設備線上狀態
-	s.db.Model(&device).Updates(map[string]interface{}{
-		"is_online": true,
-		"last_seen": recordTime,
+func (s *MqttService) startWorkers() {
+	s.workersOnce.Do(func() {
+		count := s.config.WorkerCount
+		if count <= 0 {
+			count = 4
+		}
+		for i := 0; i < count; i++ {
+			go func() {
+				for message := range s.work {
+					s.handleQueuedMessage(message)
+				}
+			}()
+		}
 	})
-
-	// 4. 寫入電力數據 (PowerReading)
-	reading := domain.PowerReading{
-		Time:     recordTime,
-		DeviceID: device.ID,
-		Voltage:  data.Voltage,
-		Current:  data.Current,
-		Power:    data.Power,
-		KwhTotal: data.KwhTotal,
-	}
-	if err := s.db.Create(&reading).Error; err != nil {
-		log.Printf("❌ 寫入數據失敗: %v", err)
-	}
-
-	// 5. 檢查是否觸發警報
-	s.checkAlerts(device, data, recordTime)
 }
 
-// checkAlerts 檢查警報規則
-func (s *MqttService) checkAlerts(device domain.Device, data MqttPayload, t time.Time) {
-	settings := device.AlertSettings
-	
-	// 如果沒有設定警報或警報未啟用，直接返回
-	if settings.ID == 0 || !settings.IsEnabled {
+func (s *MqttService) subscribeTopics() bool {
+	if s.client == nil {
+		s.setSubscriptionsReady(false)
+		return false
+	}
+	allReady := true
+	for _, subscription := range []struct {
+		topic   string
+		qos     byte
+		handler mqtt.MessageHandler
+	}{
+		{s.telemetryTopic(), 1, s.handleMessage},
+		{StatusTopic, 1, s.handleMessage},
+	} {
+		var subscribed bool
+		for attempt := 0; attempt < 3; attempt++ {
+			token := s.client.Subscribe(subscription.topic, subscription.qos, subscription.handler)
+			if token.WaitTimeout(5*time.Second) && token.Error() == nil {
+				subscribed = true
+				log.Printf("MQTT subscribed: %s", subscription.topic)
+				break
+			}
+			if token.Error() != nil {
+				log.Printf("MQTT subscribe failed for %s (attempt %d): %v", subscription.topic, attempt+1, token.Error())
+			} else {
+				log.Printf("MQTT subscribe timed out for %s (attempt %d)", subscription.topic, attempt+1)
+			}
+			if attempt < 2 {
+				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
+			}
+		}
+		if !subscribed {
+			allReady = false
+		}
+	}
+	s.setSubscriptionsReady(allReady)
+	return allReady
+}
+
+func (s *MqttService) telemetryTopic() string {
+	if s.config.TelemetryTopic == "" {
+		return TelemetryTopic
+	}
+	return s.config.TelemetryTopic
+}
+
+func (s *MqttService) onConnect(mqtt.Client) {
+	log.Printf("MQTT broker connected")
+	s.setConnected(true)
+	s.startWorkers()
+	if !s.subscribeTopics() {
+		log.Printf("MQTT readiness unavailable: required subscriptions are not ready")
+	}
+}
+
+func (s *MqttService) onConnectionLost(_ mqtt.Client, err error) {
+	s.setConnected(false)
+	log.Printf("MQTT connection lost: %v", err)
+}
+
+func (s *MqttService) currentTime() time.Time {
+	if s.clock != nil {
+		return s.clock().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *MqttService) handleMessage(_ mqtt.Client, msg mqtt.Message) {
+	queued := queuedMessage{message: msg, receivedAt: s.currentTime()}
+	select {
+	case s.work <- queued:
+	default:
+		log.Printf("MQTT processing queue full; dropping message from %s", msg.Topic())
+	}
+}
+
+func (s *MqttService) handleQueuedMessage(queued queuedMessage) {
+	msg := queued.message
+	if msg.Topic() == s.telemetryTopic() {
+		s.processTelemetryAt(msg.Payload(), queued.receivedAt)
 		return
 	}
-
-	// 規則：非營業時間 (Curfew) 偵測
-	if settings.NonUsageStartTime != "" && settings.NonUsageEndTime != "" {
-		currentHM := t.Format("15:04") // 取得目前的 "時:分"
-		inRange := false
-		
-		// 判斷時間區間 (需考慮跨午夜的情況，例如 22:00 到 06:00)
-		if settings.NonUsageStartTime > settings.NonUsageEndTime {
-			// 跨午夜 (e.g., 22:00 ~ 06:00)
-			if currentHM >= settings.NonUsageStartTime || currentHM <= settings.NonUsageEndTime {
-				inRange = true
-			}
-		} else {
-			// 同一天 (e.g., 09:00 ~ 18:00)
-			if currentHM >= settings.NonUsageStartTime && currentHM <= settings.NonUsageEndTime {
-				inRange = true
-			}
-		}
-
-		// 如果在非營業時間內，且功率 > 10W (避免待機誤判)，觸發警報
-		if inRange && data.Power > 10.0 {
-			alert := domain.AlertLog{
-				DeviceID:  device.ID,
-				Type:      "CURFEW_USAGE", // 警報類型代碼
-				Message:   fmt.Sprintf("非營業時間異常運轉 (偵測功率: %.2f W)", data.Power),
-				Voltage:   data.Voltage,
-				Current:   data.Current,
-				Power:     data.Power,
-				CreatedAt: t,
-				IsRead:    false,
-			}
-			
-			// 寫入警報紀錄
-			if err := s.db.Create(&alert).Error; err == nil {
-				fmt.Printf("🚨 [Alert] 設備 %s 觸發非營業時間警報！\n", device.Name)
-				// TODO: 這裡未來可以串接 FCM 推播或 Line Notify
-			}
-		}
+	if strings.HasSuffix(msg.Topic(), "/status") {
+		s.processStatus(msg.Topic(), msg.Payload(), queued.receivedAt)
 	}
+}
+
+func (s *MqttService) processTelemetry(raw []byte) {
+	s.processTelemetryAt(raw, s.currentTime())
+}
+
+func (s *MqttService) processTelemetryAt(raw []byte, receivedAt time.Time) {
+	payload, err := DecodeTelemetry(raw)
+	if err != nil {
+		log.Printf("MQTT telemetry rejected: %v", err)
+		publishDiagnosticRejection(s, raw, "invalid")
+		return
+	}
+	mac, err := NormalizeMAC(payload.MacAddress)
+	if err != nil {
+		return
+	}
+	payload.MacAddress = mac
+	if payload.ProtocolVersion == 1 {
+		result, err := s.telemetryIngest(payload, receivedAt)
+		if err != nil {
+			log.Printf("telemetry transaction failed for %s: %v", mac, err)
+			return
+		}
+		s.publishIngestResult(mac, payload, result)
+		return
+	}
+	if err := s.storeLegacyTelemetry(payload, receivedAt); err != nil {
+		log.Printf("legacy telemetry transaction failed for %s: %v", mac, err)
+	}
+}
+
+// processData remains as a compatibility seam for old package-local callers.
+func (s *MqttService) processData(data MqttPayload) { s.processTelemetryMust(data) }
+func (s *MqttService) processTelemetryMust(data MqttPayload) {
+	data = canonicalPayload(data)
+	mac, err := NormalizeMAC(data.MacAddress)
+	if err != nil {
+		log.Printf("telemetry rejected: %v", err)
+		return
+	}
+	data.MacAddress = mac
+	if data.ProtocolVersion == 1 {
+		result, err := s.telemetryIngest(data, s.currentTime())
+		if err == nil {
+			s.publishIngestResult(mac, data, result)
+		}
+		return
+	}
+	if err := s.storeLegacyTelemetry(data, s.currentTime()); err != nil {
+		log.Printf("legacy telemetry transaction failed: %v", err)
+	}
+}
+
+func canonicalPayload(data MqttPayload) MqttPayload {
+	if data.Sequence == 0 && data.Seq != 0 {
+		data.Sequence = data.Seq
+	}
+	if data.PowerFactor == 0 && data.PF != 0 {
+		data.PowerFactor = data.PF
+	}
+	if data.FirmwareVersion == "" {
+		data.FirmwareVersion = data.FW
+	}
+	return data
+}
+
+func (s *MqttService) telemetryIngest(data MqttPayload, receivedAt time.Time) (IngestResult, error) {
+	if s.ingestor == nil {
+		if s.db == nil {
+			return IngestResult{Status: IngestFailed}, errors.New("database is not configured")
+		}
+		s.ingestor = NewTelemetryIngestor(s.db)
+	}
+	return s.ingestor.Ingest(data, receivedAt)
+}
+
+func (s *MqttService) publishIngestResult(mac string, data MqttPayload, result IngestResult) {
+	switch result.Status {
+	case IngestStored, IngestDuplicate, IngestUnknownDevice, IngestUnknownAssignment:
+		s.publishAck(mac, TelemetryAck{BootCounter: data.BootCounter, Sequence: data.Sequence, Status: string(result.Status)})
+	}
+}
+
+func (s *MqttService) storeLegacyTelemetry(data MqttPayload, receivedAt time.Time) error {
+	data = canonicalPayload(data)
+	if s.db == nil {
+		return errors.New("database is not configured")
+	}
+	recordTime := telemetryTimeAt(data.Timestamp, receivedAt)
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var device domain.Device
+		if err := findDevice(tx, data.MacAddress, &device); err != nil {
+			return err
+		}
+		if err := tx.Model(&domain.Device{}).
+			Where("id = ?", device.ID).
+			Updates(map[string]interface{}{"is_online": true}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&domain.Device{}).
+			Where("id = ? AND (last_seen IS NULL OR last_seen < ?)", device.ID, receivedAt).
+			Update("last_seen", receivedAt).Error; err != nil {
+			return err
+		}
+		reading := domain.PowerReading{Time: recordTime, RecordedAt: recordTime, ReceivedAt: receivedAt, DeviceID: device.ID, Voltage: data.Voltage, Current: data.Current, Power: data.Power, ActivePower: data.Power, KwhTotal: data.KwhTotal}
+		if err := tx.Create(&reading).Error; err != nil {
+			return err
+		}
+		if err := checkTelemetryAlerts(tx, device, data, recordTime); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func findDevice(tx *gorm.DB, mac string, device *domain.Device) error {
+	return tx.Preload("AlertSettings").Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ?", mac).First(device).Error
+}
+
+func telemetryTime(timestamp int64) time.Time {
+	return telemetryTimeAt(timestamp, time.Now().UTC())
+}
+
+func telemetryTimeAt(timestamp int64, fallback time.Time) time.Time {
+	if timestamp < 1577836800 {
+		return fallback.UTC()
+	}
+	return time.Unix(timestamp, 0).UTC()
+}
+
+func (s *MqttService) publishAck(mac string, ack TelemetryAck) {
+	body, err := json.Marshal(ack)
+	if err != nil {
+		log.Printf("MQTT ACK encode failed: %v", err)
+		return
+	}
+	publisher := s.ackPublisher
+	if publisher == nil {
+		publisher = s.client
+	}
+	if publisher == nil {
+		log.Printf("MQTT ACK not published: client is not configured")
+		return
+	}
+	prefix := s.config.CommandPrefix
+	if prefix == "" {
+		prefix = CommandPrefix
+	}
+	token := publisher.Publish(fmt.Sprintf("%s/%s/telemetry/ack", prefix, mac), 1, false, body)
+	if !token.WaitTimeout(5*time.Second) || token.Error() != nil {
+		log.Printf("MQTT ACK publish failed for %s: %v", mac, token.Error())
+	}
+}
+
+func publishDiagnosticRejection(s *MqttService, raw []byte, status string) {
+	var candidate struct {
+		Mac             string `json:"mac"`
+		ProtocolVersion int    `json:"protocol_version"`
+		BootCounter     int64  `json:"boot_counter"`
+		Sequence        int64  `json:"seq"`
+	}
+	if json.Unmarshal(raw, &candidate) != nil || candidate.ProtocolVersion != 1 {
+		return
+	}
+	mac, err := NormalizeMAC(candidate.Mac)
+	if err != nil {
+		return
+	}
+	s.publishAck(mac, TelemetryAck{BootCounter: candidate.BootCounter, Sequence: candidate.Sequence, Status: status})
+}
+
+func (s *MqttService) processStatus(topic string, raw []byte, receivedAt time.Time) {
+	parts := strings.Split(topic, "/")
+	if len(parts) != 3 {
+		return
+	}
+	topicMAC, err := NormalizeMAC(parts[1])
+	if err != nil {
+		return
+	}
+	var status DeviceStatusPayload
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&status); err != nil {
+		log.Printf("device status rejected for %s: %v", topicMAC, err)
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		log.Printf("device status rejected for %s: trailing JSON data", topicMAC)
+		return
+	}
+	statusMAC := strings.TrimSpace(status.MAC)
+	if statusMAC == "" {
+		statusMAC = strings.TrimSpace(status.DeviceID)
+	}
+	if statusMAC == "" {
+		log.Printf("device status rejected for %s: missing MAC identity", topicMAC)
+		return
+	}
+	statusMAC, err = NormalizeMAC(statusMAC)
+	if err != nil || statusMAC != topicMAC {
+		log.Printf("device status rejected for %s: payload identity does not match topic", topicMAC)
+		return
+	}
+	if s.db == nil {
+		return
+	}
+	if receivedAt.IsZero() {
+		receivedAt = s.currentTime()
+	} else {
+		receivedAt = receivedAt.UTC()
+	}
+	updates := map[string]interface{}{"is_online": status.Online, "last_seen": receivedAt, "boot_id": status.BootID, "firmware_version": status.Firmware, "ip_address": status.IP, "rssi": status.RSSI, "queue_count": status.QueueCount, "safe_mode": status.SafeMode, "time_synced": status.TimeSynced}
+	if err := s.db.Model(&domain.Device{}).
+		Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ? AND (last_seen IS NULL OR last_seen < ?)", topicMAC, receivedAt).
+		Updates(updates).Error; err != nil {
+		log.Printf("device status update failed for %s: %v", topicMAC, err)
+	}
+}
+
+// PublishCommand sends only the explicitly supported non-destructive commands.
+func (s *MqttService) PublishCommand(mac string, command CommandEnvelope) error {
+	canonical, err := NormalizeMAC(mac)
+	if err != nil {
+		return err
+	}
+	if err := command.Validate(time.Now()); err != nil {
+		return err
+	}
+	var publisher messagePublisher = s.client
+	if s.ackPublisher != nil {
+		publisher = s.ackPublisher
+	}
+	if publisher == nil {
+		return errors.New("MQTT client is not configured")
+	}
+	body, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	prefix := s.config.CommandPrefix
+	if prefix == "" {
+		prefix = CommandPrefix
+	}
+	token := publisher.Publish(fmt.Sprintf("%s/%s/command", prefix, canonical), 1, false, body)
+	if !token.WaitTimeout(5 * time.Second) {
+		return errors.New("MQTT command publish timed out")
+	}
+	return token.Error()
 }

@@ -1,38 +1,67 @@
-version: '3.8'
-
 services:
-  # 1. PostgreSQL 資料庫
   db:
-    image: postgres:15-alpine
+    # PostgreSQL 15 with TimescaleDB 2.17.2; the migration owns extension setup.
+    image: timescale/timescaledb:2.17.2-pg15
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
     container_name: power_iot_db
-    restart: always
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: power_iot
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-only-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-power_iot}
       TZ: Asia/Taipei
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-  # 2. MQTT Broker (Mosquitto) - 用於接收 IoT 設備數據
   mqtt:
     image: eclipse-mosquitto:2
     container_name: power_iot_mqtt
-    restart: always
+    restart: unless-stopped
+    # Match the local WSL user so read-only 0600 private keys remain protected
+    # without relying on the image entrypoint to chown bind-mounted files.
+    user: "${MQTT_CONTAINER_UID:-1000}:${MQTT_CONTAINER_GID:-1000}"
+    command: ["mosquitto", "-c", "/run/power-iot/mosquitto/config/mosquitto.conf"]
+    environment:
+      MQTT_HEALTH_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_HEALTH_PASSWORD: ${MQTT_PASSWORD:-}
     ports:
-      - "1883:1883" # MQTT 通訊埠
-      - "9001:9001" # WebSockets 通訊埠 (給網頁用)
+      - "${MQTT_TLS_PORT:-8883}:8883"
     volumes:
-      - ./mosquitto/config:/mosquitto/config
+      # Keep read-only config/cert mounts outside /mosquitto so the image
+      # entrypoint can prepare its writable data/log directories.
+      - ./mosquitto/config:/run/power-iot/mosquitto/config:ro
+      - ./mosquitto/certs:/run/power-iot/mosquitto/certs:ro
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
-    # 建立一個預設設定檔，允許匿名登入 (開發用)
-    entrypoint: >
-      sh -c "echo 'listener 1883' > /mosquitto/config/mosquitto.conf &&
-             echo 'allow_anonymous true' >> /mosquitto/config/mosquitto.conf &&
-             /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 8883 --cafile /run/power-iot/mosquitto/certs/ca.crt -u \"$${MQTT_HEALTH_USERNAME}\" -P \"$${MQTT_HEALTH_PASSWORD}\" -t 'device/+/status' -C 1 -W 2 >/dev/null 2>&1; status=$$?; test $$status -eq 0 -o $$status -eq 27"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ota:
+    image: nginx:1.27-alpine
+    container_name: power_iot_ota
+    profiles: ["ota"]
+    restart: unless-stopped
+    ports:
+      - "${OTA_HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./firmware:/usr/share/nginx/html:ro
+      - ./firmware/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./firmware/certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate --spider -q https://127.0.0.1:8443/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pgdata:

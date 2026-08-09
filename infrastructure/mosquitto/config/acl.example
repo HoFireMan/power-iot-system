@@ -1,0 +1,8 @@
+# Development-only shared account. Production requires one credential and ACL per device.
+user dev-user
+topic readwrite device/upload/data
+topic readwrite device/+/status
+topic readwrite device/+/telemetry/ack
+topic readwrite device/+/command
+topic readwrite device/+/command/ack
+topic readwrite device/+/ota/status
