@@ -47,6 +47,19 @@ type config struct {
 	OfflineWait     time.Duration
 }
 
+type repeatableMACFlag struct {
+	values []string
+}
+
+func (f *repeatableMACFlag) String() string {
+	return strings.Join(f.values, ",")
+}
+
+func (f *repeatableMACFlag) Set(value string) error {
+	f.values = append(f.values, value)
+	return nil
+}
+
 type deviceSimulator struct {
 	// When both locks are needed, acquire publishMu before lifecycleMu.
 	// Shutdown is the sole exception in sequence only: it releases lifecycleMu
@@ -109,6 +122,260 @@ type publishAttempt struct {
 	change <-chan struct{}
 }
 
+type simulatorProcess struct {
+	devices []*deviceSimulator
+}
+
+type deviceResult struct {
+	index     int
+	err       error
+	cancelled bool
+}
+
+func newDeviceSimulator(base config, mac string) (*deviceSimulator, error) {
+	deviceConfig := base
+	deviceConfig.MAC = mac
+	if base.RecordedAt != nil {
+		recordedAt := *base.RecordedAt
+		deviceConfig.RecordedAt = &recordedAt
+	}
+	generator, err := simulator.NewGenerator(mac, deviceConfig.FirmwareVersion, deviceConfig.BootCounter, deviceConfig.StartSequence)
+	if err != nil {
+		return nil, err
+	}
+	queueCapacity := deviceConfig.QueueCapacity
+	if queueCapacity == 0 {
+		queueCapacity = defaultQueueCapacity
+	}
+	queue, err := simulator.NewTelemetryQueue(queueCapacity)
+	if err != nil {
+		return nil, err
+	}
+	return &deviceSimulator{
+		config:               deviceConfig,
+		generator:            generator,
+		pending:              make(map[ackKey][]chan simulator.Ack),
+		readyEvents:          make(chan struct{}, 4),
+		queue:                queue,
+		ackEpoch:             make(map[chan simulator.Ack]uint64),
+		ackQueueItem:         make(map[chan simulator.Ack]bool),
+		ackAttempt:           make(map[chan simulator.Ack]bool),
+		ackAttemptAuthorized: make(map[chan simulator.Ack]bool),
+		ackAuthorized:        make(map[ackKey]bool),
+		deferredACK:          make(map[ackKey]simulator.Ack),
+	}, nil
+}
+
+func normalizeConfiguredMACs(base config, rawMACs []string) ([]string, error) {
+	if len(rawMACs) == 0 {
+		rawMACs = []string{base.MAC}
+	}
+	canonicalMACs := make([]string, len(rawMACs))
+	seen := make(map[string]int, len(rawMACs))
+	for i, rawMAC := range rawMACs {
+		canonical, err := simulator.NormalizeMAC(rawMAC)
+		if err != nil {
+			return nil, fmt.Errorf("device MAC %q: %w", rawMAC, err)
+		}
+		if previous, exists := seen[canonical]; exists {
+			return nil, fmt.Errorf("duplicate device MAC %q normalizes to %q (already configured at position %d)", rawMAC, canonical, previous)
+		}
+		seen[canonical] = i
+		canonicalMACs[i] = canonical
+	}
+	return canonicalMACs, nil
+}
+
+func startConfiguredDevices(ctx context.Context, base config, rawMACs []string, connectFn func(*deviceSimulator) error) (*simulatorProcess, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	canonicalMACs, err := normalizeConfiguredMACs(base, rawMACs)
+	if err != nil {
+		return nil, err
+	}
+	process := &simulatorProcess{devices: make([]*deviceSimulator, 0, len(canonicalMACs))}
+	for _, mac := range canonicalMACs {
+		device, err := newDeviceSimulator(base, mac)
+		if err != nil {
+			process.shutdown()
+			return nil, fmt.Errorf("device %s: %w", mac, err)
+		}
+		process.devices = append(process.devices, device)
+	}
+	if base.Mode == "offline-replay" {
+		for _, device := range process.devices {
+			device.prepareOfflineQueue()
+		}
+		if base.OfflineWait > 0 {
+			log.Printf("OFFLINE_BUFFER waiting=%s before MQTTS connect", base.OfflineWait)
+			timer := time.NewTimer(base.OfflineWait)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				process.shutdown()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		process.shutdown()
+		return nil, err
+	}
+	if err := process.connectAll(ctx, connectFn); err != nil {
+		process.shutdown()
+		return nil, err
+	}
+	return process, nil
+}
+
+func (p *simulatorProcess) connectAll(ctx context.Context, connectFn func(*deviceSimulator) error) error {
+	if p == nil {
+		return errors.New("simulator process is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if connectFn == nil {
+		connectFn = (*deviceSimulator).connect
+	}
+	results := make(chan deviceResult, len(p.devices))
+	var group sync.WaitGroup
+	for index, device := range p.devices {
+		group.Add(1)
+		go func(index int, device *deviceSimulator) {
+			defer group.Done()
+			if err := ctx.Err(); err != nil {
+				results <- deviceResult{index: index, err: err}
+				return
+			}
+			results <- deviceResult{index: index, err: connectFn(device)}
+		}(index, device)
+	}
+	group.Wait()
+	close(results)
+
+	resultByIndex := make([]error, len(p.devices))
+	for result := range results {
+		resultByIndex[result.index] = result.err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var startupErrors []error
+	for index, err := range resultByIndex {
+		if err == nil {
+			continue
+		}
+		startupErrors = append(startupErrors, fmt.Errorf("device %s: %w", p.devices[index].generator.MAC, err))
+	}
+	if len(startupErrors) > 0 {
+		return errors.Join(startupErrors...)
+	}
+	return nil
+}
+
+func (p *simulatorProcess) run(ctx context.Context) error {
+	if p == nil {
+		return errors.New("simulator process is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		p.shutdown()
+		return nil
+	}
+
+	shutdownOnCancel := make(chan struct{})
+	shutdownWatcherDone := make(chan struct{})
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		// sync.Once also waits for an in-flight shutdown, so a caller that
+		// observes cancellation cannot return while the watcher is still
+		// publishing offline status or disconnecting devices.
+		shutdownOnce.Do(p.shutdown)
+	}
+	go func() {
+		defer close(shutdownWatcherDone)
+		select {
+		case <-ctx.Done():
+			shutdown()
+		case <-shutdownOnCancel:
+			// Cancellation can race with the normal-completion signal. Check
+			// again before letting the watcher exit so it cannot miss shutdown.
+			if ctx.Err() != nil {
+				shutdown()
+			}
+		}
+	}()
+	defer func() {
+		close(shutdownOnCancel)
+		<-shutdownWatcherDone
+		// If cancellation raced with group completion, the watcher may have
+		// selected shutdownOnCancel. The Once call either performs or waits
+		// for the one process-local shutdown before run returns.
+		if ctx.Err() != nil {
+			shutdown()
+		}
+	}()
+
+	results := make(chan deviceResult, len(p.devices))
+	var group sync.WaitGroup
+	for index, device := range p.devices {
+		group.Add(1)
+		go func(index int, device *deviceSimulator) {
+			defer group.Done()
+			err := device.run(ctx)
+			results <- deviceResult{index: index, err: err, cancelled: ctx.Err() != nil}
+		}(index, device)
+	}
+	group.Wait()
+	close(results)
+	if ctx.Err() != nil {
+		shutdown()
+	}
+
+	resultByIndex := make([]error, len(p.devices))
+	for result := range results {
+		if result.err == nil || result.cancelled || errors.Is(result.err, context.Canceled) || errors.Is(result.err, context.DeadlineExceeded) {
+			continue
+		}
+		resultByIndex[result.index] = result.err
+	}
+	var runErrors []error
+	for index, err := range resultByIndex {
+		if err != nil {
+			runErrors = append(runErrors, fmt.Errorf("device %s: %w", p.devices[index].generator.MAC, err))
+		}
+	}
+	return errors.Join(runErrors...)
+}
+
+func (p *simulatorProcess) shutdown() {
+	if p == nil {
+		return
+	}
+	var group sync.WaitGroup
+	for _, device := range p.devices {
+		if device == nil {
+			continue
+		}
+		group.Add(1)
+		go func(device *deviceSimulator) {
+			defer group.Done()
+			device.shutdown()
+		}(device)
+	}
+	group.Wait()
+}
+
 func (e *ackWaitError) Error() string {
 	if e.timeout {
 		return "ACK timeout"
@@ -117,52 +384,42 @@ func (e *ackWaitError) Error() string {
 }
 
 func main() {
-	cfg, err := parseConfig()
+	cfg, rawMACs, err := parseConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
-	generator, err := simulator.NewGenerator(cfg.MAC, cfg.FirmwareVersion, cfg.BootCounter, cfg.StartSequence)
-	if err != nil {
-		log.Fatal(err)
-	}
-	queue, err := simulator.NewTelemetryQueue(cfg.QueueCapacity)
-	if err != nil {
-		log.Fatal(err)
-	}
-	device := &deviceSimulator{
-		config:      cfg,
-		generator:   generator,
-		pending:     make(map[ackKey][]chan simulator.Ack),
-		readyEvents: make(chan struct{}, 4),
-		queue:       queue,
-		ackEpoch:    make(map[chan simulator.Ack]uint64),
-	}
-	if cfg.Mode == "offline-replay" {
-		device.prepareOfflineQueue()
-		if cfg.OfflineWait > 0 {
-			log.Printf("OFFLINE_BUFFER waiting=%s before MQTTS connect", cfg.OfflineWait)
-			time.Sleep(cfg.OfflineWait)
-		}
-	}
-	if err := device.connect(); err != nil {
-		log.Fatal(err)
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	defer device.shutdown()
-	if err := device.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runMain(cfg, rawMACs); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func parseConfig() (config, error) {
+func runMain(cfg config, rawMACs []string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	process, err := startConfiguredDevices(ctx, cfg, rawMACs, nil)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return fmt.Errorf("device simulator startup failed: %w", err)
+	}
+	defer process.shutdown()
+	if err := process.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("device simulator failed: %w", err)
+	}
+	return nil
+}
+
+func parseConfig() (config, []string, error) {
 	cfg := config{}
+	var rawMACs repeatableMACFlag
 	flag.StringVar(&cfg.Mode, "mode", envOr("SIMULATOR_MODE", "once"), "once|continuous|duplicate|invalid|offline-replay|reconnect")
 	flag.StringVar(&cfg.BrokerURL, "mqtt-broker-url", envOr("MQTT_BROKER_URL", ""), "MQTTS broker URL, for example tls://127.0.0.1:8883")
 	flag.StringVar(&cfg.Username, "mqtt-username", envOr("MQTT_USERNAME", ""), "MQTT username")
 	flag.StringVar(&cfg.Password, "mqtt-password", envOr("MQTT_PASSWORD", ""), "MQTT password")
 	flag.StringVar(&cfg.CAFile, "mqtt-ca-file", envOr("MQTT_CA_FILE", ""), "PEM CA file used to verify the broker")
-	flag.StringVar(&cfg.MAC, "device-mac", envOr("DEVICE_MAC", simulator.DefaultMAC), "device MAC")
+	cfg.MAC = envOr("DEVICE_MAC", simulator.DefaultMAC)
+	flag.Var(&rawMACs, "device-mac", "device MAC (repeatable)")
 	flag.StringVar(&cfg.FirmwareVersion, "firmware-version", envOr("FIRMWARE_VERSION", "simulator-1.0.0"), "firmware version reported in telemetry")
 	flag.DurationVar(&cfg.Interval, "publish-interval", durationEnv("PUBLISH_INTERVAL", 5*time.Second), "telemetry interval")
 	flag.Int64Var(&cfg.BootCounter, "boot-counter", int64Env("BOOT_COUNTER", 1), "simulated boot counter")
@@ -179,31 +436,34 @@ func parseConfig() (config, error) {
 	if recordedAtText != "" {
 		recordedAt, err := parseRecordedAt(recordedAtText)
 		if err != nil {
-			return config{}, err
+			return config{}, nil, err
 		}
 		cfg.RecordedAt = recordedAt
 	}
 	cfg.OfflineWait = offlineWaitText
 
 	if !isTLSBroker(cfg.BrokerURL) {
-		return config{}, fmt.Errorf("MQTT broker URL must use tls://; insecure transport is not supported")
+		return config{}, nil, fmt.Errorf("MQTT broker URL must use tls://; insecure transport is not supported")
 	}
 	if strings.TrimSpace(cfg.Username) == "" || cfg.Password == "" {
-		return config{}, fmt.Errorf("MQTT username and password are required")
+		return config{}, nil, fmt.Errorf("MQTT username and password are required")
 	}
 	if strings.TrimSpace(cfg.CAFile) == "" {
-		return config{}, fmt.Errorf("MQTT CA file is required")
+		return config{}, nil, fmt.Errorf("MQTT CA file is required")
 	}
 	if cfg.Interval <= 0 || cfg.AckTimeout <= 0 {
-		return config{}, fmt.Errorf("publish interval and ACK timeout must be positive")
+		return config{}, nil, fmt.Errorf("publish interval and ACK timeout must be positive")
 	}
 	if cfg.BootCounter < 0 || cfg.StartSequence < 0 || cfg.ReplayCount <= 0 || cfg.QueueCapacity <= 0 || cfg.OfflineWait < 0 {
-		return config{}, fmt.Errorf("boot counter, sequence, replay count, queue capacity, and offline wait are invalid")
+		return config{}, nil, fmt.Errorf("boot counter, sequence, replay count, queue capacity, and offline wait are invalid")
 	}
 	if cfg.Mode == "offline-replay" && cfg.ReplayCount > cfg.QueueCapacity {
-		return config{}, fmt.Errorf("offline replay count %d exceeds queue capacity %d", cfg.ReplayCount, cfg.QueueCapacity)
+		return config{}, nil, fmt.Errorf("offline replay count %d exceeds queue capacity %d", cfg.ReplayCount, cfg.QueueCapacity)
 	}
-	return cfg, nil
+	if len(rawMACs.values) == 0 {
+		rawMACs.values = []string{cfg.MAC}
+	}
+	return cfg, rawMACs.values, nil
 }
 
 func (s *deviceSimulator) connect() error {

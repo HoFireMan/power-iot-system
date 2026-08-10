@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,399 @@ import (
 
 	"power-iot-device-simulator/internal/simulator"
 )
+
+func TestBuildDeviceConfigsRejectsExactDuplicateMACBeforeStartup(t *testing.T) {
+	base := config{MAC: simulator.DefaultMAC}
+	var starts atomic.Int32
+	process, err := startConfiguredDevices(context.Background(), base, []string{simulator.DefaultMAC, simulator.DefaultMAC}, func(*deviceSimulator) error {
+		starts.Add(1)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("accepted exact duplicate device MAC")
+	}
+	if process != nil {
+		process.shutdown()
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("duplicate configuration started %d MQTT children", got)
+	}
+}
+
+func TestBuildDeviceConfigsRejectsNormalizedDuplicateMACBeforeStartup(t *testing.T) {
+	base := config{MAC: simulator.DefaultMAC}
+	var starts atomic.Int32
+	process, err := startConfiguredDevices(context.Background(), base, []string{"aa:bb:cc:dd:ee:ff", "AA-BB-CC-DD-EE-FF"}, func(*deviceSimulator) error {
+		starts.Add(1)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("accepted normalized duplicate device MAC")
+	}
+	if process != nil {
+		process.shutdown()
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("normalized duplicate configuration started %d MQTT children", got)
+	}
+}
+
+func TestBuildDeviceConfigsAcceptsDistinctMACsAndPreservesSingleDeviceFallback(t *testing.T) {
+	base := config{MAC: "aa:bb:cc:dd:ee:ff", BootCounter: 1, StartSequence: 1}
+	var starts atomic.Int32
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AA-BB-CC-DD-EE-FF", "112233445566"}, func(*deviceSimulator) error {
+		starts.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.shutdown()
+	if got := len(process.devices); got != 2 {
+		t.Fatalf("device count=%d, want 2", got)
+	}
+	if process.devices[0].generator.MAC != "AABBCCDDEEFF" || process.devices[1].generator.MAC != "112233445566" {
+		t.Fatalf("unexpected canonical device MACs: %q, %q", process.devices[0].generator.MAC, process.devices[1].generator.MAC)
+	}
+	if got := starts.Load(); got != 2 {
+		t.Fatalf("started device count=%d, want 2", got)
+	}
+
+	single, err := startConfiguredDevices(context.Background(), base, nil, func(*deviceSimulator) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer single.shutdown()
+	if len(single.devices) != 1 || single.devices[0].generator.MAC != "AABBCCDDEEFF" {
+		t.Fatalf("single-device fallback changed: %+v", single.devices)
+	}
+}
+
+func TestTwoDeviceACKIsolationWithSameBootAndSequence(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+
+	telemetryA := a.nextTelemetry(time.Unix(1786021200, 0))
+	telemetryB := b.nextTelemetry(time.Unix(1786021200, 0))
+	if telemetryA.BootCounter != 1 || telemetryA.Sequence != 1 || telemetryB.BootCounter != 1 || telemetryB.Sequence != 1 {
+		t.Fatalf("identity collision setup failed: A=%+v B=%+v", telemetryA.Identity(), telemetryB.Identity())
+	}
+	if telemetryA.MAC == telemetryB.MAC {
+		t.Fatal("test devices did not have distinct MACs")
+	}
+
+	resultA := make(chan error, 1)
+	resultB := make(chan error, 1)
+	go func() { resultA <- a.publishAndWait(context.Background(), telemetryA) }()
+	go func() { resultB <- b.publishAndWait(context.Background(), telemetryB) }()
+	waitForCondition(t, func() bool {
+		return clientA.countPublished("device/upload/data") == 1 && clientB.countPublished("device/upload/data") == 1
+	}, "both devices did not publish telemetry")
+
+	ackB := []byte(`{"boot_counter":1,"seq":1,"status":"stored"}`)
+	b.onMessage(clientB, testMQTTMessage{topic: b.ackTopic(), payload: ackB})
+	if got := queueLength(t, b); got != 0 {
+		t.Fatalf("B terminal ACK left B queue length=%d", got)
+	}
+	if got := queueLength(t, a); got != 1 {
+		t.Fatalf("B terminal ACK changed A queue length=%d", got)
+	}
+	select {
+	case err := <-resultB:
+		if err != nil {
+			t.Fatalf("B publish returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("B ACK did not complete B")
+	}
+
+	// A's ACK topic delivered through B's callback is not a legitimate route.
+	b.onMessage(clientB, testMQTTMessage{topic: a.ackTopic(), payload: ackB})
+	if got := queueLength(t, a); got != 1 {
+		t.Fatalf("wrong-topic ACK changed A queue length=%d", got)
+	}
+
+	a.onMessage(clientA, testMQTTMessage{topic: a.ackTopic(), payload: ackB})
+	select {
+	case err := <-resultA:
+		if err != nil {
+			t.Fatalf("A publish returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("A ACK did not complete A")
+	}
+	if got := queueLength(t, a); got != 0 {
+		t.Fatalf("A terminal ACK left A queue length=%d", got)
+	}
+	if got := queueLength(t, b); got != 0 {
+		t.Fatalf("A terminal ACK changed B queue length=%d", got)
+	}
+}
+
+func TestTwoDeviceReadinessEpochAndClientIsolation(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	epochA, epochB := a.sessionEpoch, b.sessionEpoch
+
+	a.onConnectionLost(clientA, errors.New("A disconnect"))
+	if a.isReady() || !b.isReady() {
+		t.Fatal("A disconnect did not isolate readiness")
+	}
+	if a.sessionEpoch == epochA || b.sessionEpoch != epochB {
+		t.Fatalf("disconnect epochs A=%d/%d B=%d/%d", a.sessionEpoch, epochA, b.sessionEpoch, epochB)
+	}
+
+	replacementA := newLifecycleFakeClient()
+	establishReady(t, a, replacementA)
+	if !a.isReady() || !b.isReady() || b.sessionEpoch != epochB || b.client != clientB {
+		t.Fatal("A replacement changed B lifecycle state")
+	}
+	a.onConnectionLost(clientA, errors.New("stale A disconnect"))
+	a.onConnect(clientA)
+	if !b.isReady() || b.sessionEpoch != epochB || b.client != clientB {
+		t.Fatal("stale A callbacks changed B lifecycle state")
+	}
+	b.onConnectionLost(clientB, errors.New("B disconnect"))
+	if a.sessionEpoch == 0 || !a.isReady() {
+		t.Fatal("B disconnect changed A readiness")
+	}
+	if b.isReady() {
+		t.Fatal("B remained ready after its own disconnect")
+	}
+}
+
+func TestBlockedPublishOnADoesNotBlockBLifecycle(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	gate := newPublishCallGate()
+	clientA.setPublishCallGate("device/upload/data", gate)
+	result := make(chan error, 1)
+	go func() { result <- a.publishAndWait(context.Background(), a.nextTelemetry(time.Unix(1786021200, 0))) }()
+	waitClosed(t, gate.started, "A publish did not reach the blocking fake gate")
+	assertReturns(t, func() { b.onConnectionLost(clientB, errors.New("B independent loss")) }, "B lifecycle was blocked by A publish")
+	if b.isReady() {
+		t.Fatal("B remained ready after its own connection loss")
+	}
+	close(gate.release)
+	a.onMessage(clientA, testMQTTMessage{topic: a.ackTopic(), payload: []byte(`{"boot_counter":1,"seq":1,"status":"stored"}`)})
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("A blocked publish did not return after release")
+	}
+}
+
+func TestDeviceQueueTimeoutAndPublishFailureDoNotAffectSibling(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	a.config.AckTimeout = 10 * time.Millisecond
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	queueB, err := b.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queueB.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: b.nextTelemetry(time.Unix(1786021200, 0)), Payload: []byte("b")}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.publishAndWait(context.Background(), a.nextTelemetry(time.Unix(1786021200, 0))); err == nil {
+		t.Fatal("A timeout unexpectedly succeeded")
+	}
+	if got := queueLength(t, b); got != 1 {
+		t.Fatalf("A timeout changed B queue length=%d", got)
+	}
+
+	queueA, err := a.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queueA.Len() == 0 {
+		t.Fatal("A timeout did not retain A queue item")
+	}
+	clientA.setPublishToken("device/upload/data", immediateToken{err: errors.New("A publish failed")})
+	if err := a.replayPending(context.Background()); err == nil {
+		t.Fatal("A publish failure unexpectedly succeeded")
+	}
+	if got := queueLength(t, b); got != 1 {
+		t.Fatalf("A publish failure changed B queue length=%d", got)
+	}
+}
+
+func TestTwoDeviceOfflineReplayAndGeneratorIsolation(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	a.config.ReplayCount = 1
+	b.config.ReplayCount = 1
+	at := a.nextTelemetry(time.Unix(1786021200, 0))
+	bt := b.nextTelemetry(time.Unix(1786021200, 0))
+	if at.Sequence != 1 || bt.Sequence != 1 {
+		t.Fatalf("generators did not independently start at sequence 1: A=%d B=%d", at.Sequence, bt.Sequence)
+	}
+	bSequence := b.generator.Sequence
+	bKwh := b.generator.Kwh
+	a.prepareOfflineQueue()
+	if b.generator.Sequence != bSequence || b.generator.Kwh != bKwh {
+		t.Fatal("A offline preparation mutated B generator state")
+	}
+	aSequence := a.generator.Sequence
+	if err := a.replayPending(context.Background()); err == nil {
+		t.Fatal("A replay unexpectedly ran before A became ready")
+	}
+	if a.generator.Sequence != aSequence || b.generator.Sequence != bSequence {
+		t.Fatal("replay advanced an unrelated generator")
+	}
+
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- a.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return clientA.countPublished("device/upload/data") == 1 }, "A replay did not publish")
+	if got := clientB.countPublished("device/upload/data"); got != 0 {
+		t.Fatalf("A replay published on B client: %d", got)
+	}
+	a.onMessage(clientA, testMQTTMessage{topic: a.ackTopic(), payload: []byte(`{"boot_counter":1,"seq":2,"status":"stored"}`)})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("A replay did not complete")
+	}
+	if b.generator.Sequence != bSequence {
+		t.Fatal("A replay changed B sequence")
+	}
+}
+
+func TestTwoDeviceCommandRoutingIsolation(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	payload := []byte(`{"command_id":"cmd-1","action":"diagnostics","expires_at":4102444800}`)
+	b.onMessage(clientB, testMQTTMessage{topic: a.commandTopic(), payload: payload})
+	if got := clientB.countPublished("device/112233445566/command/ack"); got != 0 {
+		t.Fatalf("wrong-topic command reached B handler: %d", got)
+	}
+	a.onMessage(clientA, testMQTTMessage{topic: a.commandTopic(), payload: payload})
+	b.onMessage(clientB, testMQTTMessage{topic: b.commandTopic(), payload: payload})
+	if got := clientA.countPublished("device/AABBCCDDEEFF/command/ack"); got != 1 {
+		t.Fatalf("A command ACK count=%d, want 1", got)
+	}
+	if got := clientB.countPublished("device/112233445566/command/ack"); got != 1 {
+		t.Fatalf("B command ACK count=%d, want 1", got)
+	}
+}
+
+func TestProcessRunKeepsSiblingAliveAfterDeviceTimeout(t *testing.T) {
+	base := config{Mode: "once", MAC: simulator.DefaultMAC, BootCounter: 1, StartSequence: 1, QueueCapacity: 4, AckTimeout: 10 * time.Millisecond, Interval: time.Second, ReplayCount: 1, CommandAck: true}
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AABBCCDDEEFF", "112233445566"}, func(*deviceSimulator) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.shutdown()
+	clients := []*lifecycleFakeClient{newLifecycleFakeClient(), newLifecycleFakeClient()}
+	establishReady(t, process.devices[0], clients[0])
+	establishReady(t, process.devices[1], clients[1])
+	result := make(chan error, 1)
+	go func() { result <- process.run(context.Background()) }()
+	waitForCondition(t, func() bool { return clients[1].countPublished("device/upload/data") == 1 }, "healthy sibling did not publish")
+	process.devices[1].onMessage(clients[1], testMQTTMessage{topic: process.devices[1].ackTopic(), payload: []byte(`{"boot_counter":1,"seq":1,"status":"stored"}`)})
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "AABBCCDDEEFF") {
+			t.Fatalf("process run error=%v, want A timeout labelled with A MAC", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process run did not wait for sibling completion")
+	}
+	if got := queueLength(t, process.devices[1]); got != 0 {
+		t.Fatalf("healthy sibling queue length=%d", got)
+	}
+}
+
+func TestProcessCancellationShutsDownEveryDevice(t *testing.T) {
+	base := config{Mode: "continuous", MAC: simulator.DefaultMAC, QueueCapacity: 4, AckTimeout: time.Second, Interval: time.Hour, ReplayCount: 1, CommandAck: true}
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AABBCCDDEEFF", "112233445566"}, func(*deviceSimulator) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := []*lifecycleFakeClient{newLifecycleFakeClient(), newLifecycleFakeClient()}
+	establishReady(t, process.devices[0], clients[0])
+	establishReady(t, process.devices[1], clients[1])
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- process.run(ctx) }()
+	waitForCondition(t, func() bool {
+		return clients[0].countPublished("device/upload/data") == 1 && clients[1].countPublished("device/upload/data") == 1
+	}, "continuous devices did not start")
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("root cancellation returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("root cancellation did not stop all devices")
+	}
+	for i, device := range process.devices {
+		stopping := simulatorIsStopping(device)
+		disconnects := clients[i].disconnectCount()
+		offline := clients[i].countStatusTopic(device.statusTopic(), false)
+		if !stopping || disconnects != 1 || offline != 1 {
+			t.Fatalf("device %d did not execute normal shutdown: stopping=%v disconnects=%d offline=%d", i, stopping, disconnects, offline)
+		}
+	}
+}
+
+func TestConnectFailureCleansUpAllOwnedDevices(t *testing.T) {
+	base := config{MAC: simulator.DefaultMAC, QueueCapacity: 4, AckTimeout: time.Second, Interval: time.Second, ReplayCount: 1, CommandAck: true}
+	clients := map[string]*lifecycleFakeClient{
+		"AABBCCDDEEFF": newLifecycleFakeClient(),
+		"112233445566": newLifecycleFakeClient(),
+	}
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AABBCCDDEEFF", "112233445566"}, func(device *deviceSimulator) error {
+		client := clients[device.generator.MAC]
+		if err := device.setClient(client); err != nil {
+			return err
+		}
+		device.onConnect(client)
+		if device.generator.MAC == "AABBCCDDEEFF" {
+			return errors.New("injected connect failure")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("connect failure unexpectedly succeeded")
+	}
+	if process != nil {
+		process.shutdown()
+	}
+	for mac, client := range clients {
+		if client.disconnectCount() != 1 {
+			t.Fatalf("device %s disconnect count=%d, want 1", mac, client.disconnectCount())
+		}
+	}
+}
 
 func TestParseRecordedAt(t *testing.T) {
 	recordedAt, err := parseRecordedAt("2026-08-08T04:00:01+08:00")
@@ -1079,18 +1474,35 @@ func TestShutdownIsTerminalWhileOnConnectIsPaused(t *testing.T) {
 }
 
 func newLifecycleDevice(t *testing.T) *deviceSimulator {
+	return newLifecycleDeviceWithMAC(t, simulator.DefaultMAC)
+}
+
+func newLifecycleDeviceWithMAC(t *testing.T, mac string) *deviceSimulator {
 	t.Helper()
-	generator, err := simulator.NewGenerator(simulator.DefaultMAC, "test-fw", 1, 1)
+	canonical, err := simulator.NormalizeMAC(mac)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator, err := simulator.NewGenerator(canonical, "test-fw", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &deviceSimulator{
-		config:               config{AckTimeout: time.Second},
+		config:               config{MAC: canonical, AckTimeout: time.Second, QueueCapacity: 4, Interval: time.Second, ReplayCount: 1, CommandAck: true},
 		generator:            generator,
 		pending:              make(map[ackKey][]chan simulator.Ack),
 		readyEvents:          make(chan struct{}, 4),
 		mqttOperationTimeout: 100 * time.Millisecond,
 	}
+}
+
+func queueLength(t *testing.T, device *deviceSimulator) int {
+	t.Helper()
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return queue.Len()
 }
 
 func installClient(t *testing.T, device *deviceSimulator, client mqtt.Client) {
@@ -1310,11 +1722,15 @@ func (f *lifecycleFakeClient) countPublished(topic string) int {
 }
 
 func (f *lifecycleFakeClient) countStatus(online bool) int {
+	return f.countStatusTopic("device/"+simulator.DefaultMAC+"/status", online)
+}
+
+func (f *lifecycleFakeClient) countStatusTopic(topic string, online bool) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	count := 0
 	for _, published := range f.published {
-		if value, ok := statusOnline(published.payload); published.topic == "device/"+simulator.DefaultMAC+"/status" && ok && value == online {
+		if value, ok := statusOnline(published.payload); published.topic == topic && ok && value == online {
 			count++
 		}
 	}
