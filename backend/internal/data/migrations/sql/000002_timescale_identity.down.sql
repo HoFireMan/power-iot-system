@@ -5,7 +5,10 @@ BEGIN
        OR EXISTS (SELECT 1 FROM measurement_points LIMIT 1)
        OR EXISTS (SELECT 1 FROM telemetry_ingest_keys LIMIT 1)
        OR EXISTS (SELECT 1 FROM power_readings LIMIT 1) THEN
-        RAISE EXCEPTION 'refusing rollback of Timescale identity migration while affected data exists; restore a backup or use a forward compatibility migration';
+        RAISE EXCEPTION USING
+            ERRCODE = 'P0001',
+            MESSAGE = 'MIGRATION_GUARDED_DOWN',
+            DETAIL = 'refusing rollback of Timescale identity migration while affected data exists; restore a backup or use a forward compatibility migration';
     END IF;
 END
 $$;

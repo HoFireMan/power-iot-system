@@ -1,14 +1,19 @@
 package migrations
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -27,6 +32,100 @@ func testDatabase(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestVersionUsesCustomMetadataTableWithoutCreatingIt(t *testing.T) {
+	dsn := os.Getenv("TEST_MIGRATION_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_MIGRATION_DATABASE_URL is not set; custom migration metadata test requires PostgreSQL")
+	}
+	if err := Up(dsn); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customTable := "writer_fence_version_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	qualified := `"public"."` + customTable + `"`
+	query := parsed.Query()
+	query.Set("x-migrations-table", qualified)
+	query.Set("x-migrations-table-quoted", "true")
+	parsed.RawQuery = query.Encode()
+	customURL := parsed.String()
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before sql.NullString
+	if err := db.Raw("SELECT to_regclass(?)", qualified).Scan(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if before.Valid {
+		t.Fatalf("custom metadata table already exists: %s", before.String)
+	}
+	version, dirty, err := Version(customURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 0 || dirty {
+		t.Fatalf("metadata-free custom Version=%d dirty=%t", version, dirty)
+	}
+	var after sql.NullString
+	if err := db.Raw("SELECT to_regclass(?)", qualified).Scan(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Valid {
+		t.Fatalf("Version created custom metadata table: %s", after.String)
+	}
+	qualifiedSQL := pq.QuoteIdentifier("public") + "." + pq.QuoteIdentifier(customTable)
+	if err := db.Exec("CREATE TABLE " + qualifiedSQL + " (version bigint NOT NULL, dirty boolean NOT NULL)").Error; err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec("DROP TABLE " + qualifiedSQL)
+	if err := db.Exec("INSERT INTO "+qualifiedSQL+" (version, dirty) VALUES (?, ?)", 37, true).Error; err != nil {
+		t.Fatal(err)
+	}
+	version, dirty, err = Version(customURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 37 || !dirty {
+		t.Fatalf("custom metadata Version=%d dirty=%t", version, dirty)
+	}
+}
+
+func TestVersionInspectionTransactionIsDatabaseReadOnly(t *testing.T) {
+	dsn := os.Getenv("TEST_MIGRATION_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_MIGRATION_DATABASE_URL is not set; read-only Version transaction test requires PostgreSQL")
+	}
+	parsed, err := parsePostgresDatabaseURL(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("postgres", parsed.driverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := beginReadOnlyMigrationInspection(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := AcquireSharedWriterFence(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	var readOnly string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(&readOnly); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(readOnly, "on") {
+		t.Fatalf("Version inspection transaction_read_only=%q, want on", readOnly)
+	}
 }
 
 func TestMigrationAndTimescaleMetadata(t *testing.T) {
@@ -302,15 +401,128 @@ func TestMigrationRollbackOnEmptyDatabase(t *testing.T) {
 	if err := Down(dsn); err != nil {
 		t.Fatal(err)
 	}
+	version, dirty, err := Version(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty || version != 3 {
+		t.Fatal(fmt.Sprintf("unexpected one-step DOWN state version=%d dirty=%t", version, dirty))
+	}
 	if err := Up(dsn); err != nil {
 		t.Fatal(err)
 	}
-	version, dirty, err := Version(dsn)
+	version, dirty, err = Version(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dirty || version != 4 {
 		t.Fatal(fmt.Sprintf("unexpected migration state version=%d dirty=%t", version, dirty))
+	}
+}
+
+func TestGenericGuardedDownRecoveryAcrossMigrationVersions(t *testing.T) {
+	dsn := os.Getenv("TEST_MIGRATION_DATABASE_URL")
+	if dsn == "" {
+		t.Fatal("TEST_MIGRATION_DATABASE_URL is required for generic guarded DOWN protocol verification")
+	}
+	if err := Up(dsn); err != nil {
+		t.Fatal(err)
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("TRUNCATE admin_binding_audits, admin_binding_operations").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Down(dsn); err != nil {
+		t.Fatal(err)
+	}
+	if err := Down(dsn); err != nil {
+		t.Fatal(err)
+	}
+	version, dirty, err := Version(dsn)
+	if err != nil || dirty || version != 2 {
+		t.Fatalf("unexpected setup state version=%d dirty=%t err=%v", version, dirty, err)
+	}
+
+	suffix := uuid.NewString()
+	shopCode := "generic-guard-" + suffix[:8]
+	var shopID, deviceID int64
+	if err := db.Raw(`INSERT INTO shops (code, name) VALUES (?, ?) RETURNING id`, shopCode, "Generic Guard Shop").Scan(&shopID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Raw(`INSERT INTO devices (shop_id, mac_address, name) VALUES (?, ?, ?) RETURNING id`, shopID, "AABBCCDDEEFF", "generic-guard-device").Scan(&deviceID).Error; err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		db.Exec("DELETE FROM devices WHERE id = ?", deviceID)
+		db.Exec("DELETE FROM shops WHERE id = ?", shopID)
+		_ = Up(dsn)
+	}()
+
+	downErr := Down(dsn)
+	if !errors.Is(downErr, ErrGuardedDown) {
+		t.Fatalf("expected generic guarded DOWN error, got %v", downErr)
+	}
+	var guardedErr *GuardedDownError
+	if !errors.As(downErr, &guardedErr) {
+		t.Fatalf("expected GuardedDownError, got %v", downErr)
+	}
+	if guardedErr.FromVersion != 2 || guardedErr.ToVersion != 1 || guardedErr.RecoveryError != nil {
+		t.Fatalf("unexpected generic guarded DOWN metadata: %+v", guardedErr)
+	}
+	version, dirty, err = Version(dsn)
+	if err != nil || dirty || version != 2 {
+		t.Fatalf("generic guarded DOWN did not restore truthful state version=%d dirty=%t err=%v", version, dirty, err)
+	}
+}
+
+type fakeMigrationStateStore struct {
+	version  int
+	dirty    bool
+	setCalls int
+}
+
+func (s *fakeMigrationStateStore) Version() (int, bool, error) {
+	return s.version, s.dirty, nil
+}
+
+func (s *fakeMigrationStateStore) SetVersion(version int, dirty bool) error {
+	s.setCalls++
+	s.version = version
+	s.dirty = dirty
+	return nil
+}
+
+func TestUnexpectedDownFailureRemainsDirtyAndVisible(t *testing.T) {
+	store := &fakeMigrationStateStore{version: 11, dirty: true}
+	original := migrationState{version: 12, dirty: false}
+	unexpected := errors.New("unexpected database failure")
+
+	got := handleDownFailure(store, original, 11, unexpected)
+	if !errors.Is(got, unexpected) {
+		t.Fatalf("unexpected failure was not preserved: %v", got)
+	}
+	if got != unexpected {
+		t.Fatalf("unexpected failure was wrapped or replaced: got %v want %v", got, unexpected)
+	}
+	if store.version != 11 || !store.dirty || store.setCalls != 0 {
+		t.Fatalf("unexpected failure changed migration state: version=%d dirty=%t set_calls=%d", store.version, store.dirty, store.setCalls)
+	}
+}
+
+func TestGuardedDownRecoveryUsesVerifiedGenericState(t *testing.T) {
+	store := &fakeMigrationStateStore{version: 17, dirty: true}
+	original := migrationState{version: 42, dirty: false}
+	guard := &pq.Error{Code: pq.ErrorCode(guardedDownSQLState), Message: guardedDownSignal}
+
+	got := handleDownFailure(store, original, 17, guard)
+	if !errors.Is(got, ErrGuardedDown) {
+		t.Fatalf("expected guarded sentinel, got %v", got)
+	}
+	if store.version != 42 || store.dirty || store.setCalls != 1 {
+		t.Fatalf("generic recovery did not restore verified original state: version=%d dirty=%t set_calls=%d", store.version, store.dirty, store.setCalls)
 	}
 }
 
@@ -327,6 +539,20 @@ func TestMigrationRollbackFailsClosedForAuditHistory(t *testing.T) {
 
 	if downErr := Down(dsn); downErr == nil {
 		t.Fatal("DOWN succeeded with durable audit history")
+	} else {
+		if !strings.Contains(downErr.Error(), "MIGRATION_GUARDED_DOWN") {
+			t.Fatalf("guarded DOWN error lost stable signal: %v", downErr)
+		}
+		if !errors.Is(downErr, ErrGuardedDown) {
+			t.Fatalf("guarded DOWN error is not errors.Is(ErrGuardedDown): %v", downErr)
+		}
+		var guardedErr *GuardedDownError
+		if !errors.As(downErr, &guardedErr) {
+			t.Fatalf("guarded DOWN error is not GuardedDownError: %v", downErr)
+		}
+		if guardedErr.FromVersion != 4 || guardedErr.ToVersion != 3 || guardedErr.RecoveryError != nil {
+			t.Fatalf("unexpected guarded DOWN metadata: %+v", guardedErr)
+		}
 	}
 	var auditCount, operationCount int64
 	if err := db.Raw("SELECT count(*) FROM admin_binding_audits").Scan(&auditCount).Error; err != nil {

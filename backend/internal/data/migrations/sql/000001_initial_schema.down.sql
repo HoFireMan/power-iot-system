@@ -12,7 +12,10 @@ BEGIN
        OR EXISTS (SELECT 1 FROM power_readings LIMIT 1)
        OR EXISTS (SELECT 1 FROM alert_logs LIMIT 1)
        OR EXISTS (SELECT 1 FROM daily_usages LIMIT 1) THEN
-        RAISE EXCEPTION 'refusing initial schema rollback while application data exists';
+        RAISE EXCEPTION USING
+            ERRCODE = 'P0001',
+            MESSAGE = 'MIGRATION_GUARDED_DOWN',
+            DETAIL = 'refusing initial schema rollback while application data exists';
     END IF;
 END
 $$;

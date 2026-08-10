@@ -1,6 +1,7 @@
 package iot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"power-iot-backend/internal/core/domain"
+	"power-iot-backend/internal/data/migrations"
 )
 
 // IngestResultStatus is the semantic outcome of a telemetry transaction.
@@ -48,6 +50,13 @@ func NewTelemetryIngestor(db *gorm.DB) *TelemetryIngestor {
 // existing transactional alert work. Terminal ACK mapping remains outside this
 // method and therefore outside the database transaction callback.
 func (i *TelemetryIngestor) Ingest(data MqttPayload, receivedAt time.Time) (IngestResult, error) {
+	return i.IngestContext(context.Background(), data, receivedAt)
+}
+
+func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload, receivedAt time.Time) (IngestResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if i == nil || i.db == nil {
 		return IngestResult{Status: IngestFailed}, errors.New("database is not configured")
 	}
@@ -64,7 +73,12 @@ func (i *TelemetryIngestor) Ingest(data MqttPayload, receivedAt time.Time) (Inge
 	recordedAt := telemetryTimeAt(data.Timestamp, receivedAt)
 	result := IngestResult{Status: IngestFailed}
 
-	err = i.db.Transaction(func(tx *gorm.DB) error {
+	err = i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The shared fence is the first application/database operation. Device
+		// serialization and every identity/assignment query follow admission.
+		if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
+			return err
+		}
 		var device domain.Device
 		if i.beforeDeviceLock != nil {
 			if err := i.beforeDeviceLock(tx); err != nil {

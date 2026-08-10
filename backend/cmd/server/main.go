@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -83,10 +84,19 @@ func envOr(key, fallback string) string {
 }
 
 func initData(db *gorm.DB) {
-	var config domain.SystemConfig
-	if err := db.First(&config, "key = ?", "carbon_factor").Error; err != nil {
-		if createErr := db.Create(&domain.SystemConfig{Key: "carbon_factor", Value: "0.474", Description: "台電電力排碳係數"}).Error; createErr != nil {
-			log.Printf("carbon factor seed failed: %v", createErr)
+	err := db.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+		if err := migrations.AcquireSharedWriterFenceOnGORM(context.Background(), tx); err != nil {
+			return err
 		}
+		var config domain.SystemConfig
+		if err := tx.First(&config, "key = ?", "carbon_factor").Error; err != nil {
+			if createErr := tx.Create(&domain.SystemConfig{Key: "carbon_factor", Value: "0.474", Description: "台電電力排碳係數"}).Error; createErr != nil {
+				return createErr
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("carbon factor seed failed: %v", err)
 	}
 }

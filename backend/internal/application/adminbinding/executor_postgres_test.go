@@ -142,6 +142,28 @@ func TestExecutorCreateMeasurementPointReplayAndRollback(t *testing.T) {
 	}
 }
 
+func TestExecutorCanceledContextAfterAdmissionRollsBack(t *testing.T) {
+	db := openExecutorDB(t)
+	fixture := newExecutorFixture(t, db, 1, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := NewExecutorWithHooks(db, ExecutionHooks{AfterOperationClaim: func() error {
+		cancel()
+		return nil
+	}})
+	cmd := domain.CreateMeasurementPointCommand{ShopID: fixture.shop.ID, Name: "Canceled after admission", RequestIdentity: "canceled-" + uuid.NewString(), Actor: commandActor(fixture)}
+	if _, err := e.CreateMeasurementPoint(ctx, cmd); err == nil {
+		t.Fatal("canceled Admin transaction unexpectedly committed")
+	}
+	var count int64
+	if err := db.Model(&domain.MeasurementPoint{}).Where("shop_id = ? AND name = ?", fixture.shop.ID, cmd.Name).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("canceled Admin transaction left a measurement point")
+	}
+}
+
 func TestExecutorCallerOwnedTransactionDoesNotCommit(t *testing.T) {
 	db := openExecutorDB(t)
 	fixture := newExecutorFixture(t, db, 1, 1)
@@ -473,6 +495,53 @@ func TestAdminTelemetrySharedDeviceSerializationAndBoundary(t *testing.T) {
 	}
 	if reading.MeasurementPointID == nil || *reading.MeasurementPointID != fixture.points[1].ID {
 		t.Fatalf("delayed telemetry crossed Admin boundary: %+v", reading.MeasurementPointID)
+	}
+}
+
+func TestExecutorMutationBlocksAtSharedFenceBeforeDomainRowLock(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set; Admin Binding PostgreSQL integration test not run")
+	}
+	db := openExecutorDB(t)
+	fixture := newExecutorFixture(t, db, 1, 1)
+	fence, err := migrations.OpenExclusiveWriterFence(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reachedDomainLock := make(chan struct{})
+	done := make(chan error, 1)
+	executor := NewExecutorWithHooks(db, ExecutionHooks{BeforeDeviceLock: func(*gorm.DB) error {
+		close(reachedDomainLock)
+		return nil
+	}})
+	go func() {
+		_, err := executor.BindDevice(context.Background(), domain.BindDeviceCommand{
+			DeviceRef: idRef(fixture.devices[0].ID), MeasurementPointID: fixture.points[0].ID,
+			RequestIdentity: "fence-block-" + uuid.NewString(), Actor: commandActor(fixture),
+		})
+		done <- err
+	}()
+	select {
+	case <-reachedDomainLock:
+		t.Fatal("Admin reached domain planning/row-lock hook while exclusive fence was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Admin mutation did not proceed after exclusive release")
+	}
+	select {
+	case <-reachedDomainLock:
+	default:
+		t.Fatal("Admin mutation did not reach the existing domain lock seam after admission")
 	}
 }
 

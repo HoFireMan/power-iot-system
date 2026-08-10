@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -41,54 +42,73 @@ func main() {
 	if err := migrations.Up(dsn); err != nil {
 		log.Fatal("versioned schema migration failed: ", err)
 	}
+	registrationMessage, fixtureMessage, err := seedFixtures(context.Background(), db, mac, *name, uint(*shopID), *measurementPointName, *assignmentFrom)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Print(registrationMessage)
+	fmt.Print(fixtureMessage)
+}
+
+func seedFixtures(ctx context.Context, db *gorm.DB, mac, name string, shopID uint, measurementPointName, assignmentFrom string) (registrationMessage, fixtureMessage string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var device domain.Device
-	result := db.Where("mac_address = ?", mac).First(&device)
-	if result.Error == nil {
-		fmt.Printf("device already registered: %s (%s)\n", mac, device.Name)
-	} else {
-		if result.Error != gorm.ErrRecordNotFound {
-			log.Fatal(result.Error)
-		}
-		device = domain.Device{MacAddress: mac, Name: *name, ShopID: uint(*shopID)}
-		if err := db.Create(&device).Error; err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("registered development device %s (%s)\n", mac, *name)
-	}
-	if strings.TrimSpace(*measurementPointName) == "" {
-		return
-	}
-	if *shopID == 0 {
-		log.Fatal("-shop-id is required when -measurement-point-name is provided")
-	}
-	validFrom := time.Now().UTC()
-	if strings.TrimSpace(*assignmentFrom) != "" {
-		validFrom, err = time.Parse(time.RFC3339, strings.TrimSpace(*assignmentFrom))
-		if err != nil {
-			log.Fatal("invalid -assignment-from: ", err)
-		}
-	}
 	var point domain.MeasurementPoint
-	result = db.Where("shop_id = ? AND name = ?", *shopID, *measurementPointName).First(&point)
-	if result.Error == gorm.ErrRecordNotFound {
-		point = domain.MeasurementPoint{ID: uuid.New(), ShopID: uint(*shopID), Name: *measurementPointName}
-		if err := db.Create(&point).Error; err != nil {
-			log.Fatal(err)
+	var validFrom time.Time
+	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
+			return err
 		}
-	} else if result.Error != nil {
-		log.Fatal(result.Error)
-	}
-	var assignment domain.DeviceAssignment
-	result = db.Where("device_id = ? AND measurement_point_id = ? AND valid_to IS NULL", device.ID, point.ID).First(&assignment)
-	if result.Error == gorm.ErrRecordNotFound {
-		assignment = domain.DeviceAssignment{ID: uuid.New(), DeviceID: device.ID, MeasurementPointID: point.ID, ValidFrom: validFrom}
-		if err := db.Create(&assignment).Error; err != nil {
-			log.Fatal(err)
+		result := tx.Where("mac_address = ?", mac).First(&device)
+		if result.Error == gorm.ErrRecordNotFound {
+			device = domain.Device{MacAddress: mac, Name: name, ShopID: shopID}
+			if err := tx.Create(&device).Error; err != nil {
+				return err
+			}
+			registrationMessage = fmt.Sprintf("registered development device %s (%s)\n", mac, name)
+		} else if result.Error != nil {
+			return result.Error
+		} else {
+			registrationMessage = fmt.Sprintf("device already registered: %s (%s)\n", mac, device.Name)
 		}
-	} else if result.Error != nil {
-		log.Fatal(result.Error)
-	}
-	fmt.Printf("development telemetry fixture: device=%d measurement_point=%s assignment_from=%s\n", device.ID, point.ID, validFrom.UTC().Format(time.RFC3339))
+		if strings.TrimSpace(measurementPointName) == "" {
+			return nil
+		}
+		if shopID == 0 {
+			return fmt.Errorf("-shop-id is required when -measurement-point-name is provided")
+		}
+		validFrom = time.Now().UTC()
+		if strings.TrimSpace(assignmentFrom) != "" {
+			validFrom, err = time.Parse(time.RFC3339, strings.TrimSpace(assignmentFrom))
+			if err != nil {
+				return fmt.Errorf("invalid -assignment-from: %w", err)
+			}
+		}
+		result = tx.Where("shop_id = ? AND name = ?", shopID, measurementPointName).First(&point)
+		if result.Error == gorm.ErrRecordNotFound {
+			point = domain.MeasurementPoint{ID: uuid.New(), ShopID: shopID, Name: measurementPointName}
+			if err := tx.Create(&point).Error; err != nil {
+				return err
+			}
+		} else if result.Error != nil {
+			return result.Error
+		}
+		var assignment domain.DeviceAssignment
+		result = tx.Where("device_id = ? AND measurement_point_id = ? AND valid_to IS NULL", device.ID, point.ID).First(&assignment)
+		if result.Error == gorm.ErrRecordNotFound {
+			assignment = domain.DeviceAssignment{ID: uuid.New(), DeviceID: device.ID, MeasurementPointID: point.ID, ValidFrom: validFrom}
+			if err := tx.Create(&assignment).Error; err != nil {
+				return err
+			}
+		} else if result.Error != nil {
+			return result.Error
+		}
+		fixtureMessage = fmt.Sprintf("development telemetry fixture: device=%d measurement_point=%s assignment_from=%s\n", device.ID, point.ID, validFrom.UTC().Format(time.RFC3339))
+		return nil
+	})
+	return registrationMessage, fixtureMessage, err
 }
 
 func firstNonEmpty(values ...string) string {
