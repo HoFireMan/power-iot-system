@@ -12,6 +12,7 @@ import 'package:power_iot_app/features/admin/domain/repositories/admin_overview_
 import 'package:power_iot_app/features/admin/presentation/providers/admin_overview_provider.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/admin_overview_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/create_measurement_point_screen.dart';
+import 'package:power_iot_app/features/shops/providers/shop_provider.dart';
 
 void main() {
   testWidgets('Admin Overview exposes a create Measurement Point action',
@@ -105,12 +106,100 @@ void main() {
     expect(created.id, isNot(contains('MAC')));
   });
 
-  testWidgets('post-commit response loss is retryable without duplication',
-      (tester) async {
+  test('create identity source persists one command across recreated consumers',
+      () {
+    final source = MockCreateMeasurementPointRequestIdentitySource();
+
+    final firstIdentity = source.identityFor(
+      shopId: ' s1 ',
+      name: ' Kitchen Circuit ',
+    );
+    final recreatedConsumerIdentity = source.identityFor(
+      shopId: 's1',
+      name: 'Kitchen Circuit',
+    );
+
+    expect(recreatedConsumerIdentity, firstIdentity);
+    expect(source.pending?.shopId, 's1');
+    expect(source.pending?.name, 'Kitchen Circuit');
+  });
+
+  test('changed create command gets a new identity', () {
+    final source = MockCreateMeasurementPointRequestIdentitySource();
+
+    final firstIdentity = source.identityFor(shopId: 's1', name: 'Kitchen');
+    final changedIdentity =
+        source.identityFor(shopId: 's1', name: 'Kitchen Circuit');
+
+    expect(changedIdentity, isNot(firstIdentity));
+    expect(source.pending?.requestIdentity, changedIdentity);
+    expect(source.pending?.name, 'Kitchen Circuit');
+  });
+
+  test('response-loss retry through a recreated consumer does not duplicate',
+      () async {
     final repository = MockAdminOverviewRepository()
       ..loseResponseAfterNextCreation = true;
+    final source = MockCreateMeasurementPointRequestIdentitySource();
+    final firstIdentity = source.identityFor(
+      shopId: 's1',
+      name: 'Retry Point',
+    );
 
-    await tester.pumpWidget(_RouterTestApp(repository: repository));
+    await expectLater(
+      repository.createMeasurementPoint(
+        CreateMeasurementPointInput(
+          requestIdentity: firstIdentity,
+          shopId: 's1',
+          name: 'Retry Point',
+        ),
+      ),
+      throwsA(isA<StateError>()),
+    );
+
+    final recreatedConsumerIdentity = source.identityFor(
+      shopId: 's1',
+      name: ' Retry Point ',
+    );
+    final replayed = await repository.createMeasurementPoint(
+      CreateMeasurementPointInput(
+        requestIdentity: recreatedConsumerIdentity,
+        shopId: 's1',
+        name: 'Retry Point',
+      ),
+    );
+    source.complete(recreatedConsumerIdentity);
+    final overview = await repository.loadOverview();
+
+    expect(recreatedConsumerIdentity, firstIdentity);
+    expect(replayed.name, 'Retry Point');
+    expect(
+      overview.measurementPoints.where((point) => point.name == 'Retry Point'),
+      hasLength(1),
+    );
+    expect(source.pending, isNull);
+  });
+
+  testWidgets(
+      'route remount keeps unresolved response-loss creation protected and retries canonical command',
+      (tester) async {
+    final repository = _RecordingCreationRepository()
+      ..loseResponseAfterNextCreation = true;
+    final identitySource = MockCreateMeasurementPointRequestIdentitySource();
+    final container = ProviderContainer(
+      overrides: [
+        adminOverviewRepositoryProvider.overrideWithValue(repository),
+        createMeasurementPointRequestIdentitySourceProvider
+            .overrideWithValue(identitySource),
+        shopProvider.overrideWith((ref) => ShopNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    final router = _createAdminRouter();
+
+    await tester.pumpWidget(
+      _RouterTestApp(router: router, providerContainer: container),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Create Measurement Point'));
     await tester.pumpAndSettle();
@@ -124,25 +213,79 @@ void main() {
 
     expect(find.text('Unable to create Measurement Point. Please try again.'),
         findsOneWidget);
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    expect(find.text('Unable to create Measurement Point. Please try again.'),
-        findsOneWidget);
-
-    var overview = await repository.loadOverview();
+    final pendingBeforeRemount = identitySource.pending;
+    expect(pendingBeforeRemount, isNotNull);
+    expect(pendingBeforeRemount?.shopId, 's1');
+    expect(pendingBeforeRemount?.name, 'Retry Point');
+    expect(repository.requests, hasLength(1));
+    final firstRequest = repository.requests.single;
+    expect(firstRequest.requestIdentity, pendingBeforeRemount?.requestIdentity);
+    expect(firstRequest.shopId, 's1');
+    expect(firstRequest.name, 'Retry Point');
+    final firstIdentity = pendingBeforeRemount?.requestIdentity;
+    final committedBeforeRemount = await repository.loadOverview();
     expect(
-      overview.measurementPoints.where((point) => point.name == 'Retry Point'),
+      committedBeforeRemount.measurementPoints
+          .where((point) => point.name == 'Retry Point'),
       hasLength(1),
     );
+    expect(container.read(shopProvider).currentShop.id, 's1');
+    container.read(shopProvider.notifier).selectShop('s2');
+    expect(container.read(shopProvider).currentShop.id, 's2');
+
+    // Replace the route programmatically: PopScope remains strict while the
+    // failed screen is visible, and the next route gets a fresh widget state.
+    router.go('/admin/mock');
+    await tester.pumpAndSettle();
+    unawaited(router.push('/admin/mock/create-measurement-point'));
+    await tester.pumpAndSettle();
+
+    final recreatedField = tester.widget<TextFormField>(
+      find.byKey(const Key('measurement-point-name-field')),
+    );
+    expect(recreatedField.controller?.text, 'Retry Point');
+    expect(identitySource.pending?.requestIdentity, firstIdentity);
+    expect(recreatedField.enabled, isFalse);
+    final retryButton = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Create Measurement Point'),
+    );
+    expect(retryButton.onPressed, isNotNull);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('New Measurement Point'), findsOneWidget);
+    final pendingAfterBack = tester.widget<TextFormField>(
+      find.byKey(const Key('measurement-point-name-field')),
+    );
+    expect(pendingAfterBack.controller?.text, 'Retry Point');
+    expect(identitySource.pending?.requestIdentity, firstIdentity);
 
     await tester.tap(find.text('Create Measurement Point'));
     await tester.pumpAndSettle();
 
-    overview = await repository.loadOverview();
+    final overview = await repository.loadOverview();
+    expect(repository.requestIdentities, [firstIdentity, firstIdentity]);
+    expect(repository.requests, hasLength(2));
+    final retryRequest = repository.requests[1];
+    expect(retryRequest.requestIdentity, firstRequest.requestIdentity);
+    expect(retryRequest.requestIdentity, firstIdentity);
+    expect(retryRequest.shopId, 's1');
+    expect(retryRequest.shopId, firstRequest.shopId);
+    expect(retryRequest.name, 'Retry Point');
+    expect(retryRequest.name, firstRequest.name);
     expect(
       overview.measurementPoints.where((point) => point.name == 'Retry Point'),
       hasLength(1),
     );
+    expect(identitySource.pending, isNull);
+    expect(find.text('Admin Overview'), findsOneWidget);
+
+    await tester.tap(find.text('Create Measurement Point'));
+    await tester.pumpAndSettle();
+    final editableField = tester.widget<TextFormField>(
+      find.byKey(const Key('measurement-point-name-field')),
+    );
+    expect(editableField.enabled, isTrue);
   });
 
   test('creating a Measurement Point does not mutate device inventory',
@@ -202,33 +345,48 @@ void main() {
   });
 }
 
+GoRouter _createAdminRouter() {
+  return GoRouter(
+    initialLocation: '/admin/mock',
+    routes: [
+      GoRoute(
+        path: '/admin/mock',
+        builder: (context, state) => const AdminOverviewScreen(),
+      ),
+      GoRoute(
+        path: '/admin/mock/create-measurement-point',
+        builder: (context, state) => const CreateMeasurementPointScreen(),
+      ),
+    ],
+  );
+}
+
 class _RouterTestApp extends StatelessWidget {
-  const _RouterTestApp({this.repository});
+  const _RouterTestApp({
+    this.repository,
+    this.router,
+    this.providerContainer,
+  });
 
   final AdminOverviewRepository? repository;
+  final GoRouter? router;
+  final ProviderContainer? providerContainer;
 
   @override
   Widget build(BuildContext context) {
-    final router = GoRouter(
-      initialLocation: '/admin/mock',
-      routes: [
-        GoRoute(
-          path: '/admin/mock',
-          builder: (context, state) => const AdminOverviewScreen(),
-        ),
-        GoRoute(
-          path: '/admin/mock/create-measurement-point',
-          builder: (context, state) => const CreateMeasurementPointScreen(),
-        ),
-      ],
-    );
+    final app =
+        MaterialApp.router(routerConfig: router ?? _createAdminRouter());
+    final container = providerContainer;
+    if (container != null) {
+      return UncontrolledProviderScope(container: container, child: app);
+    }
 
     return ProviderScope(
       overrides: [
         if (repository != null)
           adminOverviewRepositoryProvider.overrideWithValue(repository!),
       ],
-      child: MaterialApp.router(routerConfig: router),
+      child: app,
     );
   }
 }
@@ -286,6 +444,20 @@ class _PendingCreationRepository implements AdminOverviewRepository {
 
   @override
   Future<List<DeviceAssignment>> loadAssignmentHistory() async => const [];
+}
+
+class _RecordingCreationRepository extends MockAdminOverviewRepository {
+  final List<String> requestIdentities = [];
+  final List<CreateMeasurementPointInput> requests = [];
+
+  @override
+  Future<MeasurementPoint> createMeasurementPoint(
+    CreateMeasurementPointInput input,
+  ) {
+    requestIdentities.add(input.requestIdentity);
+    requests.add(input);
+    return super.createMeasurementPoint(input);
+  }
 }
 
 class _RecordingRepository implements AdminOverviewRepository {

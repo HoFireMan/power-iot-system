@@ -23,7 +23,16 @@ class _CreateMeasurementPointScreenState
   final _nameController = TextEditingController();
   bool _isSubmitting = false;
   String? _submissionError;
-  String? _requestIdentity;
+
+  @override
+  void initState() {
+    super.initState();
+    final pending =
+        ref.read(createMeasurementPointRequestIdentitySourceProvider).pending;
+    if (pending != null && pending.name.isNotEmpty) {
+      _nameController.text = pending.name;
+    }
+  }
 
   @override
   void dispose() {
@@ -53,8 +62,15 @@ class _CreateMeasurementPointScreenState
     });
 
     final currentShop = ref.read(shopProvider).currentShop;
-    final requestIdentity = _requestIdentity ??=
-        ref.read(createMeasurementPointRequestIdentitySourceProvider).next();
+    final identitySource =
+        ref.read(createMeasurementPointRequestIdentitySourceProvider);
+    final pending = identitySource.pending;
+    final requestShopId = pending?.shopId ?? currentShop.id;
+    final requestName = pending?.name ?? _nameController.text;
+    final requestIdentity = identitySource.identityFor(
+      shopId: requestShopId,
+      name: requestName,
+    );
     late final String createdName;
     try {
       final point = await ref
@@ -62,11 +78,12 @@ class _CreateMeasurementPointScreenState
           .createMeasurementPoint(
             CreateMeasurementPointInput(
               requestIdentity: requestIdentity,
-              shopId: currentShop.id,
-              name: _nameController.text,
+              shopId: requestShopId,
+              name: requestName,
             ),
           );
       createdName = point.name;
+      identitySource.complete(requestIdentity);
     } catch (_) {
       if (!mounted) {
         return;
@@ -90,9 +107,14 @@ class _CreateMeasurementPointScreenState
   @override
   Widget build(BuildContext context) {
     final currentShop = ref.watch(shopProvider).currentShop;
+    final hasPendingUnresolvedRequest =
+        ref.read(createMeasurementPointRequestIdentitySourceProvider).pending !=
+            null;
 
     return PopScope(
-      canPop: !_isSubmitting && _submissionError == null,
+      canPop: !_isSubmitting &&
+          !hasPendingUnresolvedRequest &&
+          _submissionError == null,
       child: Scaffold(
         appBar: AppBar(title: const Text('New Measurement Point')),
         body: SafeArea(
@@ -106,7 +128,9 @@ class _CreateMeasurementPointScreenState
                 TextFormField(
                   key: const Key('measurement-point-name-field'),
                   controller: _nameController,
-                  enabled: !_isSubmitting && _submissionError == null,
+                  enabled: !_isSubmitting &&
+                      !hasPendingUnresolvedRequest &&
+                      _submissionError == null,
                   decoration: const InputDecoration(
                     labelText: 'Measurement Point name',
                     border: OutlineInputBorder(),

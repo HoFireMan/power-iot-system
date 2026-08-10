@@ -4,8 +4,27 @@ import '../../data/repositories/mock_admin_overview_repository.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
 
+class PendingCreateMeasurementPointRequest {
+  const PendingCreateMeasurementPointRequest({
+    required this.requestIdentity,
+    required this.shopId,
+    required this.name,
+  });
+
+  final String requestIdentity;
+  final String shopId;
+  final String name;
+}
+
 abstract interface class CreateMeasurementPointRequestIdentitySource {
-  String next();
+  PendingCreateMeasurementPointRequest? get pending;
+
+  String identityFor({
+    required String shopId,
+    required String name,
+  });
+
+  void complete(String requestIdentity);
 }
 
 class PendingBindDeviceRequest {
@@ -34,13 +53,41 @@ abstract interface class BindDeviceRequestIdentitySource {
 class MockCreateMeasurementPointRequestIdentitySource
     implements CreateMeasurementPointRequestIdentitySource {
   int _nextIdentity = 1;
+  PendingCreateMeasurementPointRequest? _pending;
 
   @override
-  String next() {
+  PendingCreateMeasurementPointRequest? get pending => _pending;
+
+  @override
+  String identityFor({
+    required String shopId,
+    required String name,
+  }) {
+    final normalizedShopId = shopId.trim();
+    final normalizedName = name.trim();
+    final pending = _pending;
+    if (pending != null &&
+        pending.shopId == normalizedShopId &&
+        pending.name == normalizedName) {
+      return pending.requestIdentity;
+    }
+
     final identity =
         'mock-create-measurement-point-${_nextIdentity.toString().padLeft(3, '0')}';
     _nextIdentity++;
+    _pending = PendingCreateMeasurementPointRequest(
+      requestIdentity: identity,
+      shopId: normalizedShopId,
+      name: normalizedName,
+    );
     return identity;
+  }
+
+  @override
+  void complete(String requestIdentity) {
+    if (_pending?.requestIdentity == requestIdentity) {
+      _pending = null;
+    }
   }
 }
 
