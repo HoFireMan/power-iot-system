@@ -1,6 +1,7 @@
 package iot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"power-iot-backend/internal/core/domain"
+	"power-iot-backend/internal/data/migrations"
 )
 
 type messagePublisher interface {
@@ -291,7 +293,10 @@ func (s *MqttService) storeLegacyTelemetry(data MqttPayload, receivedAt time.Tim
 		return errors.New("database is not configured")
 	}
 	recordTime := telemetryTimeAt(data.Timestamp, receivedAt)
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.db.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+		if err := migrations.AcquireSharedWriterFenceOnGORM(context.Background(), tx); err != nil {
+			return err
+		}
 		var device domain.Device
 		if err := findDevice(tx, data.MacAddress, &device); err != nil {
 			return err
@@ -416,9 +421,15 @@ func (s *MqttService) processStatus(topic string, raw []byte, receivedAt time.Ti
 		receivedAt = receivedAt.UTC()
 	}
 	updates := map[string]interface{}{"is_online": status.Online, "last_seen": receivedAt, "boot_id": status.BootID, "firmware_version": status.Firmware, "ip_address": status.IP, "rssi": status.RSSI, "queue_count": status.QueueCount, "safe_mode": status.SafeMode, "time_synced": status.TimeSynced}
-	if err := s.db.Model(&domain.Device{}).
-		Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ? AND (last_seen IS NULL OR last_seen < ?)", topicMAC, receivedAt).
-		Updates(updates).Error; err != nil {
+	err = s.db.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
+		if err := migrations.AcquireSharedWriterFenceOnGORM(context.Background(), tx); err != nil {
+			return err
+		}
+		return tx.Model(&domain.Device{}).
+			Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ? AND (last_seen IS NULL OR last_seen < ?)", topicMAC, receivedAt).
+			Updates(updates).Error
+	})
+	if err != nil {
 		log.Printf("device status update failed for %s: %v", topicMAC, err)
 	}
 }

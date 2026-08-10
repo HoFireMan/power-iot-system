@@ -1,57 +1,103 @@
 package migrations
 
 import (
-	"errors"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
 
-func TestSecuritySchemaWriterFenceDecisionFailsClosed(t *testing.T) {
-	decision := AssessSecuritySchemaWriterFence()
-
-	if decision.Status != WriterFenceDecisionRequired {
-		t.Fatalf("status=%q, want %q", decision.Status, WriterFenceDecisionRequired)
+func TestCanonicalWriterFenceKeyDerivesCorrectedContract(t *testing.T) {
+	label := "power-iot-system/security-schema-writer-fence/v1"
+	digest := sha256.Sum256([]byte(label))
+	if got := hex.EncodeToString(digest[:]); got != "a0afcd73957843ebabfdb27b0ef07317894a7d6ffd995fe80a5efcc593d950a7" {
+		t.Fatalf("sha256=%s", got)
 	}
-	if decision.ReasonCode != WriterFenceNoApprovedEnforceableWriterAdmission {
-		t.Fatalf("reason_code=%q, want %q", decision.ReasonCode, WriterFenceNoApprovedEnforceableWriterAdmission)
+	if got := hex.EncodeToString(digest[:8]); got != "a0afcd73957843eb" {
+		t.Fatalf("first eight bytes=%s", got)
 	}
-	if decision.FailedGate != WriterFenceGateNewWriterExclusion {
-		t.Fatalf("failed_gate=%q, want %q", decision.FailedGate, WriterFenceGateNewWriterExclusion)
+	if got := CanonicalWriterFenceKey(); got != -6868045010404097045 {
+		t.Fatalf("derived key=%d, want -6868045010404097045", got)
 	}
-	if decision.StageAAdditiveFoundationSafe || decision.ProtectedWorkAllowed {
-		t.Fatalf("decision must fail closed: %+v", decision)
-	}
-	if !decision.RequiresExplicitOperatorDecision {
-		t.Fatal("decision must require an explicit operator/architecture decision")
+	if WriterFenceKey != -6868045010404097045 {
+		t.Fatalf("runtime key=%d, want corrected canonical key", WriterFenceKey)
 	}
 }
 
-func TestSecuritySchemaWriterFenceProtectedWorkIsRefused(t *testing.T) {
-	decision := AssessSecuritySchemaWriterFence()
-	if err := decision.RequireProtectedWork(); !errors.Is(err, ErrWriterFenceDecisionRequired) {
-		t.Fatalf("RequireProtectedWork()=%v, want ErrWriterFenceDecisionRequired", err)
+func TestParsePostgresDatabaseURLPreservesMigrationOptions(t *testing.T) {
+	databaseURL := "postgres://user:pass@example.invalid/power?sslmode=disable&x-migrations-table=%22security%22.%22versions%22&x-migrations-table-quoted=true&x-statement-timeout=1250&x-multi-statement=true&x-multi-statement-max-size=4096"
+	parsed, err := parsePostgresDatabaseURL(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(parsed.driverURL, "x-") {
+		t.Fatalf("driver URL retained golang-migrate options: %s", parsed.driverURL)
+	}
+	if parsed.config.MigrationsTable != `"security"."versions"` || !parsed.config.MigrationsTableQuoted {
+		t.Fatalf("migration table config=%q quoted=%t", parsed.config.MigrationsTable, parsed.config.MigrationsTableQuoted)
+	}
+	if parsed.config.StatementTimeout != 1250*time.Millisecond || !parsed.config.MultiStatementEnabled || parsed.config.MultiStatementMaxSize != 4096 {
+		t.Fatalf("migration options were not preserved: %+v", parsed.config)
+	}
+	schema, table, err := migrationMetadataIdentifiers(parsed.config, "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema != "security" || table != "versions" {
+		t.Fatalf("metadata identifiers=%q.%q", schema, table)
 	}
 }
 
-func TestSecuritySchemaWriterFenceCannotBeFabricatedAsApproved(t *testing.T) {
-	forged := WriterFenceDecision{ProtectedWorkAllowed: true}
-	if err := forged.RequireProtectedWork(); !errors.Is(err, ErrWriterFenceDecisionRequired) {
-		t.Fatalf("forged RequireProtectedWork()=%v, want ErrWriterFenceDecisionRequired", err)
+func TestParsePostgresDatabaseURLAcceptsOneQuotedMetadataIdentifier(t *testing.T) {
+	parsed, err := parsePostgresDatabaseURL("postgres://user:pass@example.invalid/power?x-migrations-table=%22versions%22&x-migrations-table-quoted=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, table, err := migrationMetadataIdentifiers(parsed.config, "public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema != "public" || table != "versions" {
+		t.Fatalf("metadata identifiers=%q.%q", schema, table)
 	}
 }
 
-func TestSecuritySchemaWriterFenceDecisionListsRequiredChoices(t *testing.T) {
+func TestParsePostgresDatabaseURLRejectsMalformedQuotedMetadataIdentifier(t *testing.T) {
+	for _, value := range []string{
+		`foo"bar"`,
+		`"security"."versions"garbage`,
+		`"security"."versions`,
+		`""`,
+		`"security"versions"`,
+		`"security"."versions"."extra"`,
+	} {
+		t.Run(value, func(t *testing.T) {
+			_, err := parsePostgresDatabaseURL("postgres://user:pass@example.invalid/power?x-migrations-table=" + url.QueryEscape(value) + "&x-migrations-table-quoted=true")
+			if err == nil {
+				t.Fatalf("malformed quoted metadata identifier %q was accepted", value)
+			}
+		})
+	}
+}
+
+func TestRequireProtectedWorkNeedsActualExclusiveCapability(t *testing.T) {
 	decision := AssessSecuritySchemaWriterFence()
-	want := []WriterFenceMechanism{
-		WriterFenceManagedDatabaseAdmission,
-		WriterFenceDeploymentOrchestration,
-		WriterFenceApplicationCooperation,
+	if decision.Status != WriterFenceEnforced || !decision.ProtectedWorkAllowed {
+		t.Fatalf("unexpected decision=%+v", decision)
 	}
-	if len(decision.RequiredMechanismDecisions) != len(want) {
-		t.Fatalf("required mechanism count=%d, want %d", len(decision.RequiredMechanismDecisions), len(want))
+	if err := decision.RequireProtectedWork(); err == nil {
+		t.Fatal("protected work must reject missing capability")
 	}
-	for i := range want {
-		if decision.RequiredMechanismDecisions[i] != want[i] {
-			t.Fatalf("required mechanism[%d]=%q, want %q", i, decision.RequiredMechanismDecisions[i], want[i])
-		}
+	if err := decision.RequireProtectedWork(ProtectedWorkCapability{}); err == nil {
+		t.Fatal("protected work must reject zero capability")
+	}
+}
+
+func TestSharedWriterFenceRejectsNonTransactionHandle(t *testing.T) {
+	if err := AcquireSharedWriterFence(context.Background(), nil); err == nil {
+		t.Fatal("nil transaction must fail closed")
 	}
 }

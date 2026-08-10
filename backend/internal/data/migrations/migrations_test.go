@@ -1,9 +1,12 @@
 package migrations
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -29,6 +32,100 @@ func testDatabase(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestVersionUsesCustomMetadataTableWithoutCreatingIt(t *testing.T) {
+	dsn := os.Getenv("TEST_MIGRATION_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_MIGRATION_DATABASE_URL is not set; custom migration metadata test requires PostgreSQL")
+	}
+	if err := Up(dsn); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customTable := "writer_fence_version_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	qualified := `"public"."` + customTable + `"`
+	query := parsed.Query()
+	query.Set("x-migrations-table", qualified)
+	query.Set("x-migrations-table-quoted", "true")
+	parsed.RawQuery = query.Encode()
+	customURL := parsed.String()
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before sql.NullString
+	if err := db.Raw("SELECT to_regclass(?)", qualified).Scan(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if before.Valid {
+		t.Fatalf("custom metadata table already exists: %s", before.String)
+	}
+	version, dirty, err := Version(customURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 0 || dirty {
+		t.Fatalf("metadata-free custom Version=%d dirty=%t", version, dirty)
+	}
+	var after sql.NullString
+	if err := db.Raw("SELECT to_regclass(?)", qualified).Scan(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Valid {
+		t.Fatalf("Version created custom metadata table: %s", after.String)
+	}
+	qualifiedSQL := pq.QuoteIdentifier("public") + "." + pq.QuoteIdentifier(customTable)
+	if err := db.Exec("CREATE TABLE " + qualifiedSQL + " (version bigint NOT NULL, dirty boolean NOT NULL)").Error; err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec("DROP TABLE " + qualifiedSQL)
+	if err := db.Exec("INSERT INTO "+qualifiedSQL+" (version, dirty) VALUES (?, ?)", 37, true).Error; err != nil {
+		t.Fatal(err)
+	}
+	version, dirty, err = Version(customURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 37 || !dirty {
+		t.Fatalf("custom metadata Version=%d dirty=%t", version, dirty)
+	}
+}
+
+func TestVersionInspectionTransactionIsDatabaseReadOnly(t *testing.T) {
+	dsn := os.Getenv("TEST_MIGRATION_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_MIGRATION_DATABASE_URL is not set; read-only Version transaction test requires PostgreSQL")
+	}
+	parsed, err := parsePostgresDatabaseURL(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("postgres", parsed.driverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := beginReadOnlyMigrationInspection(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := AcquireSharedWriterFence(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	var readOnly string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(&readOnly); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(readOnly, "on") {
+		t.Fatalf("Version inspection transaction_read_only=%q, want on", readOnly)
+	}
 }
 
 func TestMigrationAndTimescaleMetadata(t *testing.T) {

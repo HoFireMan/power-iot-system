@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/golang-migrate/migrate/v4/database/postgres"
 )
 
 // RunSecuritySchemaPreflight inventories migration inputs from one PostgreSQL
-// REPEATABLE READ, READ ONLY snapshot. It neither supplies a writer fence nor
-// mutates or approves any legacy authority fact.
+// REPEATABLE READ, READ ONLY snapshot after shared admission. It is diagnostic
+// only and never authorizes protected work.
 func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPreflightResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	result := LegacyDataPreflightResult{
 		SnapshotMode:         SnapshotRepeatableReadOnly,
 		AccountEligibility:   RepresentationNotRepresented,
@@ -21,13 +26,17 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 		WriterFenceDecision:  AssessSecuritySchemaWriterFence(),
 	}
 
+	parsed, err := parsePostgresDatabaseURL(dsn)
+	if err != nil {
+		return result, err
+	}
 	expectedVersion, err := latestEmbeddedMigrationVersion()
 	if err != nil {
 		return result, err
 	}
 	result.Migration.ExpectedVersion = expectedVersion
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", parsed.driverURL)
 	if err != nil {
 		return result, fmt.Errorf("open PostgreSQL for security schema preflight: %w", err)
 	}
@@ -41,6 +50,9 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 		return result, fmt.Errorf("begin security schema preflight snapshot: %w", err)
 	}
 	defer tx.Rollback()
+	if err := AcquireSharedWriterFence(ctx, tx); err != nil {
+		return result, fmt.Errorf("admit security schema preflight snapshot: %w", err)
+	}
 
 	var isolation, readOnly string
 	if err := tx.QueryRowContext(ctx, `
@@ -55,7 +67,7 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 		return result, fmt.Errorf("security schema preflight requires repeatable read/read only; got isolation=%q read_only=%q", isolation, readOnly)
 	}
 
-	metadataRows, err := readMigrationMetadata(ctx, tx)
+	metadataRows, err := readMigrationMetadata(ctx, tx, parsed.config)
 	if err != nil {
 		return result, err
 	}
@@ -104,8 +116,20 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 	return result, nil
 }
 
-func readMigrationMetadata(ctx context.Context, tx *sql.Tx) ([]migrationMetadata, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT version, dirty FROM schema_migrations ORDER BY version`)
+func readMigrationMetadata(ctx context.Context, tx *sql.Tx, config *postgres.Config) ([]migrationMetadata, error) {
+	if config == nil {
+		return nil, errors.New("migration metadata configuration is required")
+	}
+	var schemaName string
+	if err := tx.QueryRowContext(ctx, "SELECT current_schema()").Scan(&schemaName); err != nil {
+		return nil, fmt.Errorf("resolve migration metadata schema for security schema preflight: %w", err)
+	}
+	metadataSchema, metadataTable, err := migrationMetadataIdentifiers(config, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("resolve migration metadata table for security schema preflight: %w", err)
+	}
+	query := "SELECT version, dirty FROM " + quotedMigrationTable(metadataSchema, metadataTable) + " ORDER BY version"
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("read migration state for security schema preflight: %w", err)
 	}
@@ -793,4 +817,94 @@ func timePointer(value sql.NullTime) *time.Time {
 	}
 	result := value.Time.UTC()
 	return &result
+}
+
+// RunExclusiveOwnedSecuritySchemaRecheck reruns the complete diagnostic
+// inventory in a fresh repeatable-read/read-only transaction while the same
+// pinned session owns the exclusive fence. The returned snapshot is evidence
+// for a future protected operation, never a caller-forgeable approval.
+func RunExclusiveOwnedSecuritySchemaRecheck(ctx context.Context, dsn string) (result LegacyDataPreflightResult, err error) {
+	result = LegacyDataPreflightResult{
+		SnapshotMode:         SnapshotRepeatableReadOnly,
+		AccountEligibility:   RepresentationNotRepresented,
+		DeviceOwnerAuthority: RepresentationNotRepresented,
+		WriterFence:          WriterFenceRequiresMigrationOrchestration,
+		WriterFenceDecision:  AssessSecuritySchemaWriterFence(),
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parsed, err := parsePostgresDatabaseURL(dsn)
+	if err != nil {
+		return result, err
+	}
+	result.Migration.ExpectedVersion, err = latestEmbeddedMigrationVersion()
+	if err != nil {
+		return result, err
+	}
+	if err := WithExclusiveWriterFence(ctx, dsn, func(fence *ExclusiveWriterFence) error {
+		capability, err := fence.Capability()
+		if err != nil {
+			return err
+		}
+		if err := RequireProtectedWork(capability); err != nil {
+			return err
+		}
+		tx, err := fence.Conn().BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		var isolation, readOnly string
+		if err := tx.QueryRowContext(ctx, `SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only'), transaction_timestamp()`).Scan(&isolation, &readOnly, &result.ObservedAt); err != nil {
+			return err
+		}
+		result.ObservedAt = result.ObservedAt.UTC()
+		result.ReadOnlyVerified = strings.EqualFold(isolation, "repeatable read") && strings.EqualFold(readOnly, "on")
+		if !result.ReadOnlyVerified {
+			return fmt.Errorf("exclusive-owned recheck requires repeatable read/read only; got isolation=%q read_only=%q", isolation, readOnly)
+		}
+		metadataRows, err := readMigrationMetadata(ctx, tx, parsed.config)
+		if err != nil {
+			return err
+		}
+		result.Migration.MetadataRowCount = len(metadataRows)
+		if len(metadataRows) == 1 {
+			result.Migration.ActualVersion = metadataRows[0].version
+			result.Migration.Dirty = metadataRows[0].dirty
+		} else {
+			result.Migration.ActualVersion = -1
+		}
+		if err := classifyMigrationMetadata(metadataRows, result.Migration.ExpectedVersion); err != nil {
+			return err
+		}
+		if err := collectShopClientFacts(ctx, tx, &result.ShopClient); err != nil {
+			return err
+		}
+		if err := collectMembershipFacts(ctx, tx, &result.Membership); err != nil {
+			return err
+		}
+		if err := collectCurrentShopFacts(ctx, tx, &result.CurrentShop); err != nil {
+			return err
+		}
+		if err := collectUserEligibilityFacts(ctx, tx, &result.Users); err != nil {
+			return err
+		}
+		if err := collectAssignmentFacts(ctx, tx, &result.Assignments, result.ObservedAt); err != nil {
+			return err
+		}
+		if err := collectDeviceOwnershipFacts(ctx, tx, &result.Devices, result.ObservedAt); err != nil {
+			return err
+		}
+		if err := collectAuditProvenanceFacts(ctx, tx, &result.AuditProvenance); err != nil {
+			return err
+		}
+		if err := collectOperationProvenanceFacts(ctx, tx, result.AuditProvenance.Facts, &result.OperationProvenance); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}); err != nil {
+		return result, err
+	}
+	return result, nil
 }

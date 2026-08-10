@@ -1,6 +1,7 @@
 package iot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -323,6 +324,49 @@ func TestStatusMACContractAndIngressTime(t *testing.T) {
 	}
 	if !device.IsOnline || device.BootID != "boot-status" || device.FirmwareVersion != "fw-status" || device.QueueCount == nil || *device.QueueCount != 2 || device.LastSeen == nil || !device.LastSeen.Equal(receivedAt) {
 		t.Fatalf("status was not persisted from formal MAC payload: %+v", device)
+	}
+}
+
+func TestStatusUpdateParticipatesInSharedWriterFence(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set; telemetry integration test not run")
+	}
+	db := openTelemetryIntegrationDB(t)
+	fixture := newTelemetryFixture(t, db)
+	service := &MqttService{db: db, config: MqttConfig{CommandPrefix: CommandPrefix}}
+	body, err := json.Marshal(DeviceStatusPayload{MAC: fixture.first.MacAddress, Online: true, BootID: "fenced-status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence, err := migrations.OpenExclusiveWriterFence(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		service.processStatus("device/"+fixture.first.MacAddress+"/status", body, time.Now().UTC())
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("status update crossed exclusive writer fence")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("status update did not proceed after exclusive release")
+	}
+	var device domain.Device
+	if err := db.First(&device, fixture.first.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if device.BootID != "fenced-status" || !device.IsOnline {
+		t.Fatalf("status update did not commit after admission: %+v", device)
 	}
 }
 

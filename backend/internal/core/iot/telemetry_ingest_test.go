@@ -1,6 +1,7 @@
 package iot
 
 import (
+	"context"
 	"errors"
 	"os"
 	"sort"
@@ -106,6 +107,59 @@ func testPayload(mac string, timestamp int64, boot, sequence int64) MqttPayload 
 		Timestamp: timestamp, ProtocolVersion: 1, BootID: "boot-1", BootCounter: boot,
 		Sequence: sequence, PowerFactor: 0.98, EnergyDeltaKwh: 0.002, RSSI: -60,
 		ValidSamples: 10, InvalidSamples: 1, FirmwareVersion: "test",
+	}
+}
+
+func TestTelemetryIngestBlocksAtSharedFenceBeforeDeviceRowLock(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set; telemetry integration test not run")
+	}
+	db := openTelemetryIntegrationDB(t)
+	fixture := newTelemetryFixture(t, db)
+	recorded := time.Now().UTC().Add(-time.Minute)
+	addAssignment(t, db, fixture.first.ID, fixture.point.ID, recorded.Add(-time.Hour), nil)
+	fence, err := migrations.OpenExclusiveWriterFence(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingestor := NewTelemetryIngestor(db)
+	beforeDevice := make(chan struct{})
+	ingestor.beforeDeviceLock = func(*gorm.DB) error {
+		close(beforeDevice)
+		return nil
+	}
+	resultCh := make(chan struct {
+		result IngestResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := ingestor.IngestContext(context.Background(), testPayload(fixture.first.MacAddress, recorded.Unix(), 90, 1), recorded)
+		resultCh <- struct {
+			result IngestResult
+			err    error
+		}{result, err}
+	}()
+	select {
+	case <-beforeDevice:
+		t.Fatal("telemetry reached Device lock seam while exclusive fence was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-resultCh:
+		if outcome.err != nil || outcome.result.Status != IngestStored {
+			t.Fatalf("telemetry after release result=%+v err=%v", outcome.result, outcome.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("telemetry did not proceed after exclusive release")
+	}
+	select {
+	case <-beforeDevice:
+	default:
+		t.Fatal("telemetry did not reach Device lock seam after admission")
 	}
 }
 

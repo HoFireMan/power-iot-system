@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 func preflightDatabase(t *testing.T) (*sql.DB, string) {
@@ -54,14 +56,61 @@ func TestSecuritySchemaPreflightCleanSnapshotIsReadOnly(t *testing.T) {
 	if result.WriterFence != WriterFenceRequiresMigrationOrchestration {
 		t.Fatalf("writer fence=%q, want orchestration requirement", result.WriterFence)
 	}
-	if result.WriterFenceDecision.Status != WriterFenceDecisionRequired || result.WriterFenceDecision.ProtectedWorkAllowed {
-		t.Fatalf("writer fence decision=%+v, want fail-closed decision required", result.WriterFenceDecision)
+	if result.WriterFenceDecision.Status != WriterFenceEnforced || !result.WriterFenceDecision.ProtectedWorkAllowed {
+		t.Fatalf("writer fence decision=%+v, want cooperative fence capability", result.WriterFenceDecision)
 	}
 	if result.AccountEligibility != RepresentationNotRepresented || result.DeviceOwnerAuthority != RepresentationNotRepresented {
 		t.Fatalf("legacy authority representation was fabricated: auth=%q owner=%q", result.AccountEligibility, result.DeviceOwnerAuthority)
 	}
 	if got := preflightCounts(t, db); got != before {
 		t.Fatalf("preflight changed application/schema counts: before=%+v after=%+v", before, got)
+	}
+}
+
+func TestSecuritySchemaPreflightHonorsCustomQuotedMigrationTable(t *testing.T) {
+	db, dsn := preflightDatabase(t)
+	defer db.Close()
+
+	schemaName := "writer_fence_meta_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	tableName := "MigrationVersion"
+	quotedSchema := pq.QuoteIdentifier(schemaName)
+	quotedTable := pq.QuoteIdentifier(tableName)
+	if _, err := db.Exec("CREATE SCHEMA " + quotedSchema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = db.Exec("DROP SCHEMA " + quotedSchema + " CASCADE") }()
+	if _, err := db.Exec("CREATE TABLE " + quotedSchema + "." + quotedTable + " (version bigint NOT NULL PRIMARY KEY, dirty boolean NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO " + quotedSchema + "." + quotedTable + " (version, dirty) VALUES (4, false)"); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	query.Set("x-migrations-table", fmt.Sprintf(`"%s"."%s"`, schemaName, tableName))
+	query.Set("x-migrations-table-quoted", "true")
+	query.Set("x-statement-timeout", "1250")
+	parsed.RawQuery = query.Encode()
+	customDSN := parsed.String()
+
+	result, err := RunSecuritySchemaPreflight(context.Background(), customDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Migration.MetadataRowCount != 1 || result.Migration.ActualVersion != 4 || result.Migration.Dirty {
+		t.Fatalf("custom preflight migration state=%+v", result.Migration)
+	}
+
+	recheck, err := RunExclusiveOwnedSecuritySchemaRecheck(context.Background(), customDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recheck.Migration.MetadataRowCount != 1 || recheck.Migration.ActualVersion != 4 || recheck.Migration.Dirty {
+		t.Fatalf("custom exclusive recheck migration state=%+v", recheck.Migration)
 	}
 }
 
@@ -250,6 +299,32 @@ func TestSecuritySchemaPreflightSnapshotDoesNotClaimWriterFence(t *testing.T) {
 	}
 	if !containsShopFact(second.ShopClient.Facts, uncommittedShopID) {
 		t.Fatal("preflight did not observe committed writer row on rerun")
+	}
+}
+
+func TestExclusiveOwnedRecheckDoesNotReuseDiagnosticSnapshot(t *testing.T) {
+	db, dsn := preflightDatabase(t)
+	defer db.Close()
+	clientID := insertPreflightInt64(t, db, `INSERT INTO clients (code, name) VALUES ($1, $2) RETURNING id`, "preflight-recheck-client-"+uniquePreflightSuffix(), "Recheck Client")
+	defer execPreflight(t, db, `DELETE FROM clients WHERE id = $1`, clientID)
+	before, err := RunSecuritySchemaPreflight(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shopID := insertPreflightInt64(t, db, `INSERT INTO shops (client_id, code, name) VALUES ($1, $2, $3) RETURNING id`, clientID, "preflight-recheck-shop-"+uniquePreflightSuffix(), "Fresh Recheck Shop")
+	defer execPreflight(t, db, `DELETE FROM shops WHERE id = $1`, shopID)
+	fresh, err := RunExclusiveOwnedSecuritySchemaRecheck(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsShopFact(before.ShopClient.Facts, shopID) {
+		t.Fatal("diagnostic snapshot unexpectedly observed a later committed row")
+	}
+	if !containsShopFact(fresh.ShopClient.Facts, shopID) {
+		t.Fatal("exclusive-owned recheck reused stale diagnostic facts")
+	}
+	if fresh.WriterFenceDecision.Status != WriterFenceEnforced || !fresh.ReadOnlyVerified {
+		t.Fatalf("unexpected fresh recheck evidence: %+v", fresh)
 	}
 }
 

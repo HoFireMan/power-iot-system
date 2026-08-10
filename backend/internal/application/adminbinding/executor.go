@@ -13,6 +13,7 @@ import (
 
 	"power-iot-backend/internal/adapters/persistence"
 	"power-iot-backend/internal/core/domain"
+	"power-iot-backend/internal/data/migrations"
 )
 
 // ExecutionHooks are deliberately narrow test seams for proving rollback after
@@ -43,7 +44,15 @@ func NewExecutorWithHooks(db *gorm.DB, hooks ExecutionHooks) *Executor {
 	return &Executor{db: db, maxAttempts: 3, hooks: hooks}
 }
 
+func normalizeExecutionContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 func (e *Executor) CreateMeasurementPoint(ctx context.Context, cmd domain.CreateMeasurementPointCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	hash, err := canonicalCreateHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -55,6 +64,7 @@ func (e *Executor) CreateMeasurementPoint(ctx context.Context, cmd domain.Create
 }
 
 func (e *Executor) BindDevice(ctx context.Context, cmd domain.BindDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	hash, err := canonicalBindHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -66,6 +76,7 @@ func (e *Executor) BindDevice(ctx context.Context, cmd domain.BindDeviceCommand)
 }
 
 func (e *Executor) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	hash, err := canonicalReplaceHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -77,6 +88,7 @@ func (e *Executor) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDeviceCo
 }
 
 func (e *Executor) RelocateDevice(ctx context.Context, cmd domain.RelocateDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	hash, err := canonicalRelocateHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -88,6 +100,7 @@ func (e *Executor) RelocateDevice(ctx context.Context, cmd domain.RelocateDevice
 }
 
 func (e *Executor) UnbindDevice(ctx context.Context, cmd domain.UnbindDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	hash, err := canonicalUnbindHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -101,6 +114,10 @@ func (e *Executor) UnbindDevice(ctx context.Context, cmd domain.UnbindDeviceComm
 // The InTransaction methods are the caller-owned transaction seam. They claim
 // and persist the operation in tx but deliberately do not call Commit/Rollback.
 func (e *Executor) CreateMeasurementPointInTransaction(ctx context.Context, tx *gorm.DB, cmd domain.CreateMeasurementPointCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
+	if tx != nil {
+		tx = tx.WithContext(ctx)
+	}
 	hash, err := canonicalCreateHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -112,6 +129,10 @@ func (e *Executor) CreateMeasurementPointInTransaction(ctx context.Context, tx *
 }
 
 func (e *Executor) BindDeviceInTransaction(ctx context.Context, tx *gorm.DB, cmd domain.BindDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
+	if tx != nil {
+		tx = tx.WithContext(ctx)
+	}
 	hash, err := canonicalBindHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -123,6 +144,10 @@ func (e *Executor) BindDeviceInTransaction(ctx context.Context, tx *gorm.DB, cmd
 }
 
 func (e *Executor) ReplaceDeviceInTransaction(ctx context.Context, tx *gorm.DB, cmd domain.ReplaceDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
+	if tx != nil {
+		tx = tx.WithContext(ctx)
+	}
 	hash, err := canonicalReplaceHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -134,6 +159,10 @@ func (e *Executor) ReplaceDeviceInTransaction(ctx context.Context, tx *gorm.DB, 
 }
 
 func (e *Executor) RelocateDeviceInTransaction(ctx context.Context, tx *gorm.DB, cmd domain.RelocateDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
+	if tx != nil {
+		tx = tx.WithContext(ctx)
+	}
 	hash, err := canonicalRelocateHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -145,6 +174,10 @@ func (e *Executor) RelocateDeviceInTransaction(ctx context.Context, tx *gorm.DB,
 }
 
 func (e *Executor) UnbindDeviceInTransaction(ctx context.Context, tx *gorm.DB, cmd domain.UnbindDeviceCommand) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
+	if tx != nil {
+		tx = tx.WithContext(ctx)
+	}
 	hash, err := canonicalUnbindHash(cmd)
 	if err != nil {
 		return domain.AdminBindingResult{}, err
@@ -156,6 +189,7 @@ func (e *Executor) UnbindDeviceInTransaction(ctx context.Context, tx *gorm.DB, c
 }
 
 func (e *Executor) run(ctx context.Context, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	if e == nil || e.db == nil {
 		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "database is not configured")
 	}
@@ -165,8 +199,11 @@ func (e *Executor) run(ctx context.Context, action domain.BindingAction, key str
 	}
 	var result domain.AdminBindingResult
 	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return domain.AdminBindingResult{}, err
+		}
 		result = domain.AdminBindingResult{}
-		err := e.db.Transaction(func(tx *gorm.DB) error {
+		err := e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			var callbackErr error
 			result, callbackErr = e.executeClaimed(ctx, tx, action, key, actor, hash, work)
 			return callbackErr
@@ -175,7 +212,16 @@ func (e *Executor) run(ctx context.Context, action domain.BindingAction, key str
 			return result, nil
 		}
 		if isTransientPostgresError(err) && attempt+1 < attempts {
-			time.Sleep([]time.Duration{10 * time.Millisecond, 50 * time.Millisecond}[attempt])
+			backoff := []time.Duration{10 * time.Millisecond, 50 * time.Millisecond}[attempt]
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return domain.AdminBindingResult{}, ctx.Err()
+			case <-timer.C:
+			}
 			continue
 		}
 		if isTransientPostgresError(err) {
@@ -187,8 +233,16 @@ func (e *Executor) run(ctx context.Context, action domain.BindingAction, key str
 }
 
 func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
+	ctx = normalizeExecutionContext(ctx)
 	if tx == nil {
 		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "caller-owned transaction is required")
+	}
+	tx = tx.WithContext(ctx)
+	// Admission is the first application/database operation in the caller-owned
+	// business transaction. Idempotency claim/replay and all planning queries
+	// must occur only after the shared fence is held.
+	if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
+		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "shared writer admission failed")
 	}
 	snapshot, err := json.Marshal(actor.Scope)
 	if err != nil {
