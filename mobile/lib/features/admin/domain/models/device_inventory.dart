@@ -7,10 +7,12 @@ class DeviceInventory {
     required this.serialNumber,
     required this.status,
     this.id,
+    this.macAddress,
   });
 
   final String name;
   final String serialNumber;
   final String status;
   final String? id;
+  final String? macAddress;
 }

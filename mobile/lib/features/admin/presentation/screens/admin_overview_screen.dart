@@ -28,6 +28,18 @@ class AdminOverviewScreen extends ConsumerWidget {
       );
     }
 
+    Future<void> bindDevice() async {
+      final bound = await context.push<bool>('/admin/mock/bind-device');
+      if (bound != true || !context.mounted) {
+        return;
+      }
+
+      ref.invalidate(adminOverviewProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Device bound successfully.')),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Overview')),
       body: SafeArea(
@@ -41,10 +53,24 @@ class AdminOverviewScreen extends ConsumerWidget {
           data: (data) => _OverviewContent(overview: data),
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: createMeasurementPoint,
-        icon: const Icon(Icons.add_location_alt_outlined),
-        label: const Text('Create Measurement Point'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.extended(
+            heroTag: 'bind-device-action',
+            onPressed: bindDevice,
+            icon: const Icon(Icons.link),
+            label: const Text('Bind Device'),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton.extended(
+            heroTag: 'create-measurement-point-action',
+            onPressed: createMeasurementPoint,
+            icon: const Icon(Icons.add_location_alt_outlined),
+            label: const Text('Create Measurement Point'),
+          ),
+        ],
       ),
     );
   }
@@ -57,6 +83,14 @@ class _OverviewContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final devicesById = {
+      for (final device in overview.devices)
+        if (device.id != null) device.id!: device,
+    };
+    final pointsById = {
+      for (final point in overview.measurementPoints) point.id: point,
+    };
+
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -74,6 +108,21 @@ class _OverviewContent extends StatelessWidget {
           childCount: overview.devices.length,
           itemBuilder: (context, index) =>
               _DeviceTile(device: overview.devices[index]),
+        ),
+        const SizedBox(height: 24),
+        _Section(
+          title: 'Active Bindings',
+          emptyMessage: 'No active bindings.',
+          childCount: overview.activeAssignments.length,
+          itemBuilder: (context, index) {
+            final assignment = overview.activeAssignments[index];
+            final device = devicesById[assignment.deviceId];
+            final point = pointsById[assignment.measurementPointId];
+            return _BindingTile(
+              pointName: point?.name ?? assignment.measurementPointId,
+              serialNumber: device?.serialNumber ?? assignment.deviceId,
+            );
+          },
         ),
       ],
     );
@@ -144,6 +193,24 @@ class _DeviceTile extends StatelessWidget {
         title: Text(device.name),
         subtitle: Text(device.serialNumber),
         trailing: Text(device.status),
+      ),
+    );
+  }
+}
+
+class _BindingTile extends StatelessWidget {
+  const _BindingTile({required this.pointName, required this.serialNumber});
+
+  final String pointName;
+  final String serialNumber;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.link),
+        title: Text('$pointName · $serialNumber'),
+        subtitle: const Text('Active assignment'),
       ),
     );
   }

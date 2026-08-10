@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:power_iot_app/features/admin/data/repositories/mock_admin_overview_repository.dart';
 import 'package:power_iot_app/features/admin/domain/models/admin_overview.dart';
+import 'package:power_iot_app/features/admin/domain/models/device_assignment.dart';
 import 'package:power_iot_app/features/admin/domain/models/measurement_point.dart';
 import 'package:power_iot_app/features/admin/domain/repositories/admin_overview_repository.dart';
 import 'package:power_iot_app/features/admin/presentation/providers/admin_overview_provider.dart';
@@ -112,6 +113,11 @@ class _FixedAdminOverviewRepository implements AdminOverviewRepository {
   ) {
     throw UnsupportedError('Creation is not used by this test repository.');
   }
+
+  @override
+  Future<DeviceAssignment> bindDevice(BindDeviceInput input) {
+    throw UnsupportedError('Binding is not used by this test repository.');
+  }
 }
 
 class _PendingAdminOverviewRepository implements AdminOverviewRepository {
@@ -125,5 +131,10 @@ class _PendingAdminOverviewRepository implements AdminOverviewRepository {
     CreateMeasurementPointInput input,
   ) {
     throw UnsupportedError('Creation is not used by this test repository.');
+  }
+
+  @override
+  Future<DeviceAssignment> bindDevice(BindDeviceInput input) {
+    throw UnsupportedError('Binding is not used by this test repository.');
   }
 }

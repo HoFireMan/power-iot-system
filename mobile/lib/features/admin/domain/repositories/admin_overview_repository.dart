@@ -1,5 +1,20 @@
 import '../models/admin_overview.dart';
+import '../models/device_assignment.dart';
+import '../models/device_ref.dart';
 import '../models/measurement_point.dart';
+
+/// Product input for binding an existing eligible Device to an existing empty MP.
+class BindDeviceInput {
+  const BindDeviceInput({
+    required this.requestIdentity,
+    required this.deviceRef,
+    required this.measurementPointId,
+  });
+
+  final String requestIdentity;
+  final DeviceRef deviceRef;
+  final String measurementPointId;
+}
 
 /// Product input for creating a logical Measurement Point in the current Site.
 class CreateMeasurementPointInput {
@@ -21,4 +36,6 @@ abstract interface class AdminOverviewRepository {
   Future<MeasurementPoint> createMeasurementPoint(
     CreateMeasurementPointInput input,
   );
+
+  Future<DeviceAssignment> bindDevice(BindDeviceInput input);
 }

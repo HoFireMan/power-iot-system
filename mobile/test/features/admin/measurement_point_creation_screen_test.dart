@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/features/admin/data/repositories/mock_admin_overview_repository.dart';
 import 'package:power_iot_app/features/admin/domain/models/admin_overview.dart';
+import 'package:power_iot_app/features/admin/domain/models/device_assignment.dart';
 import 'package:power_iot_app/features/admin/domain/models/measurement_point.dart';
 import 'package:power_iot_app/features/admin/domain/repositories/admin_overview_repository.dart';
 import 'package:power_iot_app/features/admin/presentation/providers/admin_overview_provider.dart';
@@ -262,6 +263,11 @@ class _PendingCreationRepository implements AdminOverviewRepository {
     CreateMeasurementPointInput input,
   ) =>
       completer.future;
+
+  @override
+  Future<DeviceAssignment> bindDevice(BindDeviceInput input) {
+    throw UnsupportedError('Binding is not used by this test repository.');
+  }
 }
 
 class _RecordingRepository implements AdminOverviewRepository {
@@ -279,5 +285,10 @@ class _RecordingRepository implements AdminOverviewRepository {
   ) async {
     createCallCount++;
     throw StateError('should not be called for invalid form input');
+  }
+
+  @override
+  Future<DeviceAssignment> bindDevice(BindDeviceInput input) {
+    throw UnsupportedError('Binding is not used by this test repository.');
   }
 }
