@@ -45,6 +45,7 @@ type config struct {
 	CommandAck      bool
 	RecordedAt      *time.Time
 	OfflineWait     time.Duration
+	ReconnectMAC    string
 }
 
 type repeatableMACFlag struct {
@@ -430,8 +431,10 @@ func parseConfig() (config, []string, error) {
 	flag.BoolVar(&cfg.CommandAck, "command-ack", boolEnv("COMMAND_ACK", true), "publish command/ack after receiving a command")
 	recordedAtText := envOr("RECORDED_AT", "")
 	offlineWaitText := durationEnv("OFFLINE_WAIT", 0)
+	reconnectMAC := envOr("RECONNECT_DEVICE_MAC", "")
 	flag.StringVar(&recordedAtText, "recorded-at", recordedAtText, "RFC3339 telemetry recorded_at/ts base timestamp")
 	flag.DurationVar(&offlineWaitText, "offline-wait", offlineWaitText, "wait while buffered offline before connecting")
+	flag.StringVar(&reconnectMAC, "reconnect-device-mac", reconnectMAC, "in reconnect mode, run other configured devices continuously")
 	flag.Parse()
 	if recordedAtText != "" {
 		recordedAt, err := parseRecordedAt(recordedAtText)
@@ -441,6 +444,13 @@ func parseConfig() (config, []string, error) {
 		cfg.RecordedAt = recordedAt
 	}
 	cfg.OfflineWait = offlineWaitText
+	if strings.TrimSpace(reconnectMAC) != "" {
+		canonical, err := simulator.NormalizeMAC(reconnectMAC)
+		if err != nil {
+			return config{}, nil, fmt.Errorf("reconnect device MAC: %w", err)
+		}
+		cfg.ReconnectMAC = canonical
+	}
 
 	if !isTLSBroker(cfg.BrokerURL) {
 		return config{}, nil, fmt.Errorf("MQTT broker URL must use tls://; insecure transport is not supported")
@@ -864,13 +874,14 @@ func (s *deviceSimulator) onMessage(client mqtt.Client, message mqtt.Message) {
 }
 
 func (s *deviceSimulator) printAck(ack simulator.Ack) {
+	identity := fmt.Sprintf("mac=%s boot=%d seq=%d", s.generator.MAC, ack.BootCounter, ack.Sequence)
 	switch ack.Status {
 	case "stored":
-		log.Printf("ACK stored")
+		log.Printf("ACK stored %s", identity)
 	case "duplicate":
-		log.Printf("ACK duplicate")
+		log.Printf("ACK duplicate %s", identity)
 	default:
-		log.Printf("ACK rejected status=%s", ack.Status)
+		log.Printf("ACK rejected %s status=%s", identity, ack.Status)
 	}
 }
 
@@ -895,22 +906,32 @@ func (s *deviceSimulator) publishCommandAck(command simulator.Command) {
 }
 
 func (s *deviceSimulator) run(ctx context.Context) error {
+	var err error
 	switch s.config.Mode {
 	case "once":
-		return s.runOnce(ctx)
+		err = s.runOnce(ctx)
 	case "continuous":
-		return s.runContinuous(ctx)
+		err = s.runContinuous(ctx)
 	case "duplicate":
-		return s.runDuplicate(ctx)
+		err = s.runDuplicate(ctx)
 	case "invalid":
-		return s.runInvalid(ctx)
+		err = s.runInvalid(ctx)
 	case "offline-replay":
-		return s.runOfflineReplay(ctx)
+		err = s.runOfflineReplay(ctx)
 	case "reconnect":
-		return s.runReconnect(ctx)
+		if s.config.ReconnectMAC != "" && s.generator.MAC != s.config.ReconnectMAC {
+			err = s.runContinuous(ctx)
+		} else {
+			err = s.runReconnect(ctx)
+		}
 	default:
-		return fmt.Errorf("unsupported simulator mode %q", s.config.Mode)
+		err = fmt.Errorf("unsupported simulator mode %q", s.config.Mode)
 	}
+	queue, queueErr := s.telemetryQueue()
+	if queueErr == nil {
+		log.Printf("QUEUE pending=%d mac=%s", queue.Len(), s.generator.MAC)
+	}
+	return err
 }
 
 func (s *deviceSimulator) runOnce(ctx context.Context) error {
@@ -1020,18 +1041,27 @@ func (s *deviceSimulator) runOfflineReplay(ctx context.Context) error {
 }
 
 func (s *deviceSimulator) runReconnect(ctx context.Context) error {
-	if err := s.publishAndWait(ctx, s.nextTelemetry(time.Now())); err != nil {
-		// A lost session leaves the queued item intact; reconnect mode is
-		// specifically allowed to restore readiness and replay it.
+	if err := s.publishAndDisconnectBeforeACK(ctx, s.nextTelemetry(time.Now())); err != nil {
+		// The deliberate session loss occurs after the broker accepted the
+		// publish but before ACK authorization. The queue item therefore remains
+		// pending and reconnect mode can prove exact replay behavior.
 		if errors.Is(err, context.Canceled) {
 			return err
 		}
 		log.Printf("RECONNECT first telemetry retained: %v", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
-	log.Printf("RECONNECT disconnecting MQTT client")
+	log.Printf("RECONNECT reconnecting MQTT client")
 	s.drainReadyEvents()
-	oldClient := s.disconnectClientForReconnect()
-	if oldClient == nil {
+	// If publication failed before the deliberate disconnect point, detach the
+	// old client before installing a fresh one. Otherwise setClient would leave
+	// an untracked Paho session that shutdown could not close.
+	s.lifecycleMu.Lock()
+	clientStillConfigured := s.client != nil
+	s.lifecycleMu.Unlock()
+	if clientStillConfigured && s.disconnectClientForReconnect() == nil {
 		return errors.New("MQTT reconnect failed: client is not configured")
 	}
 	// Paho warns that a client must not be reused immediately after Disconnect;
@@ -1142,6 +1172,58 @@ func (s *deviceSimulator) publishAndWait(ctx context.Context, telemetry simulato
 	return s.replayPendingLocked(ctx, queue)
 }
 
+func (s *deviceSimulator) publishAndDisconnectBeforeACK(ctx context.Context, telemetry simulator.Telemetry) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+
+	body, err := json.Marshal(telemetry)
+	if err != nil {
+		return err
+	}
+	queue, err := s.telemetryQueue()
+	if err != nil {
+		return err
+	}
+	item := simulator.QueuedTelemetry{Telemetry: telemetry, Payload: body}
+	if existing, ok := queue.Item(item.Identity()); ok {
+		item = existing
+	}
+	if !queue.IsPending(item.Identity()) {
+		enqueueContext := ctx
+		if ctx.Err() != nil && queue.Len() < queue.Capacity() {
+			enqueueContext = context.Background()
+		}
+		if err := queue.Enqueue(enqueueContext, item); err != nil {
+			return err
+		}
+	}
+
+	identity := item.Identity()
+	waiter := s.registerAckMode(identity, true, true)
+	defer func() {
+		s.revokeAckAttempt(identity, waiter, true)
+		s.removeAck(identity, waiter)
+	}()
+	if !queue.IsPending(identity) {
+		return nil
+	}
+	attempt, err := s.publishWhenReady("device/upload/data", 0, false, item.Payload)
+	if err != nil {
+		return err
+	}
+	if err := waitMQTTToken(attempt.token, 5*time.Second); err != nil {
+		return fmt.Errorf("telemetry publish failed: %w", err)
+	}
+	log.Printf("RECONNECT pending boot=%d seq=%d", item.Telemetry.BootCounter, item.Telemetry.Sequence)
+	if s.disconnectClientForReconnect() == nil {
+		return errors.New("MQTT reconnect failed: client is not configured")
+	}
+	return errMQTTSessionChanged
+}
+
 func (s *deviceSimulator) publishQueuedAndWait(ctx context.Context, item simulator.QueuedTelemetry) error {
 	return s.publishItemAndWait(ctx, item, true)
 }
@@ -1183,7 +1265,7 @@ func (s *deviceSimulator) publishItemAndWait(ctx context.Context, item simulator
 		return err
 	}
 	s.releaseAckAttempt(identity, attempt, queueItem)
-	log.Printf("PUBLISHED boot=%d seq=%d", item.Telemetry.BootCounter, item.Telemetry.Sequence)
+	log.Printf("PUBLISHED boot=%d seq=%d mac=%s", item.Telemetry.BootCounter, item.Telemetry.Sequence, item.Telemetry.MAC)
 	ackTimeout := s.config.AckTimeout
 	if ackTimeout <= 0 {
 		ackTimeout = 10 * time.Second
