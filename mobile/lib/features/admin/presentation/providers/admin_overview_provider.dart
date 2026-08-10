@@ -227,6 +227,75 @@ final relocateDeviceRequestIdentitySourceProvider =
   (ref) => MockRelocateDeviceRequestIdentitySource(),
 );
 
+class PendingUnbindDeviceRequest {
+  const PendingUnbindDeviceRequest({
+    required this.requestIdentity,
+    required this.currentAssignmentId,
+    required this.reason,
+  });
+
+  final String requestIdentity;
+  final String currentAssignmentId;
+  final String reason;
+}
+
+abstract interface class UnbindDeviceRequestIdentitySource {
+  PendingUnbindDeviceRequest? get pending;
+
+  String identityFor({
+    required String currentAssignmentId,
+    String reason = '',
+  });
+
+  void complete(String requestIdentity);
+}
+
+class MockUnbindDeviceRequestIdentitySource
+    implements UnbindDeviceRequestIdentitySource {
+  int _nextIdentity = 1;
+  PendingUnbindDeviceRequest? _pending;
+
+  @override
+  PendingUnbindDeviceRequest? get pending => _pending;
+
+  @override
+  String identityFor({
+    required String currentAssignmentId,
+    String reason = '',
+  }) {
+    final normalizedAssignmentId = currentAssignmentId.trim();
+    final normalizedReason = reason.trim();
+    final pending = _pending;
+    if (pending != null &&
+        pending.currentAssignmentId == normalizedAssignmentId &&
+        pending.reason == normalizedReason) {
+      return pending.requestIdentity;
+    }
+
+    final identity =
+        'mock-unbind-device-${_nextIdentity.toString().padLeft(3, '0')}';
+    _nextIdentity++;
+    _pending = PendingUnbindDeviceRequest(
+      requestIdentity: identity,
+      currentAssignmentId: normalizedAssignmentId,
+      reason: normalizedReason,
+    );
+    return identity;
+  }
+
+  @override
+  void complete(String requestIdentity) {
+    if (_pending?.requestIdentity == requestIdentity) {
+      _pending = null;
+    }
+  }
+}
+
+final unbindDeviceRequestIdentitySourceProvider =
+    Provider<UnbindDeviceRequestIdentitySource>(
+  (ref) => MockUnbindDeviceRequestIdentitySource(),
+);
+
 final adminOverviewRepositoryProvider = Provider<AdminOverviewRepository>(
   (ref) => MockAdminOverviewRepository(),
 );

@@ -29,6 +29,8 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   final Map<String, String> _replacementRequests = {};
   final Map<String, DeviceAssignment> _committedRelocations = {};
   final Map<String, String> _relocationRequests = {};
+  final Map<String, DeviceAssignment> _committedUnbindings = {};
+  final Map<String, String> _unbindRequests = {};
   final List<DeviceAssignment> _assignmentHistory = [];
   final List<DeviceAssignment> _activeAssignments = [];
   final List<DeviceInventory> _devices = const [
@@ -68,6 +70,15 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
 
   /// Commits the next relocation and then simulates losing its response.
   bool loseResponseAfterNextRelocation = false;
+
+  /// Overrides the next mock unbind transition boundary.
+  DateTime? nextUnbindEffectiveTime;
+
+  /// Changes the current assignment before the next unbind validation.
+  bool changeCurrentAssignmentBeforeNextUnbind = false;
+
+  /// Commits the next unbind and then simulates losing its response.
+  bool loseResponseAfterNextUnbind = false;
 
   /// Makes only the next create call fail before mutation.
   bool failNextCreation = false;
@@ -298,6 +309,83 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   }
 
   @override
+  Future<DeviceAssignment> unbindDevice(UnbindDeviceInput input) async {
+    final requestIdentity = input.requestIdentity.trim();
+    final currentAssignmentId = input.currentAssignmentId.trim();
+    final reason = input.reason.trim();
+    if (requestIdentity.isEmpty) {
+      throw ArgumentError.value(input.requestIdentity, 'requestIdentity');
+    }
+    if (currentAssignmentId.isEmpty) {
+      throw ArgumentError.value(
+        input.currentAssignmentId,
+        'currentAssignmentId',
+      );
+    }
+
+    final fingerprint = _unbindFingerprint(
+      currentAssignmentId: currentAssignmentId,
+      reason: reason,
+    );
+    final committed = _committedUnbindings[requestIdentity];
+    if (committed != null) {
+      if (_unbindRequests[requestIdentity] == fingerprint) {
+        return committed;
+      }
+      throw StateError('Unbind request identity was reused.');
+    }
+
+    if (changeCurrentAssignmentBeforeNextUnbind) {
+      changeCurrentAssignmentBeforeNextUnbind = false;
+      _simulateCurrentAssignmentChange(
+        currentAssignmentId,
+        effectiveTime: _sampleUnbindTime(),
+      );
+    }
+
+    final current = _activeAssignments.cast<DeviceAssignment?>().firstWhere(
+          (assignment) => assignment!.id == currentAssignmentId,
+          orElse: () => null,
+        );
+    if (current == null) {
+      final existsInHistory = _assignmentHistory.any(
+        (assignment) => assignment.id == currentAssignmentId,
+      );
+      throw StateError(
+        existsInHistory
+            ? 'Current assignment is no longer current.'
+            : 'Assignment not found.',
+      );
+    }
+
+    final transitionTime = _sampleUnbindTime();
+    if (!transitionTime.isAfter(current.validFrom)) {
+      throw StateError('Unbind transition time is invalid.');
+    }
+
+    final closed = DeviceAssignment(
+      id: current.id,
+      deviceId: current.deviceId,
+      measurementPointId: current.measurementPointId,
+      validFrom: current.validFrom,
+      validTo: transitionTime,
+    );
+    _replaceHistoryEntry(closed);
+    _activeAssignments.removeWhere(
+      (assignment) => assignment.id == current.id,
+    );
+    _committedUnbindings[requestIdentity] = closed;
+    _unbindRequests[requestIdentity] = fingerprint;
+
+    if (loseResponseAfterNextUnbind) {
+      loseResponseAfterNextUnbind = false;
+      throw StateError('Deterministic mock response loss after commit');
+    }
+
+    return closed;
+  }
+
+  @override
   Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input) async {
     final requestIdentity = input.requestIdentity.trim();
     final currentAssignmentId = input.currentAssignmentId.trim();
@@ -430,6 +518,17 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     return sampled;
   }
 
+  DateTime _sampleUnbindTime() {
+    final requested = nextUnbindEffectiveTime;
+    if (requested != null) {
+      nextUnbindEffectiveTime = null;
+      return requested;
+    }
+    final sampled = _nextTransitionTime;
+    _nextTransitionTime = sampled.add(const Duration(minutes: 1));
+    return sampled;
+  }
+
   void _simulateCurrentAssignmentChange(
     String currentAssignmentId, {
     DateTime? effectiveTime,
@@ -483,6 +582,13 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
 
   String _relocationFingerprint(RelocateDeviceInput input) {
     return '${input.currentAssignmentId}|${input.targetMeasurementPointId}|${input.reason}';
+  }
+
+  String _unbindFingerprint({
+    required String currentAssignmentId,
+    required String reason,
+  }) {
+    return '$currentAssignmentId|$reason';
   }
 
   DeviceInventory? _resolveDevice(DeviceRef ref) {

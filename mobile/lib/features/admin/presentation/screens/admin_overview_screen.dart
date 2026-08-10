@@ -68,6 +68,20 @@ class AdminOverviewScreen extends ConsumerWidget {
       );
     }
 
+    Future<void> unbindDevice(String assignmentId) async {
+      final unbound = await context.push<bool>(
+        '/admin/mock/unbind-device/$assignmentId',
+      );
+      if (unbound != true || !context.mounted) {
+        return;
+      }
+
+      ref.invalidate(adminOverviewProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Device unbound successfully.')),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Overview')),
       body: SafeArea(
@@ -82,6 +96,7 @@ class AdminOverviewScreen extends ConsumerWidget {
             overview: data,
             onReplace: replaceDevice,
             onRelocate: relocateDevice,
+            onUnbind: unbindDevice,
           ),
         ),
       ),
@@ -113,11 +128,13 @@ class _OverviewContent extends StatelessWidget {
     required this.overview,
     required this.onReplace,
     required this.onRelocate,
+    required this.onUnbind,
   });
 
   final AdminOverview overview;
   final ValueChanged<String> onReplace;
   final ValueChanged<String> onRelocate;
+  final ValueChanged<String> onUnbind;
 
   @override
   Widget build(BuildContext context) {
@@ -163,6 +180,7 @@ class _OverviewContent extends StatelessWidget {
               serialNumber: device?.serialNumber ?? assignment.deviceId,
               onReplace: () => onReplace(assignment.id),
               onRelocate: () => onRelocate(assignment.id),
+              onUnbind: () => onUnbind(assignment.id),
             );
           },
         ),
@@ -248,6 +266,7 @@ class _BindingTile extends StatelessWidget {
     required this.serialNumber,
     required this.onReplace,
     required this.onRelocate,
+    required this.onUnbind,
   });
 
   final String assignmentId;
@@ -255,6 +274,7 @@ class _BindingTile extends StatelessWidget {
   final String serialNumber;
   final VoidCallback onReplace;
   final VoidCallback onRelocate;
+  final VoidCallback onUnbind;
 
   @override
   Widget build(BuildContext context) {
@@ -281,6 +301,11 @@ class _BindingTile extends StatelessWidget {
                   key: Key('relocate-device-action-$assignmentId'),
                   onPressed: onRelocate,
                   child: const Text('Relocate Device'),
+                ),
+                TextButton(
+                  key: Key('unbind-device-action-$assignmentId'),
+                  onPressed: onUnbind,
+                  child: const Text('Unbind Device'),
                 ),
               ],
             ),

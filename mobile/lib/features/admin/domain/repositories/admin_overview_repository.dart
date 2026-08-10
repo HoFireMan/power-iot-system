@@ -47,6 +47,20 @@ class RelocateDeviceInput {
   final String reason;
 }
 
+/// Product input for closing the current DeviceAssignment without deleting the
+/// Device, Measurement Point, or assignment history.
+class UnbindDeviceInput {
+  const UnbindDeviceInput({
+    required this.requestIdentity,
+    required this.currentAssignmentId,
+    this.reason = '',
+  });
+
+  final String requestIdentity;
+  final String currentAssignmentId;
+  final String reason;
+}
+
 /// Product input for creating a logical Measurement Point in the current Site.
 class CreateMeasurementPointInput {
   const CreateMeasurementPointInput({
@@ -73,6 +87,8 @@ abstract interface class AdminOverviewRepository {
   Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input);
 
   Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input);
+
+  Future<DeviceAssignment> unbindDevice(UnbindDeviceInput input);
 
   Future<List<DeviceAssignment>> loadAssignmentHistory();
 }
