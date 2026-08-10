@@ -27,6 +27,8 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   final Map<String, String> _bindingRequests = {};
   final Map<String, DeviceAssignment> _committedReplacements = {};
   final Map<String, String> _replacementRequests = {};
+  final Map<String, DeviceAssignment> _committedRelocations = {};
+  final Map<String, String> _relocationRequests = {};
   final List<DeviceAssignment> _assignmentHistory = [];
   final List<DeviceAssignment> _activeAssignments = [];
   final List<DeviceInventory> _devices = const [
@@ -57,6 +59,15 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
 
   /// Commits the next replacement and then simulates losing its response.
   bool loseResponseAfterNextReplacement = false;
+
+  /// Overrides the next mock relocation transition boundary.
+  DateTime? nextRelocationEffectiveTime;
+
+  /// Changes the current assignment before the next relocation validation.
+  bool changeCurrentAssignmentBeforeNextRelocation = false;
+
+  /// Commits the next relocation and then simulates losing its response.
+  bool loseResponseAfterNextRelocation = false;
 
   /// Makes only the next create call fail before mutation.
   bool failNextCreation = false;
@@ -286,6 +297,117 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     return replacementAssignment;
   }
 
+  @override
+  Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input) async {
+    final requestIdentity = input.requestIdentity.trim();
+    final currentAssignmentId = input.currentAssignmentId.trim();
+    final targetMeasurementPointId = input.targetMeasurementPointId.trim();
+    if (requestIdentity.isEmpty) {
+      throw ArgumentError.value(input.requestIdentity, 'requestIdentity');
+    }
+    if (currentAssignmentId.isEmpty) {
+      throw ArgumentError.value(
+        input.currentAssignmentId,
+        'currentAssignmentId',
+      );
+    }
+    if (targetMeasurementPointId.isEmpty) {
+      throw ArgumentError.value(
+        input.targetMeasurementPointId,
+        'targetMeasurementPointId',
+      );
+    }
+
+    final fingerprint = _relocationFingerprint(input);
+    final committed = _committedRelocations[requestIdentity];
+    if (committed != null) {
+      if (_relocationRequests[requestIdentity] == fingerprint) {
+        return committed;
+      }
+      throw StateError('Relocation request identity was reused.');
+    }
+
+    if (changeCurrentAssignmentBeforeNextRelocation) {
+      changeCurrentAssignmentBeforeNextRelocation = false;
+      _simulateCurrentAssignmentChange(
+        currentAssignmentId,
+        effectiveTime: _sampleRelocationTime(),
+      );
+    }
+
+    final current = _activeAssignments.cast<DeviceAssignment?>().firstWhere(
+          (assignment) => assignment!.id == currentAssignmentId,
+          orElse: () => null,
+        );
+    if (current == null) {
+      throw StateError('Current assignment is no longer current.');
+    }
+    final source = _measurementPoints.cast<MeasurementPoint?>().firstWhere(
+          (point) => point!.id == current.measurementPointId,
+          orElse: () => null,
+        );
+    if (source == null) {
+      throw StateError('Source Measurement Point not found.');
+    }
+    final target = _measurementPoints.cast<MeasurementPoint?>().firstWhere(
+          (point) => point!.id == targetMeasurementPointId,
+          orElse: () => null,
+        );
+    if (target == null) {
+      throw StateError('Target Measurement Point not found.');
+    }
+    if (target.id == source.id) {
+      throw StateError('Relocation target must differ from source.');
+    }
+    final currentDevice = _devices.cast<DeviceInventory?>().firstWhere(
+          (device) => device!.id == current.deviceId,
+          orElse: () => null,
+        );
+    if (currentDevice == null) {
+      throw StateError('Current Device not found.');
+    }
+    if (_activeAssignments.any(
+      (assignment) => assignment.measurementPointId == target.id,
+    )) {
+      throw StateError('Relocation target is already occupied.');
+    }
+
+    final transitionTime = _sampleRelocationTime();
+    if (!transitionTime.isAfter(current.validFrom)) {
+      throw StateError('Relocation transition time is invalid.');
+    }
+
+    final closed = DeviceAssignment(
+      id: current.id,
+      deviceId: current.deviceId,
+      measurementPointId: current.measurementPointId,
+      validFrom: current.validFrom,
+      validTo: transitionTime,
+    );
+    final relocatedAssignment = DeviceAssignment(
+      id: 'assignment-${_nextAssignmentIdentity.toString().padLeft(3, '0')}',
+      deviceId: currentDevice.id!,
+      measurementPointId: target.id,
+      validFrom: transitionTime,
+    );
+    _nextAssignmentIdentity++;
+    _replaceHistoryEntry(closed);
+    _activeAssignments.removeWhere(
+      (assignment) => assignment.id == current.id,
+    );
+    _activeAssignments.add(relocatedAssignment);
+    _assignmentHistory.add(relocatedAssignment);
+    _committedRelocations[requestIdentity] = relocatedAssignment;
+    _relocationRequests[requestIdentity] = fingerprint;
+
+    if (loseResponseAfterNextRelocation) {
+      loseResponseAfterNextRelocation = false;
+      throw StateError('Deterministic mock response loss after commit');
+    }
+
+    return relocatedAssignment;
+  }
+
   DateTime _sampleTransitionTime() {
     final requested = nextReplacementEffectiveTime;
     if (requested != null) {
@@ -297,7 +419,21 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     return sampled;
   }
 
-  void _simulateCurrentAssignmentChange(String currentAssignmentId) {
+  DateTime _sampleRelocationTime() {
+    final requested = nextRelocationEffectiveTime;
+    if (requested != null) {
+      nextRelocationEffectiveTime = null;
+      return requested;
+    }
+    final sampled = _nextTransitionTime;
+    _nextTransitionTime = sampled.add(const Duration(minutes: 1));
+    return sampled;
+  }
+
+  void _simulateCurrentAssignmentChange(
+    String currentAssignmentId, {
+    DateTime? effectiveTime,
+  }) {
     final current = _activeAssignments.cast<DeviceAssignment?>().firstWhere(
           (assignment) => assignment!.id == currentAssignmentId,
           orElse: () => null,
@@ -305,7 +441,7 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     if (current == null) {
       return;
     }
-    final transitionTime = _sampleTransitionTime();
+    final transitionTime = effectiveTime ?? _sampleTransitionTime();
     if (!transitionTime.isAfter(current.validFrom)) {
       return;
     }
@@ -343,6 +479,10 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   String _replacementFingerprint(ReplaceDeviceInput input) {
     final ref = input.replacementDeviceRef;
     return '${input.currentAssignmentId}|${ref.id}|${ref.serialNumber}|${ref.macAddress}|${input.reason}';
+  }
+
+  String _relocationFingerprint(RelocateDeviceInput input) {
+    return '${input.currentAssignmentId}|${input.targetMeasurementPointId}|${input.reason}';
   }
 
   DeviceInventory? _resolveDevice(DeviceRef ref) {

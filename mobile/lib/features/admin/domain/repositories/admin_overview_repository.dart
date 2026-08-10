@@ -31,6 +31,22 @@ class ReplaceDeviceInput {
   final String reason;
 }
 
+/// Product input for relocating a currently assigned Device to an existing
+/// unoccupied Measurement Point.
+class RelocateDeviceInput {
+  const RelocateDeviceInput({
+    required this.requestIdentity,
+    required this.currentAssignmentId,
+    required this.targetMeasurementPointId,
+    this.reason = '',
+  });
+
+  final String requestIdentity;
+  final String currentAssignmentId;
+  final String targetMeasurementPointId;
+  final String reason;
+}
+
 /// Product input for creating a logical Measurement Point in the current Site.
 class CreateMeasurementPointInput {
   const CreateMeasurementPointInput({
@@ -55,6 +71,8 @@ abstract interface class AdminOverviewRepository {
   Future<DeviceAssignment> bindDevice(BindDeviceInput input);
 
   Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input);
+
+  Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input);
 
   Future<List<DeviceAssignment>> loadAssignmentHistory();
 }

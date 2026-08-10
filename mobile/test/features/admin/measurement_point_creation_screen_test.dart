@@ -275,6 +275,11 @@ class _PendingCreationRepository implements AdminOverviewRepository {
   }
 
   @override
+  Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input) {
+    throw UnsupportedError('Relocation is not used by this test repository.');
+  }
+
+  @override
   Future<List<DeviceAssignment>> loadAssignmentHistory() async => const [];
 }
 
@@ -303,6 +308,11 @@ class _RecordingRepository implements AdminOverviewRepository {
   @override
   Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input) {
     throw UnsupportedError('Replacement is not used by this test repository.');
+  }
+
+  @override
+  Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input) {
+    throw UnsupportedError('Relocation is not used by this test repository.');
   }
 
   @override

@@ -54,6 +54,20 @@ class AdminOverviewScreen extends ConsumerWidget {
       );
     }
 
+    Future<void> relocateDevice(String assignmentId) async {
+      final relocated = await context.push<bool>(
+        '/admin/mock/relocate-device/$assignmentId',
+      );
+      if (relocated != true || !context.mounted) {
+        return;
+      }
+
+      ref.invalidate(adminOverviewProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Device relocated successfully.')),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Overview')),
       body: SafeArea(
@@ -67,6 +81,7 @@ class AdminOverviewScreen extends ConsumerWidget {
           data: (data) => _OverviewContent(
             overview: data,
             onReplace: replaceDevice,
+            onRelocate: relocateDevice,
           ),
         ),
       ),
@@ -97,10 +112,12 @@ class _OverviewContent extends StatelessWidget {
   const _OverviewContent({
     required this.overview,
     required this.onReplace,
+    required this.onRelocate,
   });
 
   final AdminOverview overview;
   final ValueChanged<String> onReplace;
+  final ValueChanged<String> onRelocate;
 
   @override
   Widget build(BuildContext context) {
@@ -145,6 +162,7 @@ class _OverviewContent extends StatelessWidget {
               pointName: point?.name ?? assignment.measurementPointId,
               serialNumber: device?.serialNumber ?? assignment.deviceId,
               onReplace: () => onReplace(assignment.id),
+              onRelocate: () => onRelocate(assignment.id),
             );
           },
         ),
@@ -229,12 +247,14 @@ class _BindingTile extends StatelessWidget {
     required this.pointName,
     required this.serialNumber,
     required this.onReplace,
+    required this.onRelocate,
   });
 
   final String assignmentId;
   final String pointName;
   final String serialNumber;
   final VoidCallback onReplace;
+  final VoidCallback onRelocate;
 
   @override
   Widget build(BuildContext context) {
@@ -249,10 +269,20 @@ class _BindingTile extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.only(left: 16, bottom: 8),
-            child: TextButton(
-              key: Key('replace-device-action-$assignmentId'),
-              onPressed: onReplace,
-              child: const Text('Replace Device'),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextButton(
+                  key: Key('replace-device-action-$assignmentId'),
+                  onPressed: onReplace,
+                  child: const Text('Replace Device'),
+                ),
+                TextButton(
+                  key: Key('relocate-device-action-$assignmentId'),
+                  onPressed: onRelocate,
+                  child: const Text('Relocate Device'),
+                ),
+              ],
             ),
           ),
         ],

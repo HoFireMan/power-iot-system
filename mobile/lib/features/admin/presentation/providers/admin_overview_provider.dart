@@ -160,6 +160,73 @@ final replaceDeviceRequestIdentitySourceProvider =
   (ref) => MockReplaceDeviceRequestIdentitySource(),
 );
 
+class PendingRelocateDeviceRequest {
+  const PendingRelocateDeviceRequest({
+    required this.requestIdentity,
+    required this.currentAssignmentId,
+    required this.targetMeasurementPointId,
+  });
+
+  final String requestIdentity;
+  final String currentAssignmentId;
+  final String targetMeasurementPointId;
+}
+
+abstract interface class RelocateDeviceRequestIdentitySource {
+  PendingRelocateDeviceRequest? get pending;
+
+  String identityFor({
+    required String currentAssignmentId,
+    required String targetMeasurementPointId,
+  });
+
+  void complete(String requestIdentity);
+}
+
+class MockRelocateDeviceRequestIdentitySource
+    implements RelocateDeviceRequestIdentitySource {
+  int _nextIdentity = 1;
+  PendingRelocateDeviceRequest? _pending;
+
+  @override
+  PendingRelocateDeviceRequest? get pending => _pending;
+
+  @override
+  String identityFor({
+    required String currentAssignmentId,
+    required String targetMeasurementPointId,
+  }) {
+    final pending = _pending;
+    if (pending != null &&
+        pending.currentAssignmentId == currentAssignmentId &&
+        pending.targetMeasurementPointId == targetMeasurementPointId) {
+      return pending.requestIdentity;
+    }
+
+    final identity =
+        'mock-relocate-device-${_nextIdentity.toString().padLeft(3, '0')}';
+    _nextIdentity++;
+    _pending = PendingRelocateDeviceRequest(
+      requestIdentity: identity,
+      currentAssignmentId: currentAssignmentId,
+      targetMeasurementPointId: targetMeasurementPointId,
+    );
+    return identity;
+  }
+
+  @override
+  void complete(String requestIdentity) {
+    if (_pending?.requestIdentity == requestIdentity) {
+      _pending = null;
+    }
+  }
+}
+
+final relocateDeviceRequestIdentitySourceProvider =
+    Provider<RelocateDeviceRequestIdentitySource>(
+  (ref) => MockRelocateDeviceRequestIdentitySource(),
+);
+
 final adminOverviewRepositoryProvider = Provider<AdminOverviewRepository>(
   (ref) => MockAdminOverviewRepository(),
 );
