@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../domain/models/admin_overview.dart';
 import '../../domain/models/device_inventory.dart';
@@ -13,6 +14,20 @@ class AdminOverviewScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final overview = ref.watch(adminOverviewProvider);
 
+    Future<void> createMeasurementPoint() async {
+      final createdName = await context.push<String>(
+        '/admin/mock/create-measurement-point',
+      );
+      if (createdName == null || !context.mounted) {
+        return;
+      }
+
+      ref.invalidate(adminOverviewProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Measurement Point created: $createdName')),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Overview')),
       body: SafeArea(
@@ -25,6 +40,11 @@ class AdminOverviewScreen extends ConsumerWidget {
           ),
           data: (data) => _OverviewContent(overview: data),
         ),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: createMeasurementPoint,
+        icon: const Icon(Icons.add_location_alt_outlined),
+        label: const Text('Create Measurement Point'),
       ),
     );
   }

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:power_iot_app/features/admin/data/repositories/mock_admin_overview_repository.dart';
 import 'package:power_iot_app/features/admin/domain/models/admin_overview.dart';
+import 'package:power_iot_app/features/admin/domain/models/measurement_point.dart';
 import 'package:power_iot_app/features/admin/domain/repositories/admin_overview_repository.dart';
 import 'package:power_iot_app/features/admin/presentation/providers/admin_overview_provider.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/admin_overview_screen.dart';
@@ -20,7 +21,7 @@ void main() {
 
   testWidgets('mock repository success renders deterministic overview data',
       (tester) async {
-    const repository = MockAdminOverviewRepository();
+    final repository = MockAdminOverviewRepository();
     final overview = await repository.loadOverview();
     expect(overview.measurementPoints.first.name, 'Main Hall');
     expect(overview.devices.first.serialNumber, 'SN-METER-001');
@@ -104,6 +105,13 @@ class _FixedAdminOverviewRepository implements AdminOverviewRepository {
 
   @override
   Future<AdminOverview> loadOverview() async => overview;
+
+  @override
+  Future<MeasurementPoint> createMeasurementPoint(
+    CreateMeasurementPointInput input,
+  ) {
+    throw UnsupportedError('Creation is not used by this test repository.');
+  }
 }
 
 class _PendingAdminOverviewRepository implements AdminOverviewRepository {
@@ -111,4 +119,11 @@ class _PendingAdminOverviewRepository implements AdminOverviewRepository {
 
   @override
   Future<AdminOverview> loadOverview() => completer.future;
+
+  @override
+  Future<MeasurementPoint> createMeasurementPoint(
+    CreateMeasurementPointInput input,
+  ) {
+    throw UnsupportedError('Creation is not used by this test repository.');
+  }
 }
