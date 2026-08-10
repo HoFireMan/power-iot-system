@@ -28,7 +28,8 @@ class PowerIoTApp extends StatelessWidget {
       title: 'Power IoT System',
       debugShowCheckedModeBanner: false,
 
-      // 必要的 DevicePreview 設定
+      // DevicePreview 1.3.1 requires this flag for inherited preview metrics.
+      // ignore: deprecated_member_use
       useInheritedMediaQuery: true,
       locale: DevicePreview.locale(context),
       builder: DevicePreview.appBuilder,

@@ -4,13 +4,13 @@ import 'package:google_fonts/google_fonts.dart';
 
 class AppTheme {
   // --- 🎨 現代化配色系統 ---
-  
+
   // 主色：更深沈穩重的森林綠，給人專業、信任感
-  static const Color primaryColor = Color(0xFF2E7D32); 
+  static const Color primaryColor = Color(0xFF2E7D32);
   // 次要色：活潑的萊姆綠，用於強調數據或按鈕
   static const Color secondaryColor = Color(0xFF66BB6A);
   // [新增] 強調色：橘色 (用於星星、警示等)
-  static const Color accentColor = Color(0xFFFF9800); 
+  static const Color accentColor = Color(0xFFFF9800);
   // 背景色：極淡的灰綠色，比純白更護眼，且能襯托白色卡片
   static const Color backgroundColor = Color(0xFFF1F8E9);
   // 錯誤色：柔和的紅
@@ -26,18 +26,17 @@ class AppTheme {
   static const LinearGradient primaryGradient = LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
-    colors: [Color(0xFF2E7D32), Color(0xFF66BB6A)], 
+    colors: [Color(0xFF2E7D32), Color(0xFF66BB6A)],
   );
 
   static ThemeData get lightTheme {
     return ThemeData(
       useMaterial3: true,
       brightness: Brightness.light,
-      
+
       // 色彩定義
       colorScheme: ColorScheme.fromSeed(
         seedColor: primaryColor,
-        background: backgroundColor,
         surface: surfaceColor,
         primary: primaryColor,
         secondary: secondaryColor,
@@ -72,7 +71,7 @@ class AppTheme {
       cardTheme: CardThemeData(
         color: surfaceColor,
         elevation: 4, // 陰影高度
-        shadowColor: primaryColor.withOpacity(0.15), // 帶有綠色的陰影
+        shadowColor: primaryColor.withValues(alpha: 0.15), // 帶有綠色的陰影
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20), // 大圓角
         ),
@@ -90,13 +89,13 @@ class AppTheme {
             borderRadius: BorderRadius.circular(30),
           ),
           textStyle: const TextStyle(
-            fontSize: 16, 
+            fontSize: 16,
             fontWeight: FontWeight.bold,
             letterSpacing: 1,
           ),
         ),
       ),
-      
+
       // ICON 樣式
       iconTheme: const IconThemeData(
         color: primaryColor,

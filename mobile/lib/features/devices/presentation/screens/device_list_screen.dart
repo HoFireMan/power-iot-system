@@ -77,7 +77,7 @@ class DeviceListScreen extends StatelessWidget {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: AppTheme.primaryColor.withOpacity(0.1),
+            color: AppTheme.primaryColor.withValues(alpha: 0.1),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -88,10 +88,11 @@ class DeviceListScreen extends StatelessWidget {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: AppTheme.primaryColor.withOpacity(0.1),
+              color: AppTheme.primaryColor.withValues(alpha: 0.1),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.power, color: AppTheme.primaryColor, size: 28),
+            child:
+                const Icon(Icons.power, color: AppTheme.primaryColor, size: 28),
           ),
           const SizedBox(width: 16),
           const Text(
@@ -133,7 +134,8 @@ class DeviceListScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildDeviceCard(BuildContext context, {
+  Widget _buildDeviceCard(
+    BuildContext context, {
     required String name,
     required String type,
     required bool isOnline,
@@ -147,7 +149,7 @@ class DeviceListScreen extends StatelessWidget {
         border: isOnline ? null : Border.all(color: Colors.grey.shade200),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -158,8 +160,8 @@ class DeviceListScreen extends StatelessWidget {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: isOnline 
-                  ? AppTheme.secondaryColor.withOpacity(0.15) 
+              color: isOnline
+                  ? AppTheme.secondaryColor.withValues(alpha: 0.15)
                   : Colors.grey.shade100,
               shape: BoxShape.circle,
             ),
@@ -187,7 +189,8 @@ class DeviceListScreen extends StatelessWidget {
                     padding: EdgeInsets.only(top: 4),
                     child: Text(
                       "請檢查電源",
-                      style: TextStyle(fontSize: 12, color: AppTheme.errorColor),
+                      style:
+                          TextStyle(fontSize: 12, color: AppTheme.errorColor),
                     ),
                   ),
               ],
@@ -210,7 +213,8 @@ class DeviceListScreen extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.access_time_filled_rounded, size: 16, color: AppTheme.textSecondary),
+            Icon(Icons.access_time_filled_rounded,
+                size: 16, color: AppTheme.textSecondary),
             SizedBox(width: 4),
             Text(
               "提醒設定",
@@ -236,7 +240,7 @@ class DeviceListScreen extends StatelessWidget {
         borderRadius: BorderRadius.circular(35),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -246,16 +250,32 @@ class DeviceListScreen extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           // 1. 首頁 (跳轉)
-          _NavIcon(icon: Icons.home_rounded, isSelected: false, label: "首頁", onTap: () => context.go('/dashboard')),
-          
+          _NavIcon(
+              icon: Icons.home_rounded,
+              isSelected: false,
+              label: "首頁",
+              onTap: () => context.go('/dashboard')),
+
           // 2. 設備 (當前頁 isSelected: true)
-          _NavIcon(icon: Icons.electrical_services_rounded, isSelected: true, label: "設備", onTap: () {}),
-          
+          _NavIcon(
+              icon: Icons.electrical_services_rounded,
+              isSelected: true,
+              label: "設備",
+              onTap: () {}),
+
           // 3. 個人 (跳轉)
-          _NavIcon(icon: Icons.person_rounded, isSelected: false, label: "個人", onTap: () => context.go('/profile')),
-          
+          _NavIcon(
+              icon: Icons.person_rounded,
+              isSelected: false,
+              label: "個人",
+              onTap: () => context.go('/profile')),
+
           // 4. 店家 (跳轉) - 加入了這個跳轉逻辑
-          _NavIcon(icon: Icons.store_rounded, isSelected: false, label: "店家", onTap: () => context.go('/shops')),
+          _NavIcon(
+              icon: Icons.store_rounded,
+              isSelected: false,
+              label: "店家",
+              onTap: () => context.go('/shops')),
         ],
       ),
     );
@@ -263,9 +283,12 @@ class DeviceListScreen extends StatelessWidget {
 
   IconData _getIcon(String type) {
     switch (type) {
-      case 'ac': return Icons.ac_unit_rounded;
-      case 'plug': return Icons.power_rounded;
-      default: return Icons.lightbulb_rounded;
+      case 'ac':
+        return Icons.ac_unit_rounded;
+      case 'plug':
+        return Icons.power_rounded;
+      default:
+        return Icons.lightbulb_rounded;
     }
   }
 }
@@ -277,7 +300,11 @@ class _NavIcon extends StatelessWidget {
   final bool isSelected;
   final VoidCallback onTap;
 
-  const _NavIcon({required this.icon, required this.label, required this.isSelected, required this.onTap});
+  const _NavIcon(
+      {required this.icon,
+      required this.label,
+      required this.isSelected,
+      required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -293,14 +320,13 @@ class _NavIcon extends StatelessWidget {
             size: 26,
           ),
           const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
-            )
-          ),
+          Text(label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color:
+                    isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
+              )),
         ],
       ),
     );
