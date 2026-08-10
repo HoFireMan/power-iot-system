@@ -82,6 +82,15 @@ type deviceSimulator struct {
 
 	// Test-only seam for injecting an ACK immediately before quarantine release.
 	queuedACKReleaseHook func(ackKey)
+
+	// Test-only seam for making an ACK ready after the timer wins the outer
+	// select, before timeout arbitration consumes or revokes the waiter.
+	ackTimeoutArbitrationHook func(ackKey)
+
+	// Test-only seam called after timeout arbitration finds no ready ACK and
+	// before it revokes authorization. The callback must not block or reacquire
+	// lifecycleMu/mu; it is used only to start a competing ACK attempt.
+	ackTimeoutArbitrationInspectionHook func(ackKey)
 }
 
 type ackKey = simulator.TelemetryIdentity
@@ -921,14 +930,7 @@ func (s *deviceSimulator) publishItemAndWait(ctx context.Context, item simulator
 	}
 	timer := time.NewTimer(ackTimeout)
 	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		s.revokeAckAttempt(identity, waiter, queueItem)
-		return ctx.Err()
-	case <-attempt.change:
-		s.revokeAckAttempt(identity, waiter, queueItem)
-		return errMQTTSessionChanged
-	case ack := <-waiter:
+	handleACK := func(ack simulator.Ack) error {
 		if !ack.IsTerminal() {
 			s.revokeAckAttempt(identity, waiter, queueItem)
 			return &ackWaitError{status: ack.Status}
@@ -937,8 +939,28 @@ func (s *deviceSimulator) publishItemAndWait(ctx context.Context, item simulator
 			return err
 		}
 		return nil
-	case <-timer.C:
+	}
+	select {
+	case <-ctx.Done():
 		s.revokeAckAttempt(identity, waiter, queueItem)
+		return ctx.Err()
+	case <-attempt.change:
+		s.revokeAckAttempt(identity, waiter, queueItem)
+		return errMQTTSessionChanged
+	case ack := <-waiter:
+		return handleACK(ack)
+	case <-timer.C:
+		if s.ackTimeoutArbitrationHook != nil {
+			s.ackTimeoutArbitrationHook(ackKey(identity))
+		}
+		// Timer and ACK readiness can coincide. Inspect the waiter and revoke
+		// authorization atomically with resolveAckForSession's lifecycle/ACK
+		// critical section. Validation stays outside the locks because it
+		// reacquires lifecycleMu.
+		ack, ready := s.arbitrateAckTimeout(identity, waiter, queueItem)
+		if ready {
+			return handleACK(ack)
+		}
 		log.Printf("ACK timeout")
 		return &ackWaitError{timeout: true}
 	}
@@ -1034,14 +1056,36 @@ func (s *deviceSimulator) registerAckMode(identity simulator.TelemetryIdentity, 
 	return waiter
 }
 
+func (s *deviceSimulator) revokeAckAttemptLocked(identity simulator.TelemetryIdentity, waiter chan simulator.Ack, queueItem bool) {
+	delete(s.ackAttemptAuthorized, waiter)
+	if queueItem {
+		delete(s.ackAuthorized, identity)
+	}
+}
+
 func (s *deviceSimulator) revokeAckAttempt(identity simulator.TelemetryIdentity, waiter chan simulator.Ack, queueItem bool) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.ackAttemptAuthorized, waiter)
-	if queueItem {
-		delete(s.ackAuthorized, identity)
+	s.revokeAckAttemptLocked(identity, waiter, queueItem)
+}
+
+func (s *deviceSimulator) arbitrateAckTimeout(identity simulator.TelemetryIdentity, waiter chan simulator.Ack, queueItem bool) (simulator.Ack, bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	select {
+	case ack := <-waiter:
+		return ack, true
+	default:
+		if s.ackTimeoutArbitrationInspectionHook != nil {
+			s.ackTimeoutArbitrationInspectionHook(ackKey(identity))
+		}
+		s.revokeAckAttemptLocked(identity, waiter, queueItem)
+		return simulator.Ack{}, false
 	}
 }
 

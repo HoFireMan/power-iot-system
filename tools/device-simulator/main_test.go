@@ -884,6 +884,93 @@ func TestDelayedACKAfterTimeoutWhileReadyWaitsForFreshReplay(t *testing.T) {
 	}
 }
 
+func TestTerminalACKReadyAtTimeoutArbitrationIsNotReportedAsTimeout(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 40, Sequence: 400, Timestamp: 1786021200}
+	arbitrationReached := make(chan struct{})
+	device.ackTimeoutArbitrationHook = func(identity ackKey) {
+		if identity != telemetry.Identity() {
+			panic("timeout arbitration received the wrong telemetry identity")
+		}
+		close(arbitrationReached)
+		device.resolveAck(simulator.Ack{BootCounter: 40, Sequence: 400, Status: "stored"})
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- device.publishAndWait(context.Background(), telemetry) }()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("terminal ACK ready at timeout arbitration returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal ACK arbitration did not resolve telemetry")
+	}
+	select {
+	case <-arbitrationReached:
+	default:
+		t.Fatal("timeout arbitration hook was not reached")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("terminal ACK ready at timeout arbitration left queue length=%d", queue.Len())
+	}
+}
+
+func TestACKAfterTimeoutArbitrationInspectionIsDeferredForFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 41, Sequence: 410, Timestamp: 1786021200}
+	inspectionReached := make(chan struct{})
+	ackDone := make(chan struct{})
+	device.ackTimeoutArbitrationInspectionHook = func(identity ackKey) {
+		if identity != telemetry.Identity() {
+			panic("timeout arbitration inspected the wrong telemetry identity")
+		}
+		close(inspectionReached)
+	}
+	go func() {
+		<-inspectionReached
+		device.onMessage(client, testMQTTMessage{
+			topic:   device.ackTopic(),
+			payload: []byte(`{"boot_counter":41,"seq":410,"status":"stored"}`),
+		})
+		close(ackDone)
+	}()
+
+	err := device.publishAndWait(context.Background(), telemetry)
+	var ackErr *ackWaitError
+	if !errors.As(err, &ackErr) || !ackErr.timeout {
+		t.Fatalf("ACK after timeout arbitration inspection returned %v, want timeout", err)
+	}
+	select {
+	case <-ackDone:
+	case <-time.After(time.Second):
+		t.Fatal("ACK after timeout arbitration inspection was not processed")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("ACK after timeout arbitration inspection removed queue item; length=%d", queue.Len())
+	}
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("fresh replay did not consume deferred ACK: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("fresh replay left deferred ACK's queue item pending")
+	}
+}
+
 func TestDelayedACKAfterTimeoutAndDisconnectWaitsForFreshReplay(t *testing.T) {
 	device := newLifecycleDevice(t)
 	device.config.AckTimeout = 10 * time.Millisecond
