@@ -405,7 +405,7 @@ func TestMigrationRollbackOnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dirty || version != 3 {
+	if dirty || version != 4 {
 		t.Fatal(fmt.Sprintf("unexpected one-step DOWN state version=%d dirty=%t", version, dirty))
 	}
 	if err := Up(dsn); err != nil {
@@ -415,7 +415,7 @@ func TestMigrationRollbackOnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dirty || version != 4 {
+	if dirty || version != 5 {
 		t.Fatal(fmt.Sprintf("unexpected migration state version=%d dirty=%t", version, dirty))
 	}
 }
@@ -441,6 +441,9 @@ func TestGenericGuardedDownRecoveryAcrossMigrationVersions(t *testing.T) {
 	if err := Down(dsn); err != nil {
 		t.Fatal(err)
 	}
+	if err := Down(dsn); err != nil {
+		t.Fatal(err)
+	}
 	version, dirty, err := Version(dsn)
 	if err != nil || dirty || version != 2 {
 		t.Fatalf("unexpected setup state version=%d dirty=%t err=%v", version, dirty, err)
@@ -452,7 +455,8 @@ func TestGenericGuardedDownRecoveryAcrossMigrationVersions(t *testing.T) {
 	if err := db.Raw(`INSERT INTO shops (code, name) VALUES (?, ?) RETURNING id`, shopCode, "Generic Guard Shop").Scan(&shopID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Raw(`INSERT INTO devices (shop_id, mac_address, name) VALUES (?, ?, ?) RETURNING id`, shopID, "AABBCCDDEEFF", "generic-guard-device").Scan(&deviceID).Error; err != nil {
+	guardMAC := strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", "")[:12])
+	if err := db.Raw(`INSERT INTO devices (shop_id, mac_address, name) VALUES (?, ?, ?) RETURNING id`, shopID, guardMAC, "generic-guard-device").Scan(&deviceID).Error; err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -537,8 +541,11 @@ func TestMigrationRollbackFailsClosedForAuditHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := Down(dsn); err != nil {
+		t.Fatalf("v5 DOWN should preserve pre-existing v4 audit history: %v", err)
+	}
 	if downErr := Down(dsn); downErr == nil {
-		t.Fatal("DOWN succeeded with durable audit history")
+		t.Fatal("v4 DOWN succeeded with durable audit history")
 	} else {
 		if !strings.Contains(downErr.Error(), "MIGRATION_GUARDED_DOWN") {
 			t.Fatalf("guarded DOWN error lost stable signal: %v", downErr)
@@ -576,8 +583,11 @@ func TestMigrationRollbackFailsClosedForOperationHistory(t *testing.T) {
 	actorID := ensureMigrationRollbackActor(t, db)
 	insertMigrationRollbackOperation(t, db, actorID, "shop:migration", "bind")
 
+	if err := Down(dsn); err != nil {
+		t.Fatalf("v5 DOWN should preserve pre-existing operation history: %v", err)
+	}
 	if err := Down(dsn); err == nil {
-		t.Fatal("DOWN succeeded with durable operation history")
+		t.Fatal("v4 DOWN succeeded with durable operation history")
 	}
 	var operationCount int64
 	if err := db.Raw("SELECT count(*) FROM admin_binding_operations").Scan(&operationCount).Error; err != nil {
@@ -618,8 +628,8 @@ func TestMigrationRollbackProtectsConcurrentWriter(t *testing.T) {
 	if err := <-downResult; err != nil {
 		t.Fatal("empty protected rollback failed:", err)
 	}
-	if err := <-writerResult; err == nil {
-		t.Fatal("concurrent writer inserted after protected rollback dropped its table")
+	if err := <-writerResult; err != nil {
+		t.Fatal("concurrent writer was not preserved across Stage A rollback:", err)
 	}
 
 	var auditsExists, operationsExists bool
@@ -629,8 +639,8 @@ func TestMigrationRollbackProtectsConcurrentWriter(t *testing.T) {
 	if err := db.Raw("SELECT to_regclass('admin_binding_operations') IS NOT NULL").Scan(&operationsExists).Error; err != nil {
 		t.Fatal(err)
 	}
-	if auditsExists || operationsExists {
-		t.Fatal("protected empty rollback did not drop both tables")
+	if !auditsExists || !operationsExists {
+		t.Fatal("Stage A rollback removed pre-existing Admin tables")
 	}
 	if err := Up(dsn); err != nil {
 		t.Fatal(err)
@@ -657,8 +667,8 @@ func TestMigrationRollbackMatchesOperationAuditLockOrder(t *testing.T) {
 	if err := writer.Commit().Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := <-downResult; err == nil {
-		t.Fatal("DOWN unexpectedly succeeded while writer committed durable history")
+	if err := <-downResult; err != nil {
+		t.Fatal("Stage A DOWN should preserve committed v4 history:", err)
 	}
 
 	var auditCount, operationCount int64

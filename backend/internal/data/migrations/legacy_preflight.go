@@ -32,6 +32,11 @@ type AuthorityRepresentation uint8
 
 const RepresentationNotRepresented AuthorityRepresentation = iota
 
+// securitySchemaPreflightBaseVersion is the last schema version before the
+// Stage A foundation. Preflight is intentionally a v4 input inventory; the
+// additive v5 migration must not be used as a substitute for reconciliation.
+const securitySchemaPreflightBaseVersion = 4
+
 func (r AuthorityRepresentation) String() string {
 	return "NOT_REPRESENTED"
 }

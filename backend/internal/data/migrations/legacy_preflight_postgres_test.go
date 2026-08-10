@@ -21,7 +21,18 @@ func preflightDatabase(t *testing.T) (*sql.DB, string) {
 	if dsn == "" {
 		t.Fatal("TEST_MIGRATION_DATABASE_URL is required for Security Schema preflight PostgreSQL tests")
 	}
+	// Security preflight inventories the v4 input state. The test database may
+	// be left at v5 by another migration test, so return it to clean v4 through
+	// the migration runner rather than bypassing the writer fence.
 	if err := Up(dsn); err != nil {
+		t.Fatal(err)
+	}
+	if version, dirty, err := Version(dsn); err != nil {
+		t.Fatal(err)
+	} else if dirty || version != 5 {
+		t.Fatalf("preflight setup version=%d dirty=%t, want clean v5", version, dirty)
+	}
+	if err := Down(dsn); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("postgres", dsn)
