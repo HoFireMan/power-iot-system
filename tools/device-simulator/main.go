@@ -24,6 +24,10 @@ import (
 	"power-iot-device-simulator/internal/simulator"
 )
 
+// defaultQueueCapacity keeps simulator RAM bounded while allowing the default
+// offline replay batch to fit without dropping an item.
+const defaultQueueCapacity = 100
+
 type config struct {
 	Mode            string
 	BrokerURL       string
@@ -36,6 +40,7 @@ type config struct {
 	BootCounter     int64
 	StartSequence   int64
 	ReplayCount     int
+	QueueCapacity   int
 	AckTimeout      time.Duration
 	CommandAck      bool
 	RecordedAt      *time.Time
@@ -56,12 +61,27 @@ type deviceSimulator struct {
 	restoringEpoch       uint64
 	mqttOperationTimeout time.Duration
 
-	config       config
-	generator    simulator.Generator
-	mu           sync.Mutex
-	pending      map[ackKey][]chan simulator.Ack
-	readyEvents  chan struct{}
-	offlineQueue []simulator.Telemetry
+	config               config
+	generator            simulator.Generator
+	mu                   sync.Mutex
+	pending              map[ackKey][]chan simulator.Ack
+	readyEvents          chan struct{}
+	offlineQueue         []simulator.Telemetry
+	queue                *simulator.TelemetryQueue
+	queueMu              sync.Mutex
+	replayMu             sync.Mutex
+	ackEpoch             map[chan simulator.Ack]uint64
+	ackQueueItem         map[chan simulator.Ack]bool
+	ackAttempt           map[chan simulator.Ack]bool
+	ackAttemptAuthorized map[chan simulator.Ack]bool
+	ackAuthorized        map[ackKey]bool
+	deferredACK          map[ackKey]simulator.Ack
+
+	// Test-only seam for proving waiter registration is atomic with epoch capture.
+	ackRegistrationHook func()
+
+	// Test-only seam for injecting an ACK immediately before quarantine release.
+	queuedACKReleaseHook func(ackKey)
 }
 
 type ackKey = simulator.TelemetryIdentity
@@ -77,6 +97,7 @@ type publishAttempt struct {
 	token  mqtt.Token
 	client mqtt.Client
 	epoch  uint64
+	change <-chan struct{}
 }
 
 func (e *ackWaitError) Error() string {
@@ -95,7 +116,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	device := &deviceSimulator{config: cfg, generator: generator, pending: make(map[ackKey][]chan simulator.Ack), readyEvents: make(chan struct{}, 4)}
+	queue, err := simulator.NewTelemetryQueue(cfg.QueueCapacity)
+	if err != nil {
+		log.Fatal(err)
+	}
+	device := &deviceSimulator{
+		config:      cfg,
+		generator:   generator,
+		pending:     make(map[ackKey][]chan simulator.Ack),
+		readyEvents: make(chan struct{}, 4),
+		queue:       queue,
+		ackEpoch:    make(map[chan simulator.Ack]uint64),
+	}
 	if cfg.Mode == "offline-replay" {
 		device.prepareOfflineQueue()
 		if cfg.OfflineWait > 0 {
@@ -127,6 +159,7 @@ func parseConfig() (config, error) {
 	flag.Int64Var(&cfg.BootCounter, "boot-counter", int64Env("BOOT_COUNTER", 1), "simulated boot counter")
 	flag.Int64Var(&cfg.StartSequence, "start-seq", int64Env("START_SEQ", 1), "first simulated sequence number")
 	flag.IntVar(&cfg.ReplayCount, "replay-count", intEnv("REPLAY_COUNT", 5), "offline-replay queue length")
+	flag.IntVar(&cfg.QueueCapacity, "queue-capacity", intEnv("QUEUE_CAPACITY", defaultQueueCapacity), "bounded in-memory telemetry queue capacity")
 	flag.DurationVar(&cfg.AckTimeout, "ack-timeout", durationEnv("ACK_TIMEOUT", 10*time.Second), "time to wait for an application ACK")
 	flag.BoolVar(&cfg.CommandAck, "command-ack", boolEnv("COMMAND_ACK", true), "publish command/ack after receiving a command")
 	recordedAtText := envOr("RECORDED_AT", "")
@@ -155,8 +188,11 @@ func parseConfig() (config, error) {
 	if cfg.Interval <= 0 || cfg.AckTimeout <= 0 {
 		return config{}, fmt.Errorf("publish interval and ACK timeout must be positive")
 	}
-	if cfg.BootCounter < 0 || cfg.StartSequence < 0 || cfg.ReplayCount <= 0 || cfg.OfflineWait < 0 {
-		return config{}, fmt.Errorf("boot counter, sequence, replay count, and offline wait are invalid")
+	if cfg.BootCounter < 0 || cfg.StartSequence < 0 || cfg.ReplayCount <= 0 || cfg.QueueCapacity <= 0 || cfg.OfflineWait < 0 {
+		return config{}, fmt.Errorf("boot counter, sequence, replay count, queue capacity, and offline wait are invalid")
+	}
+	if cfg.Mode == "offline-replay" && cfg.ReplayCount > cfg.QueueCapacity {
+		return config{}, fmt.Errorf("offline replay count %d exceeds queue capacity %d", cfg.ReplayCount, cfg.QueueCapacity)
 	}
 	return cfg, nil
 }
@@ -269,8 +305,50 @@ func (s *deviceSimulator) onConnectionLost(client mqtt.Client, err error) {
 		return
 	}
 	s.invalidateReadinessLocked()
+	// A waiter from the invalidated session may still receive a delayed
+	// terminal ACK after its publish call returns. Quarantine that identity
+	// until a fresh replay explicitly registers it.
+	s.pruneStaleQueueWaiters()
 	s.lifecycleMu.Unlock()
 	log.Printf("MQTT connection lost: %v", err)
+}
+
+func (s *deviceSimulator) pruneStaleQueueWaiters() {
+	// The caller holds lifecycleMu. Registration captures the epoch and inserts
+	// under the same lock, so an invalidated waiter cannot remain ahead of a
+	// fresh replay waiter.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for identity, waiters := range s.pending {
+		kept := waiters[:0]
+		for _, waiter := range waiters {
+			if s.ackAttempt[waiter] {
+				delete(s.ackEpoch, waiter)
+				delete(s.ackQueueItem, waiter)
+				delete(s.ackAttempt, waiter)
+				delete(s.ackAttemptAuthorized, waiter)
+				continue
+			}
+			kept = append(kept, waiter)
+		}
+		if len(kept) == 0 {
+			delete(s.pending, identity)
+		} else {
+			s.pending[identity] = kept
+		}
+	}
+
+	// A prior successful attempt is no longer authorized after loss. Any
+	// terminal ACK already observed remains deferred until a fresh attempt
+	// passes publish-token and epoch validation.
+	s.queueMu.Lock()
+	queue := s.queue
+	s.queueMu.Unlock()
+	if queue != nil {
+		for _, item := range queue.Pending() {
+			delete(s.ackAuthorized, item.Identity())
+		}
+	}
 }
 
 func (s *deviceSimulator) setClient(client mqtt.Client) error {
@@ -371,6 +449,7 @@ func (s *deviceSimulator) disconnectClientForReconnect() mqtt.Client {
 	client := s.client
 	s.client = nil
 	s.invalidateReadinessLocked()
+	s.pruneStaleQueueWaiters()
 	s.lifecycleMu.Unlock()
 
 	if client != nil {
@@ -483,7 +562,12 @@ func validateSubscribeGrant(token mqtt.Token, topic string, requestedQoS byte) e
 	return nil
 }
 
-func (s *deviceSimulator) onMessage(_ mqtt.Client, message mqtt.Message) {
+func (s *deviceSimulator) onMessage(client mqtt.Client, message mqtt.Message) {
+	epoch, ok := s.currentMessageSession(client)
+	if !ok {
+		log.Printf("stale MQTT message ignored")
+		return
+	}
 	switch message.Topic() {
 	case s.ackTopic():
 		ack, err := simulator.ParseAck(message.Payload())
@@ -492,7 +576,7 @@ func (s *deviceSimulator) onMessage(_ mqtt.Client, message mqtt.Message) {
 			return
 		}
 		s.printAck(ack)
-		s.resolveAck(ack)
+		s.resolveAckForSession(client, epoch, ack)
 	case s.commandTopic():
 		command, err := simulator.ParseCommand(message.Payload())
 		if err != nil {
@@ -588,7 +672,16 @@ func (s *deviceSimulator) runDuplicate(ctx context.Context) error {
 	if err := s.publishAndWait(ctx, telemetry); err != nil {
 		return err
 	}
-	return s.publishAndWait(ctx, telemetry)
+	// The protocol intentionally publishes the same identity twice. The
+	// second wire attempt is not a new queue item: its duplicate ACK cannot
+	// corrupt the bounded queue or be confused with a later fresh identity.
+	body, err := json.Marshal(telemetry)
+	if err != nil {
+		return err
+	}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	return s.publishItemAndWait(ctx, simulator.QueuedTelemetry{Telemetry: telemetry, Payload: body}, false)
 }
 
 func (s *deviceSimulator) runInvalid(ctx context.Context) error {
@@ -604,19 +697,67 @@ func (s *deviceSimulator) runInvalid(ctx context.Context) error {
 	return nil
 }
 
-func (s *deviceSimulator) runOfflineReplay(ctx context.Context) error {
-	s.prepareOfflineQueue()
-	for _, telemetry := range s.offlineQueue {
-		if err := s.publishAndWait(ctx, telemetry); err != nil {
+func (s *deviceSimulator) telemetryQueue() (*simulator.TelemetryQueue, error) {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	if s.queue != nil {
+		return s.queue, nil
+	}
+	capacity := s.config.QueueCapacity
+	if capacity == 0 {
+		capacity = defaultQueueCapacity
+	}
+	queue, err := simulator.NewTelemetryQueue(capacity)
+	if err != nil {
+		return nil, err
+	}
+	s.queue = queue
+	return queue, nil
+}
+
+func (s *deviceSimulator) replayPending(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queue, err := s.telemetryQueue()
+	if err != nil {
+		return err
+	}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	return s.replayPendingLocked(ctx, queue)
+}
+
+func (s *deviceSimulator) replayPendingLocked(ctx context.Context, queue *simulator.TelemetryQueue) error {
+	for _, item := range queue.Pending() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// The snapshot is intentionally rechecked immediately before sending;
+		// a terminal ACK may have removed this value since Pending was read.
+		if !queue.IsPending(item.Identity()) {
+			continue
+		}
+		if err := s.publishQueuedAndWait(ctx, item); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (s *deviceSimulator) runOfflineReplay(ctx context.Context) error {
+	s.prepareOfflineQueue()
+	return s.replayPending(ctx)
+}
+
 func (s *deviceSimulator) runReconnect(ctx context.Context) error {
 	if err := s.publishAndWait(ctx, s.nextTelemetry(time.Now())); err != nil {
-		return err
+		// A lost session leaves the queued item intact; reconnect mode is
+		// specifically allowed to restore readiness and replay it.
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		log.Printf("RECONNECT first telemetry retained: %v", err)
 	}
 	log.Printf("RECONNECT disconnecting MQTT client")
 	s.drainReadyEvents()
@@ -635,6 +776,9 @@ func (s *deviceSimulator) runReconnect(ctx context.Context) error {
 	case <-time.After(15 * time.Second):
 		return errors.New("MQTT reconnect subscriptions were not ready")
 	}
+	if err := s.replayPending(ctx); err != nil {
+		return err
+	}
 	return s.publishAndWait(ctx, s.nextTelemetry(time.Now()))
 }
 
@@ -642,16 +786,34 @@ func (s *deviceSimulator) prepareOfflineQueue() {
 	if s.offlineQueue != nil {
 		return
 	}
+	if s.config.ReplayCount <= 0 {
+		return
+	}
+	queue, err := s.telemetryQueue()
+	if err != nil {
+		log.Printf("LOCAL_QUEUE unavailable: %v", err)
+		return
+	}
 	base := time.Now()
 	if s.config.RecordedAt != nil {
 		base = *s.config.RecordedAt
 	}
-	queue := make([]simulator.Telemetry, 0, s.config.ReplayCount)
+	telemetryQueue := make([]simulator.Telemetry, 0, s.config.ReplayCount)
 	for i := 0; i < s.config.ReplayCount; i++ {
-		queue = append(queue, s.generator.Next(base.Add(time.Duration(i)*s.config.Interval), s.config.Interval))
+		telemetry := s.generator.Next(base.Add(time.Duration(i)*s.config.Interval), s.config.Interval)
+		body, marshalErr := json.Marshal(telemetry)
+		if marshalErr != nil {
+			log.Printf("LOCAL_QUEUE encode failed: %v", marshalErr)
+			return
+		}
+		if enqueueErr := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: body}); enqueueErr != nil {
+			log.Printf("LOCAL_QUEUE enqueue failed: %v", enqueueErr)
+			return
+		}
+		telemetryQueue = append(telemetryQueue, telemetry)
 	}
-	s.offlineQueue = queue
-	log.Printf("LOCAL_QUEUE created=%d while disconnected", len(queue))
+	s.offlineQueue = telemetryQueue
+	log.Printf("LOCAL_QUEUE created=%d while disconnected", len(telemetryQueue))
 }
 
 func (s *deviceSimulator) nextTelemetry(now time.Time) simulator.Telemetry {
@@ -673,40 +835,110 @@ func (s *deviceSimulator) drainReadyEvents() {
 }
 
 func (s *deviceSimulator) publishAndWait(ctx context.Context, telemetry simulator.Telemetry) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+
 	body, err := json.Marshal(telemetry)
 	if err != nil {
 		return err
 	}
-	identity := telemetry.Identity()
-	waiter := s.registerAck(identity)
-	attempt, err := s.publishWhenReady("device/upload/data", 0, false, body)
+	queue, err := s.telemetryQueue()
 	if err != nil {
+		return err
+	}
+	item := simulator.QueuedTelemetry{Telemetry: telemetry, Payload: body}
+	if existing, ok := queue.Item(item.Identity()); ok {
+		// A prior not-ready/failed attempt owns this identity. Retry its exact
+		// bytes rather than replacing it with regenerated data.
+		item = existing
+		return s.publishQueuedAndWait(ctx, item)
+	}
+	// Enqueue precedes publication admission. Every failure after this point
+	// therefore leaves the exact value available for a later replay. Preserve
+	// Slice 2's behavior of admitting an already-cancelled, non-blocked send;
+	// cancellation is observed after publication while a full queue still uses
+	// the context for bounded backpressure.
+	enqueueContext := ctx
+	if ctx != nil && ctx.Err() != nil && queue.Len() < queue.Capacity() {
+		enqueueContext = context.Background()
+	}
+	if err := queue.Enqueue(enqueueContext, item); err != nil {
+		return err
+	}
+	// Do not let a newly generated item bypass older retained values. The
+	// queue snapshot remains FIFO, and each identity is rechecked before send.
+	return s.replayPendingLocked(ctx, queue)
+}
+
+func (s *deviceSimulator) publishQueuedAndWait(ctx context.Context, item simulator.QueuedTelemetry) error {
+	return s.publishItemAndWait(ctx, item, true)
+}
+
+func (s *deviceSimulator) publishItemAndWait(ctx context.Context, item simulator.QueuedTelemetry, queueItem bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queue, err := s.telemetryQueue()
+	if err != nil {
+		return err
+	}
+	identity := item.Identity()
+	if queueItem && !queue.IsPending(identity) {
+		return errors.New("queued telemetry is no longer pending")
+	}
+
+	// Register immediately before external Publish. resolveAck performs the
+	// queue completion and waiter notification under the same lifecycle/ACK
+	// ordering, so a terminal ACK is consumed exactly once.
+	waiter := s.registerAckMode(identity, queueItem, true)
+	defer func() {
+		s.revokeAckAttempt(identity, waiter, queueItem)
 		s.removeAck(identity, waiter)
+	}()
+	if queueItem && !queue.IsPending(identity) {
+		// A terminal ACK won the small admission race after the snapshot
+		// check. Do not publish an already-completed item.
+		return nil
+	}
+	attempt, err := s.publishWhenReady("device/upload/data", 0, false, item.Payload)
+	if err != nil {
 		return err
 	}
 	if err := waitMQTTToken(attempt.token, 5*time.Second); err != nil {
-		s.removeAck(identity, waiter)
 		return fmt.Errorf("telemetry publish failed: %w", err)
 	}
 	if err := s.validateReadyPublish(attempt); err != nil {
-		s.removeAck(identity, waiter)
 		return err
 	}
-	log.Printf("PUBLISHED boot=%d seq=%d", telemetry.BootCounter, telemetry.Sequence)
+	s.releaseAckAttempt(identity, attempt, queueItem)
+	log.Printf("PUBLISHED boot=%d seq=%d", item.Telemetry.BootCounter, item.Telemetry.Sequence)
+	ackTimeout := s.config.AckTimeout
+	if ackTimeout <= 0 {
+		ackTimeout = 10 * time.Second
+	}
+	timer := time.NewTimer(ackTimeout)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		s.removeAck(identity, waiter)
+		s.revokeAckAttempt(identity, waiter, queueItem)
 		return ctx.Err()
+	case <-attempt.change:
+		s.revokeAckAttempt(identity, waiter, queueItem)
+		return errMQTTSessionChanged
 	case ack := <-waiter:
 		if !ack.IsTerminal() {
+			s.revokeAckAttempt(identity, waiter, queueItem)
 			return &ackWaitError{status: ack.Status}
 		}
 		if err := s.validateReadyPublish(attempt); err != nil {
 			return err
 		}
 		return nil
-	case <-time.After(s.config.AckTimeout):
-		s.removeAck(identity, waiter)
+	case <-timer.C:
+		s.revokeAckAttempt(identity, waiter, queueItem)
 		log.Printf("ACK timeout")
 		return &ackWaitError{timeout: true}
 	}
@@ -721,7 +953,12 @@ func (s *deviceSimulator) publishWhenReady(topic string, qos byte, retained bool
 		s.lifecycleMu.Unlock()
 		return publishAttempt{}, errors.New("MQTT session is not ready")
 	}
-	attempt := publishAttempt{client: s.client, epoch: s.sessionEpoch}
+	change := s.readyChanged
+	if change == nil {
+		change = make(chan struct{})
+		s.readyChanged = change
+	}
+	attempt := publishAttempt{client: s.client, epoch: s.sessionEpoch, change: change}
 	s.lifecycleMu.Unlock()
 
 	// Paho may synchronously block here under backpressure. Lifecycle callbacks
@@ -744,28 +981,197 @@ func (s *deviceSimulator) validateReadyPublish(attempt publishAttempt) error {
 }
 
 func (s *deviceSimulator) registerAck(identity simulator.TelemetryIdentity) chan simulator.Ack {
+	// Preserve the original waiter seam for tests and command paths, while
+	// treating an already-pending telemetry identity as queue-owned.
+	s.queueMu.Lock()
+	queue := s.queue
+	s.queueMu.Unlock()
+	return s.registerAckMode(identity, queue != nil && queue.IsPending(identity), false)
+}
+
+func (s *deviceSimulator) registerQueuedAck(identity simulator.TelemetryIdentity) chan simulator.Ack {
+	return s.registerAckMode(identity, true, true)
+}
+
+func (s *deviceSimulator) registerAckMode(identity simulator.TelemetryIdentity, queueItem bool, attempt bool) chan simulator.Ack {
 	waiter := make(chan simulator.Ack, 1)
+	// Capture the current session and insert the waiter under one lifecycle
+	// critical section. A loss cannot invalidate the epoch between these steps.
+	s.lifecycleMu.Lock()
+	epoch := s.sessionEpoch
+	if s.ackRegistrationHook != nil {
+		s.ackRegistrationHook()
+	}
 	s.mu.Lock()
+	if s.pending == nil {
+		s.pending = make(map[ackKey][]chan simulator.Ack)
+	}
+	if s.ackEpoch == nil {
+		s.ackEpoch = make(map[chan simulator.Ack]uint64)
+	}
+	if s.ackQueueItem == nil {
+		s.ackQueueItem = make(map[chan simulator.Ack]bool)
+	}
+	if s.ackAttempt == nil {
+		s.ackAttempt = make(map[chan simulator.Ack]bool)
+	}
+	if s.ackAttemptAuthorized == nil {
+		s.ackAttemptAuthorized = make(map[chan simulator.Ack]bool)
+	}
+	if queueItem {
+		if s.ackAuthorized == nil {
+			s.ackAuthorized = make(map[ackKey]bool)
+		}
+		delete(s.ackAuthorized, identity)
+	}
 	s.pending[identity] = append(s.pending[identity], waiter)
+	s.ackEpoch[waiter] = epoch
+	s.ackQueueItem[waiter] = queueItem
+	s.ackAttempt[waiter] = attempt
+	s.ackAttemptAuthorized[waiter] = false
 	s.mu.Unlock()
+	s.lifecycleMu.Unlock()
 	return waiter
 }
 
-func (s *deviceSimulator) resolveAck(ack simulator.Ack) {
-	key := ack.Identity()
+func (s *deviceSimulator) revokeAckAttempt(identity simulator.TelemetryIdentity, waiter chan simulator.Ack, queueItem bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
-	waiters := s.pending[key]
+	defer s.mu.Unlock()
+	delete(s.ackAttemptAuthorized, waiter)
+	if queueItem {
+		delete(s.ackAuthorized, identity)
+	}
+}
+
+func (s *deviceSimulator) releaseAckAttempt(identity simulator.TelemetryIdentity, attempt publishAttempt, queueItem bool) {
+	if queueItem && s.queuedACKReleaseHook != nil {
+		s.queuedACKReleaseHook(ackKey(identity))
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.stopping || !s.ready || s.client != attempt.client || s.sessionEpoch != attempt.epoch {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiters := s.pending[identity]
 	if len(waiters) == 0 {
-		s.mu.Unlock()
 		return
 	}
 	waiter := waiters[0]
+	if !queueItem {
+		// Duplicate mode has no queue item to complete. Do not accept an ACK
+		// until this specific second publish has passed token/epoch validation.
+		s.ackAttemptAuthorized[waiter] = true
+		return
+	}
+	if s.ackAuthorized == nil {
+		s.ackAuthorized = make(map[ackKey]bool)
+	}
+	s.ackAuthorized[identity] = true
+	s.ackAttemptAuthorized[waiter] = true
+	ack, deferred := s.deferredACK[identity]
+	if !deferred {
+		return
+	}
+	delete(s.deferredACK, identity)
+	s.queueMu.Lock()
+	queue := s.queue
+	s.queueMu.Unlock()
+	if queue == nil || !queue.HandleAck(ack) {
+		return
+	}
+	if len(waiters) == 1 {
+		delete(s.pending, identity)
+	} else {
+		s.pending[identity] = waiters[1:]
+	}
+	delete(s.ackEpoch, waiter)
+	delete(s.ackQueueItem, waiter)
+	delete(s.ackAttempt, waiter)
+	delete(s.ackAttemptAuthorized, waiter)
+	select {
+	case waiter <- ack:
+	default:
+	}
+}
+
+func (s *deviceSimulator) currentMessageSession(client mqtt.Client) (uint64, bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.stopping || !s.ready || s.client == nil || client == nil || client != s.client {
+		return 0, false
+	}
+	return s.sessionEpoch, true
+}
+
+func (s *deviceSimulator) resolveAck(ack simulator.Ack) {
+	s.resolveAckForSession(nil, 0, ack)
+}
+
+func (s *deviceSimulator) resolveAckForSession(client mqtt.Client, epoch uint64, ack simulator.Ack) {
+	key := ack.Identity()
+	// Keep lifecycle ahead of ACK state. This gives connection loss a clear
+	// linearization point: ACKs observed after the epoch changes are stale.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if client != nil && (s.stopping || !s.ready || s.client != client || s.sessionEpoch != epoch) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiters := s.pending[key]
+	s.queueMu.Lock()
+	queue := s.queue
+	s.queueMu.Unlock()
+	queuePending := queue != nil && queue.IsPending(key)
+
+	// Queue-owned terminal ACKs are never allowed to delete before a fresh
+	// attempt has completed Publish-token and epoch validation. This covers
+	// ACKs arriving before registration, during Publish, and after timeout.
+	if ack.IsTerminal() && queuePending {
+		if !s.ackAuthorized[key] {
+			if s.deferredACK == nil {
+				s.deferredACK = make(map[ackKey]simulator.Ack)
+			}
+			s.deferredACK[key] = ack
+			return
+		}
+		if !queue.HandleAck(ack) {
+			return
+		}
+		delete(s.ackAuthorized, key)
+		delete(s.deferredACK, key)
+		if len(waiters) == 0 {
+			return
+		}
+	}
+	if len(waiters) == 0 {
+		return
+	}
+	waiter := waiters[0]
+	if waiterEpoch, ok := s.ackEpoch[waiter]; ok && waiterEpoch != s.sessionEpoch {
+		return
+	}
+	if s.ackQueueItem[waiter] && (queue == nil || !queuePending) {
+		return
+	}
+	if ack.IsTerminal() && s.ackAttempt[waiter] && !s.ackAttemptAuthorized[waiter] {
+		// Duplicate-mode terminal ACKs are accepted only after this exact
+		// publish attempt has passed token and epoch validation.
+		return
+	}
 	if len(waiters) == 1 {
 		delete(s.pending, key)
 	} else {
 		s.pending[key] = waiters[1:]
 	}
-	s.mu.Unlock()
+	delete(s.ackEpoch, waiter)
+	delete(s.ackQueueItem, waiter)
+	delete(s.ackAttempt, waiter)
+	delete(s.ackAttemptAuthorized, waiter)
 	select {
 	case waiter <- ack:
 	default:
@@ -782,6 +1188,10 @@ func (s *deviceSimulator) removeAck(identity simulator.TelemetryIdentity, target
 			if len(s.pending[identity]) == 0 {
 				delete(s.pending, identity)
 			}
+			delete(s.ackEpoch, target)
+			delete(s.ackQueueItem, target)
+			delete(s.ackAttempt, target)
+			delete(s.ackAttemptAuthorized, target)
 			return
 		}
 	}
@@ -813,6 +1223,7 @@ func (s *deviceSimulator) shutdown() {
 	client := s.client
 	s.client = nil
 	s.invalidateReadinessLocked()
+	s.pruneStaleQueueWaiters()
 	s.lifecycleMu.Unlock()
 
 	// Every normal Publish admitted before the terminal transition finishes its

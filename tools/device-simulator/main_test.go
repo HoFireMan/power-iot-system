@@ -538,6 +538,421 @@ func TestTelemetryAckAfterConnectionLossIsNotSuccess(t *testing.T) {
 	}
 }
 
+func TestStaleClientMessagesCannotResolveReplacementQueue(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	if device.disconnectClientForReconnect() != oldClient {
+		t.Fatal("did not detach old client")
+	}
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 31, Sequence: 310, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":31,"seq":310}`)}); err != nil {
+		t.Fatal(err)
+	}
+	ackPayload := []byte(`{"boot_counter":31,"seq":310,"status":"stored"}`)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "replacement replay did not publish")
+	device.onMessage(oldClient, testMQTTMessage{topic: device.ackTopic(), payload: ackPayload})
+	if queue.Len() != 1 {
+		t.Fatal("stale old-client ACK removed replacement queue item")
+	}
+
+	device.onMessage(newClient, testMQTTMessage{topic: device.ackTopic(), payload: ackPayload})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current-client ACK did not resolve replacement replay")
+	}
+	if queue.Len() != 0 {
+		t.Fatal("current-client terminal ACK did not complete queue item")
+	}
+}
+
+func TestStaleQueueWaiterIsPrunedBeforeFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 32, Sequence: 320, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":32,"seq":320}`)}); err != nil {
+		t.Fatal(err)
+	}
+	staleWaiter := device.registerQueuedAck(telemetry.Identity())
+
+	device.onConnectionLost(oldClient, errors.New("loss with pending replay"))
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	ackMessage := testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":32,"seq":320,"status":"stored"}`),
+	}
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "fresh replay did not publish")
+	assertNoAck(t, staleWaiter, "stale queue waiter")
+	device.onMessage(newClient, ackMessage)
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh replay was blocked by stale queue waiter")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("current terminal ACK left queue length=%d", queue.Len())
+	}
+
+	device.onMessage(newClient, ackMessage)
+	if queue.Len() != 0 {
+		t.Fatal("duplicate current terminal ACK changed completed queue")
+	}
+}
+
+func TestAckRegistrationCannotCrossEpochInvalidation(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 34, Sequence: 340, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":34,"seq":340}`)}); err != nil {
+		t.Fatal(err)
+	}
+
+	registrationStarted := make(chan struct{})
+	registrationRelease := make(chan struct{})
+	device.ackRegistrationHook = func() {
+		close(registrationStarted)
+		<-registrationRelease
+	}
+	staleWaiterDone := make(chan chan simulator.Ack, 1)
+	go func() { staleWaiterDone <- device.registerQueuedAck(telemetry.Identity()) }()
+	waitClosed(t, registrationStarted, "ACK registration did not reach the epoch boundary")
+
+	lossDone := make(chan struct{})
+	go func() {
+		device.onConnectionLost(oldClient, errors.New("loss crossing ACK registration"))
+		close(lossDone)
+	}()
+	select {
+	case <-lossDone:
+		t.Fatal("connection loss invalidated epoch before ACK registration completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(registrationRelease)
+	var staleWaiter chan simulator.Ack
+	select {
+	case staleWaiter = <-staleWaiterDone:
+	case <-time.After(time.Second):
+		t.Fatal("ACK registration did not complete")
+	}
+	waitClosed(t, lossDone, "connection loss did not complete after ACK registration")
+	device.ackRegistrationHook = nil
+
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "fresh replay did not publish after crossing registration")
+	device.onMessage(newClient, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":34,"seq":340,"status":"stored"}`),
+	})
+	assertNoAck(t, staleWaiter, "pruned stale waiter")
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh replay was blocked by cross-epoch registration")
+	}
+	if queue.Len() != 0 {
+		t.Fatal("fresh terminal ACK did not complete queued telemetry")
+	}
+}
+
+func TestReadyDoesNotStartBackgroundReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.Mode = "offline-replay"
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 33, Sequence: 330, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":33,"seq":330}`)}); err != nil {
+		t.Fatal(err)
+	}
+	client := newLifecycleFakeClient()
+	gate := newPublishCallGate()
+	client.setPublishCallGate("device/upload/data", gate)
+	establishReady(t, device, client)
+
+	select {
+	case <-gate.started:
+		t.Fatal("READY started replay in a background goroutine")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitClosed(t, gate.started, "explicit replay did not publish queued telemetry")
+	close(gate.release)
+	device.resolveAck(simulator.Ack{BootCounter: telemetry.BootCounter, Sequence: telemetry.Sequence, Status: "stored"})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit replay did not complete after terminal ACK")
+	}
+}
+
+func TestDuplicateRetryDoesNotAcceptDelayedFirstACK(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 38, Sequence: 380, Timestamp: 1786021200}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- device.publishAndWait(context.Background(), telemetry) }()
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 1 }, "first duplicate-mode publish did not start")
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":38,"seq":380,"status":"stored"}`),
+	})
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first duplicate-mode publish did not complete")
+	}
+
+	gate := newPublishCallGate()
+	client.setPublishAdmissionGate("device/upload/data", gate)
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- device.publishItemAndWait(context.Background(), simulator.QueuedTelemetry{
+			Telemetry: telemetry,
+			Payload:   []byte(`{"boot_counter":38,"seq":380}`),
+		}, false)
+	}()
+	waitClosed(t, gate.started, "second duplicate-mode publish did not reach admission")
+	// This is the delayed ACK from the first attempt. It must not satisfy the
+	// second attempt before that attempt has passed token/epoch validation.
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":38,"seq":380,"status":"stored"}`),
+	})
+	close(gate.release)
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 2 }, "second duplicate-mode publish did not complete admission")
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":38,"seq":380,"status":"duplicate"}`),
+	})
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second duplicate-mode publish accepted no current terminal ACK")
+	}
+}
+
+func TestTerminalACKDuringFailedPublishRemainsForRetry(t *testing.T) {
+	device := newLifecycleDevice(t)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 37, Sequence: 370, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":37,"seq":370}`)}); err != nil {
+		t.Fatal(err)
+	}
+	client := newLifecycleFakeClient()
+	gate := newGatedToken()
+	client.setPublishToken("device/upload/data", gatedErrorToken{gatedToken: gate, err: errors.New("publish failed")})
+	establishReady(t, device, client)
+
+	firstAttempt := make(chan error, 1)
+	go func() { firstAttempt <- device.replayPending(context.Background()) }()
+	waitClosed(t, gate.started, "failed replay did not wait for publish token")
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":37,"seq":370,"status":"stored"}`),
+	})
+	close(gate.release)
+	select {
+	case err := <-firstAttempt:
+		if err == nil {
+			t.Fatal("failed publish unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed replay did not return")
+	}
+	if queue.Len() != 1 {
+		t.Fatal("failed publish removed queue item despite terminal ACK race")
+	}
+
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("retry did not consume deferred terminal ACK: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("successful retry left deferred terminal ACK pending")
+	}
+}
+
+func TestTerminalACKBeforeQuarantineReleaseCompletesFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 100 * time.Millisecond
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 36, Sequence: 360, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":36,"seq":360}`)}); err != nil {
+		t.Fatal(err)
+	}
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	device.onConnectionLost(oldClient, errors.New("quarantine before fresh replay"))
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	device.queuedACKReleaseHook = func(identity ackKey) {
+		if identity != telemetry.Identity() {
+			t.Fatalf("release hook identity=%+v, want %+v", identity, telemetry.Identity())
+		}
+		device.resolveAck(simulator.Ack{BootCounter: 36, Sequence: 360, Status: "stored"})
+	}
+
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("fresh replay failed when ACK crossed quarantine release: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("terminal ACK crossing quarantine release left queue item pending")
+	}
+}
+
+func TestDelayedACKAfterTimeoutWhileReadyWaitsForFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 39, Sequence: 390, Timestamp: 1786021200}
+	if err := device.publishAndWait(context.Background(), telemetry); err == nil {
+		t.Fatal("telemetry without ACK unexpectedly succeeded")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 1 {
+		t.Fatal("timeout removed queued telemetry")
+	}
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":39,"seq":390,"status":"stored"}`),
+	})
+	if queue.Len() != 1 {
+		t.Fatal("post-timeout terminal ACK removed item before retry authorization")
+	}
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("fresh replay did not consume deferred terminal ACK: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("authorized retry left deferred terminal ACK pending")
+	}
+}
+
+func TestDelayedACKAfterTimeoutAndDisconnectWaitsForFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 35, Sequence: 350, Timestamp: 1786021200}
+	if err := device.publishAndWait(context.Background(), telemetry); err == nil {
+		t.Fatal("telemetry without ACK unexpectedly succeeded")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 1 {
+		t.Fatal("timeout removed queued telemetry")
+	}
+
+	device.onConnectionLost(oldClient, errors.New("disconnect after timeout"))
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	ackPayload := []byte(`{"boot_counter":35,"seq":350,"status":"stored"}`)
+	device.onMessage(newClient, testMQTTMessage{topic: device.ackTopic(), payload: ackPayload})
+	if queue.Len() != 1 {
+		t.Fatal("delayed terminal ACK removed item before fresh replay")
+	}
+
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "fresh replay did not publish queued telemetry")
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh replay did not complete after terminal ACK")
+	}
+	if queue.Len() != 0 {
+		t.Fatal("fresh replay terminal ACK did not complete queue item")
+	}
+}
+
+func TestDelayedACKAfterConnectionLossDoesNotRemoveQueuedTelemetry(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 1, Sequence: 81, Timestamp: 1786021200}
+	result := make(chan error, 1)
+	go func() { result <- device.publishAndWait(context.Background(), telemetry) }()
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 1 }, "telemetry was not published")
+	device.onConnectionLost(client, errors.New("loss before delayed ACK"))
+	select {
+	case err := <-result:
+		if !errors.Is(err, errMQTTSessionChanged) {
+			t.Fatalf("telemetry publish returned %v, want session change", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("telemetry publish did not stop after connection loss")
+	}
+	device.resolveAck(simulator.Ack{BootCounter: 1, Sequence: 81, Status: "stored"})
+	if queue.Len() != 1 {
+		t.Fatalf("delayed stale ACK removed queued telemetry: length=%d", queue.Len())
+	}
+}
+
 func TestShutdownIsTerminalWhileOnConnectIsPaused(t *testing.T) {
 	device := newLifecycleDevice(t)
 	device.mqttOperationTimeout = time.Second
@@ -917,6 +1332,13 @@ type fakeSubscribeToken struct {
 
 func (token fakeSubscribeToken) Result() map[string]byte { return token.result }
 
+type gatedErrorToken struct {
+	*gatedToken
+	err error
+}
+
+func (t gatedErrorToken) Error() error { return t.err }
+
 type gatedToken struct {
 	started chan struct{}
 	release chan struct{}
@@ -1002,6 +1424,15 @@ func TestAckWaiterIdentityIsolation(t *testing.T) {
 	}
 }
 
+type testMQTTMessage struct {
+	mqtt.Message
+	topic   string
+	payload []byte
+}
+
+func (m testMQTTMessage) Topic() string   { return m.topic }
+func (m testMQTTMessage) Payload() []byte { return m.payload }
+
 func assertNoAck(t *testing.T, waiter <-chan simulator.Ack, reason string) {
 	t.Helper()
 	select {
@@ -1027,5 +1458,58 @@ func TestOfflineQueuePreservesConfiguredRecordedAt(t *testing.T) {
 	}
 	if device.offlineQueue[0].Timestamp != recordedAt.Unix() || device.offlineQueue[1].Timestamp != recordedAt.Add(5*time.Second).Unix() {
 		t.Fatalf("offline queue changed timestamps: %+v", device.offlineQueue)
+	}
+}
+
+func TestQueuedTelemetryWaitsForReadyThenReplaysExactPayload(t *testing.T) {
+	device := newLifecycleDevice(t)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 22, Sequence: 220, Timestamp: 1786021200}
+	payload := []byte(`{"mac":"AABBCCDDEEFF","boot_counter":22,"seq":220,"ts":1786021200}`)
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	client := newLifecycleFakeClient()
+	installClient(t, device, client)
+	if err := device.publishQueuedAndWait(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: payload}); err == nil {
+		t.Fatal("queued telemetry published before readiness")
+	}
+	if got := client.countPublished("device/upload/data"); got != 0 {
+		t.Fatalf("telemetry published before readiness: %d", got)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("not-ready attempt removed queue item: %d", queue.Len())
+	}
+
+	establishReady(t, device, client)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 1 }, "queued replay was not published")
+	device.resolveAck(simulator.Ack{BootCounter: telemetry.BootCounter, Sequence: telemetry.Sequence, Status: "stored"})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued replay did not complete after ACK")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("terminal replay ACK left queue length=%d", queue.Len())
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var got []byte
+	for _, published := range client.published {
+		if published.topic == "device/upload/data" {
+			got, _ = published.payload.([]byte)
+			break
+		}
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("replay payload=%q, want %q", got, payload)
 	}
 }
