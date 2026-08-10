@@ -1,14 +1,19 @@
-/// Presentation data for an active Device-to-Measurement Point relationship.
+/// Presentation data for a historical half-open Device-to-Measurement Point
+/// relationship: [validFrom, validTo).
 class DeviceAssignment {
   const DeviceAssignment({
     required this.id,
     required this.deviceId,
     required this.measurementPointId,
-    this.active = true,
+    required this.validFrom,
+    this.validTo,
   });
 
   final String id;
   final String deviceId;
   final String measurementPointId;
-  final bool active;
+  final DateTime validFrom;
+  final DateTime? validTo;
+
+  bool get active => validTo == null;
 }

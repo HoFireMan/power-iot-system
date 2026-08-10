@@ -25,6 +25,9 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   final Map<String, MeasurementPoint> _committedCreates = {};
   final Map<String, DeviceAssignment> _committedBindings = {};
   final Map<String, String> _bindingRequests = {};
+  final Map<String, DeviceAssignment> _committedReplacements = {};
+  final Map<String, String> _replacementRequests = {};
+  final List<DeviceAssignment> _assignmentHistory = [];
   final List<DeviceAssignment> _activeAssignments = [];
   final List<DeviceInventory> _devices = const [
     DeviceInventory(
@@ -44,6 +47,16 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   ];
   int _nextCreatedIdentity = 2;
   int _nextAssignmentIdentity = 1;
+  DateTime _nextTransitionTime = DateTime.utc(2026, 8, 10, 0, 1);
+
+  /// Overrides the next mock replacement transition boundary.
+  DateTime? nextReplacementEffectiveTime;
+
+  /// Changes the current assignment before the next replacement validation.
+  bool changeCurrentAssignmentBeforeNextReplacement = false;
+
+  /// Commits the next replacement and then simulates losing its response.
+  bool loseResponseAfterNextReplacement = false;
 
   /// Makes only the next create call fail before mutation.
   bool failNextCreation = false;
@@ -109,6 +122,11 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   }
 
   @override
+  Future<List<DeviceAssignment>> loadAssignmentHistory() async {
+    return List.unmodifiable(_assignmentHistory);
+  }
+
+  @override
   Future<DeviceAssignment> bindDevice(BindDeviceInput input) async {
     final requestIdentity = input.requestIdentity.trim();
     if (requestIdentity.isEmpty) {
@@ -157,9 +175,11 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
       id: 'assignment-${_nextAssignmentIdentity.toString().padLeft(3, '0')}',
       deviceId: device.id!,
       measurementPointId: point.id,
+      validFrom: DateTime.utc(2026, 8, 10),
     );
     _nextAssignmentIdentity++;
     _activeAssignments.add(assignment);
+    _assignmentHistory.add(assignment);
     _committedBindings[requestIdentity] = assignment;
     _bindingRequests[requestIdentity] = fingerprint;
 
@@ -169,6 +189,160 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     }
 
     return assignment;
+  }
+
+  @override
+  Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input) async {
+    final requestIdentity = input.requestIdentity.trim();
+    final currentAssignmentId = input.currentAssignmentId.trim();
+    if (requestIdentity.isEmpty) {
+      throw ArgumentError.value(input.requestIdentity, 'requestIdentity');
+    }
+    if (currentAssignmentId.isEmpty) {
+      throw ArgumentError.value(
+        input.currentAssignmentId,
+        'currentAssignmentId',
+      );
+    }
+
+    final fingerprint = _replacementFingerprint(input);
+    final committed = _committedReplacements[requestIdentity];
+    if (committed != null) {
+      if (_replacementRequests[requestIdentity] == fingerprint) {
+        return committed;
+      }
+      throw StateError('Replacement request identity was reused.');
+    }
+
+    if (changeCurrentAssignmentBeforeNextReplacement) {
+      changeCurrentAssignmentBeforeNextReplacement = false;
+      _simulateCurrentAssignmentChange(currentAssignmentId);
+    }
+
+    final current = _activeAssignments.cast<DeviceAssignment?>().firstWhere(
+          (assignment) => assignment!.id == currentAssignmentId,
+          orElse: () => null,
+        );
+    if (current == null) {
+      throw StateError('Current assignment is no longer current.');
+    }
+    final currentDevice = _devices.cast<DeviceInventory?>().firstWhere(
+          (device) => device!.id == current.deviceId,
+          orElse: () => null,
+        );
+    if (currentDevice == null) {
+      throw StateError('Current Device not found.');
+    }
+    final replacement = _resolveDevice(input.replacementDeviceRef);
+    if (replacement == null) {
+      throw StateError('Replacement Device not found.');
+    }
+    if (replacement.serialNumber.trim().isEmpty ||
+        !_isCanonicalMac(replacement.macAddress)) {
+      throw StateError('Replacement Device is not eligible.');
+    }
+    if (replacement.id == currentDevice.id) {
+      throw StateError('Replacement Device must differ from current Device.');
+    }
+    if (_activeAssignments.any(
+      (assignment) => assignment.deviceId == replacement.id,
+    )) {
+      throw StateError('Replacement Device is already assigned.');
+    }
+
+    final transitionTime = _sampleTransitionTime();
+    if (!transitionTime.isAfter(current.validFrom)) {
+      throw StateError('Replacement transition time is invalid.');
+    }
+
+    final closed = DeviceAssignment(
+      id: current.id,
+      deviceId: current.deviceId,
+      measurementPointId: current.measurementPointId,
+      validFrom: current.validFrom,
+      validTo: transitionTime,
+    );
+    final replacementAssignment = DeviceAssignment(
+      id: 'assignment-${_nextAssignmentIdentity.toString().padLeft(3, '0')}',
+      deviceId: replacement.id!,
+      measurementPointId: current.measurementPointId,
+      validFrom: transitionTime,
+    );
+    _nextAssignmentIdentity++;
+    _replaceHistoryEntry(closed);
+    _activeAssignments.removeWhere(
+      (assignment) => assignment.id == current.id,
+    );
+    _activeAssignments.add(replacementAssignment);
+    _assignmentHistory.add(replacementAssignment);
+    _committedReplacements[requestIdentity] = replacementAssignment;
+    _replacementRequests[requestIdentity] = fingerprint;
+
+    if (loseResponseAfterNextReplacement) {
+      loseResponseAfterNextReplacement = false;
+      throw StateError('Deterministic mock response loss after commit');
+    }
+
+    return replacementAssignment;
+  }
+
+  DateTime _sampleTransitionTime() {
+    final requested = nextReplacementEffectiveTime;
+    if (requested != null) {
+      nextReplacementEffectiveTime = null;
+      return requested;
+    }
+    final sampled = _nextTransitionTime;
+    _nextTransitionTime = sampled.add(const Duration(minutes: 1));
+    return sampled;
+  }
+
+  void _simulateCurrentAssignmentChange(String currentAssignmentId) {
+    final current = _activeAssignments.cast<DeviceAssignment?>().firstWhere(
+          (assignment) => assignment!.id == currentAssignmentId,
+          orElse: () => null,
+        );
+    if (current == null) {
+      return;
+    }
+    final transitionTime = _sampleTransitionTime();
+    if (!transitionTime.isAfter(current.validFrom)) {
+      return;
+    }
+    final closed = DeviceAssignment(
+      id: current.id,
+      deviceId: current.deviceId,
+      measurementPointId: current.measurementPointId,
+      validFrom: current.validFrom,
+      validTo: transitionTime,
+    );
+    final changed = DeviceAssignment(
+      id: 'assignment-${_nextAssignmentIdentity.toString().padLeft(3, '0')}',
+      deviceId: current.deviceId,
+      measurementPointId: current.measurementPointId,
+      validFrom: transitionTime,
+    );
+    _nextAssignmentIdentity++;
+    _replaceHistoryEntry(closed);
+    _activeAssignments.removeWhere(
+      (assignment) => assignment.id == current.id,
+    );
+    _activeAssignments.add(changed);
+    _assignmentHistory.add(changed);
+  }
+
+  void _replaceHistoryEntry(DeviceAssignment replacement) {
+    final index = _assignmentHistory.indexWhere(
+      (assignment) => assignment.id == replacement.id,
+    );
+    if (index >= 0) {
+      _assignmentHistory[index] = replacement;
+    }
+  }
+
+  String _replacementFingerprint(ReplaceDeviceInput input) {
+    final ref = input.replacementDeviceRef;
+    return '${input.currentAssignmentId}|${ref.id}|${ref.serialNumber}|${ref.macAddress}|${input.reason}';
   }
 
   DeviceInventory? _resolveDevice(DeviceRef ref) {

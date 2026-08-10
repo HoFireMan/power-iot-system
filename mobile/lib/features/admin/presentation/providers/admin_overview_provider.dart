@@ -93,6 +93,73 @@ final bindDeviceRequestIdentitySourceProvider =
   (ref) => MockBindDeviceRequestIdentitySource(),
 );
 
+class PendingReplaceDeviceRequest {
+  const PendingReplaceDeviceRequest({
+    required this.requestIdentity,
+    required this.currentAssignmentId,
+    required this.serialNumber,
+  });
+
+  final String requestIdentity;
+  final String currentAssignmentId;
+  final String serialNumber;
+}
+
+abstract interface class ReplaceDeviceRequestIdentitySource {
+  PendingReplaceDeviceRequest? get pending;
+
+  String identityFor({
+    required String currentAssignmentId,
+    required String serialNumber,
+  });
+
+  void complete(String requestIdentity);
+}
+
+class MockReplaceDeviceRequestIdentitySource
+    implements ReplaceDeviceRequestIdentitySource {
+  int _nextIdentity = 1;
+  PendingReplaceDeviceRequest? _pending;
+
+  @override
+  PendingReplaceDeviceRequest? get pending => _pending;
+
+  @override
+  String identityFor({
+    required String currentAssignmentId,
+    required String serialNumber,
+  }) {
+    final pending = _pending;
+    if (pending != null &&
+        pending.currentAssignmentId == currentAssignmentId &&
+        pending.serialNumber == serialNumber) {
+      return pending.requestIdentity;
+    }
+
+    final identity =
+        'mock-replace-device-${_nextIdentity.toString().padLeft(3, '0')}';
+    _nextIdentity++;
+    _pending = PendingReplaceDeviceRequest(
+      requestIdentity: identity,
+      currentAssignmentId: currentAssignmentId,
+      serialNumber: serialNumber,
+    );
+    return identity;
+  }
+
+  @override
+  void complete(String requestIdentity) {
+    if (_pending?.requestIdentity == requestIdentity) {
+      _pending = null;
+    }
+  }
+}
+
+final replaceDeviceRequestIdentitySourceProvider =
+    Provider<ReplaceDeviceRequestIdentitySource>(
+  (ref) => MockReplaceDeviceRequestIdentitySource(),
+);
+
 final adminOverviewRepositoryProvider = Provider<AdminOverviewRepository>(
   (ref) => MockAdminOverviewRepository(),
 );

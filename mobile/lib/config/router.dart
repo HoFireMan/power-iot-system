@@ -10,6 +10,7 @@ import 'package:power_iot_app/features/shops/screens/shop_list_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/admin_overview_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/bind_device_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/create_measurement_point_screen.dart';
+import 'package:power_iot_app/features/admin/presentation/screens/replace_device_screen.dart';
 
 final routerConfig = GoRouter(
   initialLocation: '/login',
@@ -53,6 +54,12 @@ final routerConfig = GoRouter(
     GoRoute(
       path: '/admin/mock/bind-device',
       builder: (context, state) => const BindDeviceScreen(),
+    ),
+    GoRoute(
+      path: '/admin/mock/replace-device/:assignmentId',
+      builder: (context, state) => ReplaceDeviceScreen(
+        assignmentId: state.pathParameters['assignmentId']!,
+      ),
     ),
   ],
 );

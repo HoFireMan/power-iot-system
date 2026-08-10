@@ -40,6 +40,20 @@ class AdminOverviewScreen extends ConsumerWidget {
       );
     }
 
+    Future<void> replaceDevice(String assignmentId) async {
+      final replaced = await context.push<bool>(
+        '/admin/mock/replace-device/$assignmentId',
+      );
+      if (replaced != true || !context.mounted) {
+        return;
+      }
+
+      ref.invalidate(adminOverviewProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Device replaced successfully.')),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Overview')),
       body: SafeArea(
@@ -50,7 +64,10 @@ class AdminOverviewScreen extends ConsumerWidget {
           error: (error, stackTrace) => Center(
             child: Text('Unable to load admin overview: $error'),
           ),
-          data: (data) => _OverviewContent(overview: data),
+          data: (data) => _OverviewContent(
+            overview: data,
+            onReplace: replaceDevice,
+          ),
         ),
       ),
       floatingActionButton: Column(
@@ -77,9 +94,13 @@ class AdminOverviewScreen extends ConsumerWidget {
 }
 
 class _OverviewContent extends StatelessWidget {
-  const _OverviewContent({required this.overview});
+  const _OverviewContent({
+    required this.overview,
+    required this.onReplace,
+  });
 
   final AdminOverview overview;
+  final ValueChanged<String> onReplace;
 
   @override
   Widget build(BuildContext context) {
@@ -119,8 +140,11 @@ class _OverviewContent extends StatelessWidget {
             final device = devicesById[assignment.deviceId];
             final point = pointsById[assignment.measurementPointId];
             return _BindingTile(
+              key: Key('active-binding-${assignment.id}'),
+              assignmentId: assignment.id,
               pointName: point?.name ?? assignment.measurementPointId,
               serialNumber: device?.serialNumber ?? assignment.deviceId,
+              onReplace: () => onReplace(assignment.id),
             );
           },
         ),
@@ -199,18 +223,39 @@ class _DeviceTile extends StatelessWidget {
 }
 
 class _BindingTile extends StatelessWidget {
-  const _BindingTile({required this.pointName, required this.serialNumber});
+  const _BindingTile({
+    super.key,
+    required this.assignmentId,
+    required this.pointName,
+    required this.serialNumber,
+    required this.onReplace,
+  });
 
+  final String assignmentId;
   final String pointName;
   final String serialNumber;
+  final VoidCallback onReplace;
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: ListTile(
-        leading: const Icon(Icons.link),
-        title: Text('$pointName · $serialNumber'),
-        subtitle: const Text('Active assignment'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.link),
+            title: Text('$pointName · $serialNumber'),
+            subtitle: const Text('Active assignment'),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 16, bottom: 8),
+            child: TextButton(
+              key: Key('replace-device-action-$assignmentId'),
+              onPressed: onReplace,
+              child: const Text('Replace Device'),
+            ),
+          ),
+        ],
       ),
     );
   }

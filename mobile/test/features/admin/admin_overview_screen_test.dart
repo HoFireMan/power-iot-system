@@ -118,6 +118,14 @@ class _FixedAdminOverviewRepository implements AdminOverviewRepository {
   Future<DeviceAssignment> bindDevice(BindDeviceInput input) {
     throw UnsupportedError('Binding is not used by this test repository.');
   }
+
+  @override
+  Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input) {
+    throw UnsupportedError('Replacement is not used by this test repository.');
+  }
+
+  @override
+  Future<List<DeviceAssignment>> loadAssignmentHistory() async => const [];
 }
 
 class _PendingAdminOverviewRepository implements AdminOverviewRepository {
@@ -137,4 +145,12 @@ class _PendingAdminOverviewRepository implements AdminOverviewRepository {
   Future<DeviceAssignment> bindDevice(BindDeviceInput input) {
     throw UnsupportedError('Binding is not used by this test repository.');
   }
+
+  @override
+  Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input) {
+    throw UnsupportedError('Replacement is not used by this test repository.');
+  }
+
+  @override
+  Future<List<DeviceAssignment>> loadAssignmentHistory() async => const [];
 }
