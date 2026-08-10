@@ -30,10 +30,7 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 	if err != nil {
 		return result, err
 	}
-	expectedVersion, err := latestEmbeddedMigrationVersion()
-	if err != nil {
-		return result, err
-	}
+	expectedVersion := securitySchemaPreflightBaseVersion
 	result.Migration.ExpectedVersion = expectedVersion
 
 	db, err := sql.Open("postgres", parsed.driverURL)
@@ -838,10 +835,7 @@ func RunExclusiveOwnedSecuritySchemaRecheck(ctx context.Context, dsn string) (re
 	if err != nil {
 		return result, err
 	}
-	result.Migration.ExpectedVersion, err = latestEmbeddedMigrationVersion()
-	if err != nil {
-		return result, err
-	}
+	result.Migration.ExpectedVersion = securitySchemaPreflightBaseVersion
 	if err := WithExclusiveWriterFence(ctx, dsn, func(fence *ExclusiveWriterFence) error {
 		capability, err := fence.Capability()
 		if err != nil {
