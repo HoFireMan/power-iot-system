@@ -18,6 +18,7 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 		AccountEligibility:   RepresentationNotRepresented,
 		DeviceOwnerAuthority: RepresentationNotRepresented,
 		WriterFence:          WriterFenceRequiresMigrationOrchestration,
+		WriterFenceDecision:  AssessSecuritySchemaWriterFence(),
 	}
 
 	expectedVersion, err := latestEmbeddedMigrationVersion()

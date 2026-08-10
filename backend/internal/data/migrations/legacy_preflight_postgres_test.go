@@ -54,6 +54,9 @@ func TestSecuritySchemaPreflightCleanSnapshotIsReadOnly(t *testing.T) {
 	if result.WriterFence != WriterFenceRequiresMigrationOrchestration {
 		t.Fatalf("writer fence=%q, want orchestration requirement", result.WriterFence)
 	}
+	if result.WriterFenceDecision.Status != WriterFenceDecisionRequired || result.WriterFenceDecision.ProtectedWorkAllowed {
+		t.Fatalf("writer fence decision=%+v, want fail-closed decision required", result.WriterFenceDecision)
+	}
 	if result.AccountEligibility != RepresentationNotRepresented || result.DeviceOwnerAuthority != RepresentationNotRepresented {
 		t.Fatalf("legacy authority representation was fabricated: auth=%q owner=%q", result.AccountEligibility, result.DeviceOwnerAuthority)
 	}

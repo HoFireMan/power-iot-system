@@ -239,6 +239,7 @@ type LegacyDataPreflightResult struct {
 	AccountEligibility   AuthorityRepresentation   `json:"account_eligibility"`
 	DeviceOwnerAuthority AuthorityRepresentation   `json:"device_owner_authority"`
 	WriterFence          WriterFenceClassification `json:"writer_fence"`
+	WriterFenceDecision  WriterFenceDecision       `json:"writer_fence_decision"`
 }
 
 // Disposition gives integrity blockers precedence. Even a clean snapshot still
