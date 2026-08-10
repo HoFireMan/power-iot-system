@@ -1,11 +1,414 @@
 package main
 
 import (
+	"context"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
+
 	"power-iot-device-simulator/internal/simulator"
 )
+
+func TestBuildDeviceConfigsRejectsExactDuplicateMACBeforeStartup(t *testing.T) {
+	base := config{MAC: simulator.DefaultMAC}
+	var starts atomic.Int32
+	process, err := startConfiguredDevices(context.Background(), base, []string{simulator.DefaultMAC, simulator.DefaultMAC}, func(*deviceSimulator) error {
+		starts.Add(1)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("accepted exact duplicate device MAC")
+	}
+	if process != nil {
+		process.shutdown()
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("duplicate configuration started %d MQTT children", got)
+	}
+}
+
+func TestBuildDeviceConfigsRejectsNormalizedDuplicateMACBeforeStartup(t *testing.T) {
+	base := config{MAC: simulator.DefaultMAC}
+	var starts atomic.Int32
+	process, err := startConfiguredDevices(context.Background(), base, []string{"aa:bb:cc:dd:ee:ff", "AA-BB-CC-DD-EE-FF"}, func(*deviceSimulator) error {
+		starts.Add(1)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("accepted normalized duplicate device MAC")
+	}
+	if process != nil {
+		process.shutdown()
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("normalized duplicate configuration started %d MQTT children", got)
+	}
+}
+
+func TestBuildDeviceConfigsAcceptsDistinctMACsAndPreservesSingleDeviceFallback(t *testing.T) {
+	base := config{MAC: "aa:bb:cc:dd:ee:ff", BootCounter: 1, StartSequence: 1}
+	var starts atomic.Int32
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AA-BB-CC-DD-EE-FF", "112233445566"}, func(*deviceSimulator) error {
+		starts.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.shutdown()
+	if got := len(process.devices); got != 2 {
+		t.Fatalf("device count=%d, want 2", got)
+	}
+	if process.devices[0].generator.MAC != "AABBCCDDEEFF" || process.devices[1].generator.MAC != "112233445566" {
+		t.Fatalf("unexpected canonical device MACs: %q, %q", process.devices[0].generator.MAC, process.devices[1].generator.MAC)
+	}
+	if got := starts.Load(); got != 2 {
+		t.Fatalf("started device count=%d, want 2", got)
+	}
+
+	single, err := startConfiguredDevices(context.Background(), base, nil, func(*deviceSimulator) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer single.shutdown()
+	if len(single.devices) != 1 || single.devices[0].generator.MAC != "AABBCCDDEEFF" {
+		t.Fatalf("single-device fallback changed: %+v", single.devices)
+	}
+}
+
+func TestTwoDeviceACKIsolationWithSameBootAndSequence(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+
+	telemetryA := a.nextTelemetry(time.Unix(1786021200, 0))
+	telemetryB := b.nextTelemetry(time.Unix(1786021200, 0))
+	if telemetryA.BootCounter != 1 || telemetryA.Sequence != 1 || telemetryB.BootCounter != 1 || telemetryB.Sequence != 1 {
+		t.Fatalf("identity collision setup failed: A=%+v B=%+v", telemetryA.Identity(), telemetryB.Identity())
+	}
+	if telemetryA.MAC == telemetryB.MAC {
+		t.Fatal("test devices did not have distinct MACs")
+	}
+
+	resultA := make(chan error, 1)
+	resultB := make(chan error, 1)
+	go func() { resultA <- a.publishAndWait(context.Background(), telemetryA) }()
+	go func() { resultB <- b.publishAndWait(context.Background(), telemetryB) }()
+	waitForCondition(t, func() bool {
+		return clientA.countPublished("device/upload/data") == 1 && clientB.countPublished("device/upload/data") == 1
+	}, "both devices did not publish telemetry")
+
+	ackB := []byte(`{"boot_counter":1,"seq":1,"status":"stored"}`)
+	b.onMessage(clientB, testMQTTMessage{topic: b.ackTopic(), payload: ackB})
+	if got := queueLength(t, b); got != 0 {
+		t.Fatalf("B terminal ACK left B queue length=%d", got)
+	}
+	if got := queueLength(t, a); got != 1 {
+		t.Fatalf("B terminal ACK changed A queue length=%d", got)
+	}
+	select {
+	case err := <-resultB:
+		if err != nil {
+			t.Fatalf("B publish returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("B ACK did not complete B")
+	}
+
+	// A's ACK topic delivered through B's callback is not a legitimate route.
+	b.onMessage(clientB, testMQTTMessage{topic: a.ackTopic(), payload: ackB})
+	if got := queueLength(t, a); got != 1 {
+		t.Fatalf("wrong-topic ACK changed A queue length=%d", got)
+	}
+
+	a.onMessage(clientA, testMQTTMessage{topic: a.ackTopic(), payload: ackB})
+	select {
+	case err := <-resultA:
+		if err != nil {
+			t.Fatalf("A publish returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("A ACK did not complete A")
+	}
+	if got := queueLength(t, a); got != 0 {
+		t.Fatalf("A terminal ACK left A queue length=%d", got)
+	}
+	if got := queueLength(t, b); got != 0 {
+		t.Fatalf("A terminal ACK changed B queue length=%d", got)
+	}
+}
+
+func TestTwoDeviceReadinessEpochAndClientIsolation(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	epochA, epochB := a.sessionEpoch, b.sessionEpoch
+
+	a.onConnectionLost(clientA, errors.New("A disconnect"))
+	if a.isReady() || !b.isReady() {
+		t.Fatal("A disconnect did not isolate readiness")
+	}
+	if a.sessionEpoch == epochA || b.sessionEpoch != epochB {
+		t.Fatalf("disconnect epochs A=%d/%d B=%d/%d", a.sessionEpoch, epochA, b.sessionEpoch, epochB)
+	}
+
+	replacementA := newLifecycleFakeClient()
+	establishReady(t, a, replacementA)
+	if !a.isReady() || !b.isReady() || b.sessionEpoch != epochB || b.client != clientB {
+		t.Fatal("A replacement changed B lifecycle state")
+	}
+	a.onConnectionLost(clientA, errors.New("stale A disconnect"))
+	a.onConnect(clientA)
+	if !b.isReady() || b.sessionEpoch != epochB || b.client != clientB {
+		t.Fatal("stale A callbacks changed B lifecycle state")
+	}
+	b.onConnectionLost(clientB, errors.New("B disconnect"))
+	if a.sessionEpoch == 0 || !a.isReady() {
+		t.Fatal("B disconnect changed A readiness")
+	}
+	if b.isReady() {
+		t.Fatal("B remained ready after its own disconnect")
+	}
+}
+
+func TestBlockedPublishOnADoesNotBlockBLifecycle(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	gate := newPublishCallGate()
+	clientA.setPublishCallGate("device/upload/data", gate)
+	result := make(chan error, 1)
+	go func() { result <- a.publishAndWait(context.Background(), a.nextTelemetry(time.Unix(1786021200, 0))) }()
+	waitClosed(t, gate.started, "A publish did not reach the blocking fake gate")
+	assertReturns(t, func() { b.onConnectionLost(clientB, errors.New("B independent loss")) }, "B lifecycle was blocked by A publish")
+	if b.isReady() {
+		t.Fatal("B remained ready after its own connection loss")
+	}
+	close(gate.release)
+	a.onMessage(clientA, testMQTTMessage{topic: a.ackTopic(), payload: []byte(`{"boot_counter":1,"seq":1,"status":"stored"}`)})
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("A blocked publish did not return after release")
+	}
+}
+
+func TestDeviceQueueTimeoutAndPublishFailureDoNotAffectSibling(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	a.config.AckTimeout = 10 * time.Millisecond
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	queueB, err := b.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queueB.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: b.nextTelemetry(time.Unix(1786021200, 0)), Payload: []byte("b")}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.publishAndWait(context.Background(), a.nextTelemetry(time.Unix(1786021200, 0))); err == nil {
+		t.Fatal("A timeout unexpectedly succeeded")
+	}
+	if got := queueLength(t, b); got != 1 {
+		t.Fatalf("A timeout changed B queue length=%d", got)
+	}
+
+	queueA, err := a.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queueA.Len() == 0 {
+		t.Fatal("A timeout did not retain A queue item")
+	}
+	clientA.setPublishToken("device/upload/data", immediateToken{err: errors.New("A publish failed")})
+	if err := a.replayPending(context.Background()); err == nil {
+		t.Fatal("A publish failure unexpectedly succeeded")
+	}
+	if got := queueLength(t, b); got != 1 {
+		t.Fatalf("A publish failure changed B queue length=%d", got)
+	}
+}
+
+func TestTwoDeviceOfflineReplayAndGeneratorIsolation(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	a.config.ReplayCount = 1
+	b.config.ReplayCount = 1
+	at := a.nextTelemetry(time.Unix(1786021200, 0))
+	bt := b.nextTelemetry(time.Unix(1786021200, 0))
+	if at.Sequence != 1 || bt.Sequence != 1 {
+		t.Fatalf("generators did not independently start at sequence 1: A=%d B=%d", at.Sequence, bt.Sequence)
+	}
+	bSequence := b.generator.Sequence
+	bKwh := b.generator.Kwh
+	a.prepareOfflineQueue()
+	if b.generator.Sequence != bSequence || b.generator.Kwh != bKwh {
+		t.Fatal("A offline preparation mutated B generator state")
+	}
+	aSequence := a.generator.Sequence
+	if err := a.replayPending(context.Background()); err == nil {
+		t.Fatal("A replay unexpectedly ran before A became ready")
+	}
+	if a.generator.Sequence != aSequence || b.generator.Sequence != bSequence {
+		t.Fatal("replay advanced an unrelated generator")
+	}
+
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- a.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return clientA.countPublished("device/upload/data") == 1 }, "A replay did not publish")
+	if got := clientB.countPublished("device/upload/data"); got != 0 {
+		t.Fatalf("A replay published on B client: %d", got)
+	}
+	a.onMessage(clientA, testMQTTMessage{topic: a.ackTopic(), payload: []byte(`{"boot_counter":1,"seq":2,"status":"stored"}`)})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("A replay did not complete")
+	}
+	if b.generator.Sequence != bSequence {
+		t.Fatal("A replay changed B sequence")
+	}
+}
+
+func TestTwoDeviceCommandRoutingIsolation(t *testing.T) {
+	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+	b := newLifecycleDeviceWithMAC(t, "112233445566")
+	clientA := newLifecycleFakeClient()
+	clientB := newLifecycleFakeClient()
+	establishReady(t, a, clientA)
+	establishReady(t, b, clientB)
+	payload := []byte(`{"command_id":"cmd-1","action":"diagnostics","expires_at":4102444800}`)
+	b.onMessage(clientB, testMQTTMessage{topic: a.commandTopic(), payload: payload})
+	if got := clientB.countPublished("device/112233445566/command/ack"); got != 0 {
+		t.Fatalf("wrong-topic command reached B handler: %d", got)
+	}
+	a.onMessage(clientA, testMQTTMessage{topic: a.commandTopic(), payload: payload})
+	b.onMessage(clientB, testMQTTMessage{topic: b.commandTopic(), payload: payload})
+	if got := clientA.countPublished("device/AABBCCDDEEFF/command/ack"); got != 1 {
+		t.Fatalf("A command ACK count=%d, want 1", got)
+	}
+	if got := clientB.countPublished("device/112233445566/command/ack"); got != 1 {
+		t.Fatalf("B command ACK count=%d, want 1", got)
+	}
+}
+
+func TestProcessRunKeepsSiblingAliveAfterDeviceTimeout(t *testing.T) {
+	base := config{Mode: "once", MAC: simulator.DefaultMAC, BootCounter: 1, StartSequence: 1, QueueCapacity: 4, AckTimeout: 10 * time.Millisecond, Interval: time.Second, ReplayCount: 1, CommandAck: true}
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AABBCCDDEEFF", "112233445566"}, func(*deviceSimulator) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.shutdown()
+	clients := []*lifecycleFakeClient{newLifecycleFakeClient(), newLifecycleFakeClient()}
+	establishReady(t, process.devices[0], clients[0])
+	establishReady(t, process.devices[1], clients[1])
+	result := make(chan error, 1)
+	go func() { result <- process.run(context.Background()) }()
+	waitForCondition(t, func() bool { return clients[1].countPublished("device/upload/data") == 1 }, "healthy sibling did not publish")
+	process.devices[1].onMessage(clients[1], testMQTTMessage{topic: process.devices[1].ackTopic(), payload: []byte(`{"boot_counter":1,"seq":1,"status":"stored"}`)})
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "AABBCCDDEEFF") {
+			t.Fatalf("process run error=%v, want A timeout labelled with A MAC", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process run did not wait for sibling completion")
+	}
+	if got := queueLength(t, process.devices[1]); got != 0 {
+		t.Fatalf("healthy sibling queue length=%d", got)
+	}
+}
+
+func TestProcessCancellationShutsDownEveryDevice(t *testing.T) {
+	base := config{Mode: "continuous", MAC: simulator.DefaultMAC, QueueCapacity: 4, AckTimeout: time.Second, Interval: time.Hour, ReplayCount: 1, CommandAck: true}
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AABBCCDDEEFF", "112233445566"}, func(*deviceSimulator) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := []*lifecycleFakeClient{newLifecycleFakeClient(), newLifecycleFakeClient()}
+	establishReady(t, process.devices[0], clients[0])
+	establishReady(t, process.devices[1], clients[1])
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- process.run(ctx) }()
+	waitForCondition(t, func() bool {
+		return clients[0].countPublished("device/upload/data") == 1 && clients[1].countPublished("device/upload/data") == 1
+	}, "continuous devices did not start")
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("root cancellation returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("root cancellation did not stop all devices")
+	}
+	for i, device := range process.devices {
+		stopping := simulatorIsStopping(device)
+		disconnects := clients[i].disconnectCount()
+		offline := clients[i].countStatusTopic(device.statusTopic(), false)
+		if !stopping || disconnects != 1 || offline != 1 {
+			t.Fatalf("device %d did not execute normal shutdown: stopping=%v disconnects=%d offline=%d", i, stopping, disconnects, offline)
+		}
+	}
+}
+
+func TestConnectFailureCleansUpAllOwnedDevices(t *testing.T) {
+	base := config{MAC: simulator.DefaultMAC, QueueCapacity: 4, AckTimeout: time.Second, Interval: time.Second, ReplayCount: 1, CommandAck: true}
+	clients := map[string]*lifecycleFakeClient{
+		"AABBCCDDEEFF": newLifecycleFakeClient(),
+		"112233445566": newLifecycleFakeClient(),
+	}
+	process, err := startConfiguredDevices(context.Background(), base, []string{"AABBCCDDEEFF", "112233445566"}, func(device *deviceSimulator) error {
+		client := clients[device.generator.MAC]
+		if err := device.setClient(client); err != nil {
+			return err
+		}
+		device.onConnect(client)
+		if device.generator.MAC == "AABBCCDDEEFF" {
+			return errors.New("injected connect failure")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("connect failure unexpectedly succeeded")
+	}
+	if process != nil {
+		process.shutdown()
+	}
+	for mac, client := range clients {
+		if client.disconnectCount() != 1 {
+			t.Fatalf("device %s disconnect count=%d, want 1", mac, client.disconnectCount())
+		}
+	}
+}
 
 func TestParseRecordedAt(t *testing.T) {
 	recordedAt, err := parseRecordedAt("2026-08-08T04:00:01+08:00")
@@ -37,6 +440,1511 @@ func TestNextTelemetryUsesConfiguredRecordedAt(t *testing.T) {
 	}
 }
 
+func TestSimulatorStartsNotReady(t *testing.T) {
+	device := newLifecycleDevice(t)
+	if device.isReady() {
+		t.Fatal("new simulator reported ready before MQTT subscriptions")
+	}
+}
+
+func TestRequiredSubscriptionFailureLeavesSimulatorNotReady(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	client.setSubscribeToken(device.commandTopic(), immediateToken{err: errors.New("command subscription failed")})
+	installClient(t, device, client)
+
+	device.onConnect(client)
+
+	if device.isReady() {
+		t.Fatal("simulator became ready after a required subscription failed")
+	}
+	if got := client.countStatus(true); got != 0 {
+		t.Fatalf("online status published after subscription failure: %d", got)
+	}
+}
+
+func TestRequiredSubscriptionGrantFailureLeavesSimulatorNotReady(t *testing.T) {
+	tests := []struct {
+		name   string
+		topic  func(*deviceSimulator) string
+		result func(string) map[string]byte
+	}{
+		{
+			name:  "ack subscription rejected",
+			topic: (*deviceSimulator).ackTopic,
+			result: func(topic string) map[string]byte {
+				return map[string]byte{topic: 0x80}
+			},
+		},
+		{
+			name:  "command subscription rejected",
+			topic: (*deviceSimulator).commandTopic,
+			result: func(topic string) map[string]byte {
+				return map[string]byte{topic: 0x80}
+			},
+		},
+		{
+			name:   "ack subscription result missing",
+			topic:  (*deviceSimulator).ackTopic,
+			result: func(string) map[string]byte { return map[string]byte{} },
+		},
+		{
+			name:   "command subscription result missing",
+			topic:  (*deviceSimulator).commandTopic,
+			result: func(string) map[string]byte { return map[string]byte{} },
+		},
+		{
+			name:  "subscription downgraded to qos zero",
+			topic: (*deviceSimulator).ackTopic,
+			result: func(topic string) map[string]byte {
+				return map[string]byte{topic: 0}
+			},
+		},
+		{
+			name:  "subscription grant exceeds requested qos",
+			topic: (*deviceSimulator).commandTopic,
+			result: func(topic string) map[string]byte {
+				return map[string]byte{topic: 2}
+			},
+		},
+		{
+			name:  "subscription has invalid grant",
+			topic: (*deviceSimulator).commandTopic,
+			result: func(topic string) map[string]byte {
+				return map[string]byte{topic: 0x7f}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			device := newLifecycleDevice(t)
+			client := newLifecycleFakeClient()
+			topic := test.topic(device)
+			client.setSubscribeToken(topic, fakeSubscribeToken{result: test.result(topic)})
+			installClient(t, device, client)
+
+			device.onConnect(client)
+
+			if device.isReady() {
+				t.Fatal("simulator became ready after an unacceptable SUBACK grant")
+			}
+			if got := client.countStatus(true); got != 0 {
+				t.Fatalf("online status published after unacceptable SUBACK grant: %d", got)
+			}
+		})
+	}
+}
+
+func TestOnlineStatusFailureLeavesSimulatorNotReady(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	client.setPublishToken(device.statusTopic(), immediateToken{err: errors.New("status publish failed")})
+	installClient(t, device, client)
+
+	device.onConnect(client)
+
+	if device.isReady() {
+		t.Fatal("simulator became ready after online status failed")
+	}
+	if got := client.subscriptionCount(); got != 2 {
+		t.Fatalf("subscription count=%d, want both required subscriptions", got)
+	}
+}
+
+func TestSuccessfulRestorationEstablishesReadiness(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+
+	if got := client.subscriptionCount(); got != 2 {
+		t.Fatalf("subscription count=%d, want both required subscriptions", got)
+	}
+	if got := client.countStatus(true); got != 1 {
+		t.Fatalf("online status count=%d, want 1", got)
+	}
+	if !client.statusWasRetained(true) {
+		t.Fatal("successful online status was not retained")
+	}
+}
+
+func TestClientOptionsDisableSameClientAutoReconnect(t *testing.T) {
+	device := newLifecycleDevice(t)
+	broker, err := url.Parse("tls://broker.example:8883")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := device.clientOptions("test-client", x509.NewCertPool(), broker)
+
+	if opts.AutoReconnect {
+		t.Fatal("Paho AutoReconnect is enabled; reconnect must use a fresh client")
+	}
+	if opts.OnReconnecting != nil {
+		t.Fatal("production options installed a same-client reconnect handler")
+	}
+	if opts.OnConnect == nil || opts.OnConnectionLost == nil {
+		t.Fatal("required lifecycle handlers were not installed")
+	}
+}
+
+func TestClientOptionsDisableOrderedMessageHandlers(t *testing.T) {
+	device := newLifecycleDevice(t)
+	broker, err := url.Parse("tls://broker.example:8883")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := device.clientOptions("test-client", x509.NewCertPool(), broker)
+
+	if opts.Order {
+		t.Fatal("Paho ordered message handlers are enabled; command ACK waits could block message routing")
+	}
+}
+
+func TestConnectionLossDuringEachRestorationOperationCannotCommitReady(t *testing.T) {
+	for _, stage := range []string{"ack subscription", "command subscription", "online status"} {
+		t.Run(stage, func(t *testing.T) {
+			device := newLifecycleDevice(t)
+			device.mqttOperationTimeout = time.Second
+			client := newLifecycleFakeClient()
+			gate := newGatedToken()
+			switch stage {
+			case "ack subscription":
+				client.setSubscribeToken(device.ackTopic(), gate)
+			case "command subscription":
+				client.setSubscribeToken(device.commandTopic(), gate)
+			case "online status":
+				client.setPublishToken(device.statusTopic(), gate)
+			}
+			installClient(t, device, client)
+
+			restoreDone := make(chan struct{})
+			go func() {
+				device.onConnect(client)
+				close(restoreDone)
+			}()
+			waitClosed(t, gate.started, "restoration operation did not start")
+			assertReturns(t, func() {
+				device.onConnectionLost(client, errors.New("loss during restoration"))
+			}, "connection loss invalidation blocked behind restoration token wait")
+			close(gate.release)
+			waitClosed(t, restoreDone, "restoration callback did not return")
+
+			if device.isReady() {
+				t.Fatal("stale restoration committed READY after connection loss")
+			}
+		})
+	}
+}
+
+func TestNeverCompletingSubscribeTimesOutWithoutHoldingLifecycleLocks(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.mqttOperationTimeout = 500 * time.Millisecond
+	client := newLifecycleFakeClient()
+	never := newNeverCompletingToken()
+	client.setSubscribeToken(device.ackTopic(), never)
+	installClient(t, device, client)
+
+	restoreDone := make(chan struct{})
+	go func() {
+		device.onConnect(client)
+		close(restoreDone)
+	}()
+	waitClosed(t, never.started, "Subscribe token wait did not start")
+	assertReturns(t, func() {
+		device.onConnectionLost(client, errors.New("loss during Subscribe wait"))
+	}, "connection loss invalidation blocked behind Subscribe token wait")
+	waitClosed(t, restoreDone, "never-completing Subscribe did not use a finite timeout")
+	if device.isReady() {
+		t.Fatal("timed-out restoration committed READY")
+	}
+}
+
+func TestNeverCompletingOnlineStatusTimesOutWithoutHoldingLifecycleLocks(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.mqttOperationTimeout = 500 * time.Millisecond
+	client := newLifecycleFakeClient()
+	never := newNeverCompletingToken()
+	client.setPublishToken(device.statusTopic(), never)
+	installClient(t, device, client)
+
+	restoreDone := make(chan struct{})
+	go func() {
+		device.onConnect(client)
+		close(restoreDone)
+	}()
+	waitClosed(t, never.started, "online status token wait did not start")
+	assertReturns(t, func() {
+		device.onConnectionLost(client, errors.New("loss during status wait"))
+	}, "connection loss invalidation blocked behind online status token wait")
+	waitClosed(t, restoreDone, "never-completing online status did not use a finite timeout")
+	if device.isReady() {
+		t.Fatal("timed-out online status committed READY")
+	}
+}
+
+func TestFreshClientReplacementFencesOldClientCallbacks(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	oldSubscriptions := oldClient.subscriptionCount()
+	oldOnline := oldClient.countStatus(true)
+	if detached := device.disconnectClientForReconnect(); detached != oldClient {
+		t.Fatal("explicit reconnect did not detach the old client")
+	}
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+
+	device.onConnectionLost(oldClient, errors.New("old client loss"))
+	device.onConnect(oldClient)
+
+	if !device.isReady() {
+		t.Fatal("old client callback invalidated replacement READY state")
+	}
+	if got := oldClient.subscriptionCount(); got != oldSubscriptions {
+		t.Fatalf("old callback added subscriptions: got=%d want=%d", got, oldSubscriptions)
+	}
+	if got := oldClient.countStatus(true); got != oldOnline {
+		t.Fatalf("old callback published online status: got=%d want=%d", got, oldOnline)
+	}
+}
+
+func TestConcurrentStaleCallbacksCannotAffectFreshClient(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	if detached := device.disconnectClientForReconnect(); detached != oldClient {
+		t.Fatal("explicit reconnect did not detach the old client")
+	}
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+
+	var group sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		group.Add(1)
+		go func(i int) {
+			defer group.Done()
+			if i%2 == 0 {
+				device.onConnectionLost(oldClient, errors.New("stale loss"))
+				return
+			}
+			device.onConnect(oldClient)
+		}(i)
+	}
+	group.Wait()
+	if !device.isReady() {
+		t.Fatal("stale callbacks invalidated the fresh client")
+	}
+}
+
+func TestPublishRequiresCurrentReadyEpoch(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	installClient(t, device, client)
+
+	if err := device.publishAndWait(context.Background(), simulator.Telemetry{}); err == nil {
+		t.Fatal("publish proceeded while simulator was not ready")
+	}
+	if got := client.countPublished("device/upload/data"); got != 0 {
+		t.Fatalf("telemetry published while not ready: %d", got)
+	}
+
+	device.onConnect(client)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := device.publishAndWait(ctx, simulator.Telemetry{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ready publish returned %v, want context canceled after publish", err)
+	}
+	if got := client.countPublished("device/upload/data"); got != 1 {
+		t.Fatalf("ready publish count=%d, want 1", got)
+	}
+
+	device.onConnectionLost(client, errors.New("test connection loss"))
+	if err := device.publishAndWait(context.Background(), simulator.Telemetry{}); err == nil {
+		t.Fatal("publish proceeded after reconnect invalidated the ready epoch")
+	}
+	if got := client.countPublished("device/upload/data"); got != 1 {
+		t.Fatalf("publish count after invalidation=%d, want 1", got)
+	}
+}
+
+func TestBlockingPublishDoesNotBlockLifecycleInvalidation(t *testing.T) {
+	t.Run("telemetry publish lets shutdown invalidate before waiting for admission", func(t *testing.T) {
+		device := newLifecycleDevice(t)
+		client := newLifecycleFakeClient()
+		establishReady(t, device, client)
+		gate := newPublishCallGate()
+		client.setPublishCallGate("device/upload/data", gate)
+		telemetry := simulator.Telemetry{BootCounter: 1, Sequence: 42}
+
+		result := make(chan error, 1)
+		go func() {
+			result <- device.publishAndWait(context.Background(), telemetry)
+		}()
+		waitClosed(t, gate.started, "telemetry Publish call did not block")
+		shutdownDone := make(chan struct{})
+		go func() {
+			device.shutdown()
+			close(shutdownDone)
+		}()
+		waitForCondition(t, func() bool { return simulatorIsStopping(device) }, "shutdown did not establish terminal state")
+		select {
+		case <-shutdownDone:
+			t.Fatal("shutdown bypassed an admitted Publish")
+		default:
+		}
+		close(gate.release)
+		waitClosed(t, shutdownDone, "shutdown did not resume after admitted Publish returned")
+
+		select {
+		case err := <-result:
+			if !errors.Is(err, errMQTTSessionChanged) {
+				t.Fatalf("blocked telemetry publish returned %v, want session change", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("blocked telemetry publish did not return")
+		}
+		if device.isReady() {
+			t.Fatal("shutdown did not invalidate readiness")
+		}
+	})
+
+	t.Run("online status publish allows connection loss", func(t *testing.T) {
+		device := newLifecycleDevice(t)
+		client := newLifecycleFakeClient()
+		gate := newPublishCallGate()
+		client.setPublishCallGate(device.statusTopic(), gate)
+		installClient(t, device, client)
+
+		restoreDone := make(chan struct{})
+		go func() {
+			device.onConnect(client)
+			close(restoreDone)
+		}()
+		waitClosed(t, gate.started, "online status Publish call did not block")
+		assertReturns(t, func() {
+			device.onConnectionLost(client, errors.New("loss during Publish call"))
+		}, "connection loss blocked behind online status Publish")
+		close(gate.release)
+		waitClosed(t, restoreDone, "online status restoration did not return")
+
+		if device.isReady() {
+			t.Fatal("status queued by a stale epoch established readiness")
+		}
+	})
+}
+
+func TestShutdownOrdersOfflineAfterAdmittedOnlineStatus(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	gate := newPublishCallGate()
+	client.setPublishAdmissionGate(device.statusTopic(), gate)
+	installClient(t, device, client)
+
+	restoreDone := make(chan struct{})
+	go func() {
+		device.onConnect(client)
+		close(restoreDone)
+	}()
+	waitClosed(t, gate.started, "online Publish did not pause before its side effect")
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		device.shutdown()
+		close(shutdownDone)
+	}()
+	waitForCondition(t, func() bool { return simulatorIsStopping(device) }, "shutdown did not establish terminal state")
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown published offline before the admitted online Publish completed")
+	default:
+	}
+
+	close(gate.release)
+	waitClosed(t, restoreDone, "admitted online Publish did not return")
+	waitClosed(t, shutdownDone, "shutdown did not publish offline after the admitted Publish")
+
+	statuses := client.statusPublications()
+	if len(statuses) != 2 {
+		t.Fatalf("status publication count=%d, want admitted online then shutdown offline", len(statuses))
+	}
+	firstOnline, firstOK := statusOnline(statuses[0].payload)
+	lastOnline, lastOK := statusOnline(statuses[1].payload)
+	if !firstOK || !firstOnline {
+		t.Fatalf("first status was not online: %+v", statuses[0])
+	}
+	if !lastOK || lastOnline || !statuses[1].retained {
+		t.Fatalf("final retained status was not offline: %+v", statuses[1])
+	}
+	if !client.offlinePrecededDisconnect() {
+		t.Fatal("final offline status did not precede disconnect")
+	}
+}
+
+func TestTelemetryTokenCompletionAfterConnectionLossIsNotSuccess(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	gate := newGatedToken()
+	client.setPublishToken("device/upload/data", gate)
+
+	result := make(chan error, 1)
+	go func() {
+		result <- device.publishAndWait(context.Background(), simulator.Telemetry{BootCounter: 1, Sequence: 7})
+	}()
+	waitClosed(t, gate.started, "telemetry token wait did not start")
+	device.onConnectionLost(client, errors.New("loss during telemetry token wait"))
+	close(gate.release)
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errMQTTSessionChanged) {
+			t.Fatalf("telemetry publish returned %v, want session change", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("telemetry publish did not return after token completion")
+	}
+}
+
+func TestTelemetryAckAfterConnectionLossIsNotSuccess(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{BootCounter: 1, Sequence: 8}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- device.publishAndWait(context.Background(), telemetry)
+	}()
+	waitForCondition(t, func() bool {
+		return client.countPublished("device/upload/data") == 1
+	}, "telemetry was not published")
+	device.onConnectionLost(client, errors.New("loss before telemetry ACK"))
+	device.resolveAck(simulator.Ack{BootCounter: 1, Sequence: 8, Status: "stored"})
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errMQTTSessionChanged) {
+			t.Fatalf("telemetry ACK returned %v, want session change", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("telemetry ACK did not resolve publisher")
+	}
+}
+
+func TestStaleClientMessagesCannotResolveReplacementQueue(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	if device.disconnectClientForReconnect() != oldClient {
+		t.Fatal("did not detach old client")
+	}
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 31, Sequence: 310, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":31,"seq":310}`)}); err != nil {
+		t.Fatal(err)
+	}
+	ackPayload := []byte(`{"boot_counter":31,"seq":310,"status":"stored"}`)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "replacement replay did not publish")
+	device.onMessage(oldClient, testMQTTMessage{topic: device.ackTopic(), payload: ackPayload})
+	if queue.Len() != 1 {
+		t.Fatal("stale old-client ACK removed replacement queue item")
+	}
+
+	device.onMessage(newClient, testMQTTMessage{topic: device.ackTopic(), payload: ackPayload})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current-client ACK did not resolve replacement replay")
+	}
+	if queue.Len() != 0 {
+		t.Fatal("current-client terminal ACK did not complete queue item")
+	}
+}
+
+func TestStaleQueueWaiterIsPrunedBeforeFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 32, Sequence: 320, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":32,"seq":320}`)}); err != nil {
+		t.Fatal(err)
+	}
+	staleWaiter := device.registerQueuedAck(telemetry.Identity())
+
+	device.onConnectionLost(oldClient, errors.New("loss with pending replay"))
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	ackMessage := testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":32,"seq":320,"status":"stored"}`),
+	}
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "fresh replay did not publish")
+	assertNoAck(t, staleWaiter, "stale queue waiter")
+	device.onMessage(newClient, ackMessage)
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh replay was blocked by stale queue waiter")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("current terminal ACK left queue length=%d", queue.Len())
+	}
+
+	device.onMessage(newClient, ackMessage)
+	if queue.Len() != 0 {
+		t.Fatal("duplicate current terminal ACK changed completed queue")
+	}
+}
+
+func TestAckRegistrationCannotCrossEpochInvalidation(t *testing.T) {
+	device := newLifecycleDevice(t)
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 34, Sequence: 340, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":34,"seq":340}`)}); err != nil {
+		t.Fatal(err)
+	}
+
+	registrationStarted := make(chan struct{})
+	registrationRelease := make(chan struct{})
+	device.ackRegistrationHook = func() {
+		close(registrationStarted)
+		<-registrationRelease
+	}
+	staleWaiterDone := make(chan chan simulator.Ack, 1)
+	go func() { staleWaiterDone <- device.registerQueuedAck(telemetry.Identity()) }()
+	waitClosed(t, registrationStarted, "ACK registration did not reach the epoch boundary")
+
+	lossDone := make(chan struct{})
+	go func() {
+		device.onConnectionLost(oldClient, errors.New("loss crossing ACK registration"))
+		close(lossDone)
+	}()
+	select {
+	case <-lossDone:
+		t.Fatal("connection loss invalidated epoch before ACK registration completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(registrationRelease)
+	var staleWaiter chan simulator.Ack
+	select {
+	case staleWaiter = <-staleWaiterDone:
+	case <-time.After(time.Second):
+		t.Fatal("ACK registration did not complete")
+	}
+	waitClosed(t, lossDone, "connection loss did not complete after ACK registration")
+	device.ackRegistrationHook = nil
+
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "fresh replay did not publish after crossing registration")
+	device.onMessage(newClient, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":34,"seq":340,"status":"stored"}`),
+	})
+	assertNoAck(t, staleWaiter, "pruned stale waiter")
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh replay was blocked by cross-epoch registration")
+	}
+	if queue.Len() != 0 {
+		t.Fatal("fresh terminal ACK did not complete queued telemetry")
+	}
+}
+
+func TestReadyDoesNotStartBackgroundReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.Mode = "offline-replay"
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 33, Sequence: 330, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":33,"seq":330}`)}); err != nil {
+		t.Fatal(err)
+	}
+	client := newLifecycleFakeClient()
+	gate := newPublishCallGate()
+	client.setPublishCallGate("device/upload/data", gate)
+	establishReady(t, device, client)
+
+	select {
+	case <-gate.started:
+		t.Fatal("READY started replay in a background goroutine")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitClosed(t, gate.started, "explicit replay did not publish queued telemetry")
+	close(gate.release)
+	device.resolveAck(simulator.Ack{BootCounter: telemetry.BootCounter, Sequence: telemetry.Sequence, Status: "stored"})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit replay did not complete after terminal ACK")
+	}
+}
+
+func TestDuplicateRetryDoesNotAcceptDelayedFirstACK(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 38, Sequence: 380, Timestamp: 1786021200}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- device.publishAndWait(context.Background(), telemetry) }()
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 1 }, "first duplicate-mode publish did not start")
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":38,"seq":380,"status":"stored"}`),
+	})
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first duplicate-mode publish did not complete")
+	}
+
+	gate := newPublishCallGate()
+	client.setPublishAdmissionGate("device/upload/data", gate)
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- device.publishItemAndWait(context.Background(), simulator.QueuedTelemetry{
+			Telemetry: telemetry,
+			Payload:   []byte(`{"boot_counter":38,"seq":380}`),
+		}, false)
+	}()
+	waitClosed(t, gate.started, "second duplicate-mode publish did not reach admission")
+	// This is the delayed ACK from the first attempt. It must not satisfy the
+	// second attempt before that attempt has passed token/epoch validation.
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":38,"seq":380,"status":"stored"}`),
+	})
+	close(gate.release)
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 2 }, "second duplicate-mode publish did not complete admission")
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":38,"seq":380,"status":"duplicate"}`),
+	})
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second duplicate-mode publish accepted no current terminal ACK")
+	}
+}
+
+func TestTerminalACKDuringFailedPublishRemainsForRetry(t *testing.T) {
+	device := newLifecycleDevice(t)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 37, Sequence: 370, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":37,"seq":370}`)}); err != nil {
+		t.Fatal(err)
+	}
+	client := newLifecycleFakeClient()
+	gate := newGatedToken()
+	client.setPublishToken("device/upload/data", gatedErrorToken{gatedToken: gate, err: errors.New("publish failed")})
+	establishReady(t, device, client)
+
+	firstAttempt := make(chan error, 1)
+	go func() { firstAttempt <- device.replayPending(context.Background()) }()
+	waitClosed(t, gate.started, "failed replay did not wait for publish token")
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":37,"seq":370,"status":"stored"}`),
+	})
+	close(gate.release)
+	select {
+	case err := <-firstAttempt:
+		if err == nil {
+			t.Fatal("failed publish unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed replay did not return")
+	}
+	if queue.Len() != 1 {
+		t.Fatal("failed publish removed queue item despite terminal ACK race")
+	}
+
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("retry did not consume deferred terminal ACK: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("successful retry left deferred terminal ACK pending")
+	}
+}
+
+func TestTerminalACKBeforeQuarantineReleaseCompletesFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 100 * time.Millisecond
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 36, Sequence: 360, Timestamp: 1786021200}
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: []byte(`{"boot_counter":36,"seq":360}`)}); err != nil {
+		t.Fatal(err)
+	}
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	device.onConnectionLost(oldClient, errors.New("quarantine before fresh replay"))
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	device.queuedACKReleaseHook = func(identity ackKey) {
+		if identity != telemetry.Identity() {
+			t.Fatalf("release hook identity=%+v, want %+v", identity, telemetry.Identity())
+		}
+		device.resolveAck(simulator.Ack{BootCounter: 36, Sequence: 360, Status: "stored"})
+	}
+
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("fresh replay failed when ACK crossed quarantine release: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("terminal ACK crossing quarantine release left queue item pending")
+	}
+}
+
+func TestDelayedACKAfterTimeoutWhileReadyWaitsForFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 39, Sequence: 390, Timestamp: 1786021200}
+	if err := device.publishAndWait(context.Background(), telemetry); err == nil {
+		t.Fatal("telemetry without ACK unexpectedly succeeded")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 1 {
+		t.Fatal("timeout removed queued telemetry")
+	}
+	device.onMessage(client, testMQTTMessage{
+		topic:   device.ackTopic(),
+		payload: []byte(`{"boot_counter":39,"seq":390,"status":"stored"}`),
+	})
+	if queue.Len() != 1 {
+		t.Fatal("post-timeout terminal ACK removed item before retry authorization")
+	}
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("fresh replay did not consume deferred terminal ACK: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("authorized retry left deferred terminal ACK pending")
+	}
+}
+
+func TestTerminalACKReadyAtTimeoutArbitrationIsNotReportedAsTimeout(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 40, Sequence: 400, Timestamp: 1786021200}
+	arbitrationReached := make(chan struct{})
+	device.ackTimeoutArbitrationHook = func(identity ackKey) {
+		if identity != telemetry.Identity() {
+			panic("timeout arbitration received the wrong telemetry identity")
+		}
+		close(arbitrationReached)
+		device.resolveAck(simulator.Ack{BootCounter: 40, Sequence: 400, Status: "stored"})
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- device.publishAndWait(context.Background(), telemetry) }()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("terminal ACK ready at timeout arbitration returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal ACK arbitration did not resolve telemetry")
+	}
+	select {
+	case <-arbitrationReached:
+	default:
+		t.Fatal("timeout arbitration hook was not reached")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("terminal ACK ready at timeout arbitration left queue length=%d", queue.Len())
+	}
+}
+
+func TestACKAfterTimeoutArbitrationInspectionIsDeferredForFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 41, Sequence: 410, Timestamp: 1786021200}
+	inspectionReached := make(chan struct{})
+	ackDone := make(chan struct{})
+	device.ackTimeoutArbitrationInspectionHook = func(identity ackKey) {
+		if identity != telemetry.Identity() {
+			panic("timeout arbitration inspected the wrong telemetry identity")
+		}
+		close(inspectionReached)
+	}
+	go func() {
+		<-inspectionReached
+		device.onMessage(client, testMQTTMessage{
+			topic:   device.ackTopic(),
+			payload: []byte(`{"boot_counter":41,"seq":410,"status":"stored"}`),
+		})
+		close(ackDone)
+	}()
+
+	err := device.publishAndWait(context.Background(), telemetry)
+	var ackErr *ackWaitError
+	if !errors.As(err, &ackErr) || !ackErr.timeout {
+		t.Fatalf("ACK after timeout arbitration inspection returned %v, want timeout", err)
+	}
+	select {
+	case <-ackDone:
+	case <-time.After(time.Second):
+		t.Fatal("ACK after timeout arbitration inspection was not processed")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("ACK after timeout arbitration inspection removed queue item; length=%d", queue.Len())
+	}
+	if err := device.replayPending(context.Background()); err != nil {
+		t.Fatalf("fresh replay did not consume deferred ACK: %v", err)
+	}
+	if queue.Len() != 0 {
+		t.Fatal("fresh replay left deferred ACK's queue item pending")
+	}
+}
+
+func TestDelayedACKAfterTimeoutAndDisconnectWaitsForFreshReplay(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.config.AckTimeout = 10 * time.Millisecond
+	oldClient := newLifecycleFakeClient()
+	establishReady(t, device, oldClient)
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 35, Sequence: 350, Timestamp: 1786021200}
+	if err := device.publishAndWait(context.Background(), telemetry); err == nil {
+		t.Fatal("telemetry without ACK unexpectedly succeeded")
+	}
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queue.Len() != 1 {
+		t.Fatal("timeout removed queued telemetry")
+	}
+
+	device.onConnectionLost(oldClient, errors.New("disconnect after timeout"))
+	newClient := newLifecycleFakeClient()
+	establishReady(t, device, newClient)
+	ackPayload := []byte(`{"boot_counter":35,"seq":350,"status":"stored"}`)
+	device.onMessage(newClient, testMQTTMessage{topic: device.ackTopic(), payload: ackPayload})
+	if queue.Len() != 1 {
+		t.Fatal("delayed terminal ACK removed item before fresh replay")
+	}
+
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return newClient.countPublished("device/upload/data") == 1 }, "fresh replay did not publish queued telemetry")
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh replay did not complete after terminal ACK")
+	}
+	if queue.Len() != 0 {
+		t.Fatal("fresh replay terminal ACK did not complete queue item")
+	}
+}
+
+func TestDelayedACKAfterConnectionLossDoesNotRemoveQueuedTelemetry(t *testing.T) {
+	device := newLifecycleDevice(t)
+	client := newLifecycleFakeClient()
+	establishReady(t, device, client)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 1, Sequence: 81, Timestamp: 1786021200}
+	result := make(chan error, 1)
+	go func() { result <- device.publishAndWait(context.Background(), telemetry) }()
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 1 }, "telemetry was not published")
+	device.onConnectionLost(client, errors.New("loss before delayed ACK"))
+	select {
+	case err := <-result:
+		if !errors.Is(err, errMQTTSessionChanged) {
+			t.Fatalf("telemetry publish returned %v, want session change", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("telemetry publish did not stop after connection loss")
+	}
+	device.resolveAck(simulator.Ack{BootCounter: 1, Sequence: 81, Status: "stored"})
+	if queue.Len() != 1 {
+		t.Fatalf("delayed stale ACK removed queued telemetry: length=%d", queue.Len())
+	}
+}
+
+func TestShutdownIsTerminalWhileOnConnectIsPaused(t *testing.T) {
+	device := newLifecycleDevice(t)
+	device.mqttOperationTimeout = time.Second
+	client := newLifecycleFakeClient()
+	gate := newGatedToken()
+	client.setSubscribeToken(device.ackTopic(), gate)
+	installClient(t, device, client)
+
+	restoreDone := make(chan struct{})
+	go func() {
+		device.onConnect(client)
+		close(restoreDone)
+	}()
+	waitClosed(t, gate.started, "paused OnConnect did not reach subscription wait")
+	assertReturns(t, device.shutdown, "shutdown blocked behind OnConnect token wait")
+
+	device.onConnectionLost(client, errors.New("late loss after shutdown"))
+	device.onConnect(client)
+	close(gate.release)
+	waitClosed(t, restoreDone, "paused OnConnect did not return after shutdown")
+
+	if device.isReady() {
+		t.Fatal("late callback resurrected READY after shutdown")
+	}
+	if got := client.countStatus(true); got != 0 {
+		t.Fatalf("online status published after shutdown began: %d", got)
+	}
+	if got := client.countStatus(false); got != 1 {
+		t.Fatalf("offline status count=%d, want 1", got)
+	}
+	if got := client.disconnectCount(); got != 1 {
+		t.Fatalf("disconnect count=%d, want 1", got)
+	}
+	if !client.offlinePrecededDisconnect() {
+		t.Fatal("offline status was not attempted before disconnect")
+	}
+}
+
+func newLifecycleDevice(t *testing.T) *deviceSimulator {
+	return newLifecycleDeviceWithMAC(t, simulator.DefaultMAC)
+}
+
+func newLifecycleDeviceWithMAC(t *testing.T, mac string) *deviceSimulator {
+	t.Helper()
+	canonical, err := simulator.NormalizeMAC(mac)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator, err := simulator.NewGenerator(canonical, "test-fw", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &deviceSimulator{
+		config:               config{MAC: canonical, AckTimeout: time.Second, QueueCapacity: 4, Interval: time.Second, ReplayCount: 1, CommandAck: true},
+		generator:            generator,
+		pending:              make(map[ackKey][]chan simulator.Ack),
+		readyEvents:          make(chan struct{}, 4),
+		mqttOperationTimeout: 100 * time.Millisecond,
+	}
+}
+
+func queueLength(t *testing.T, device *deviceSimulator) int {
+	t.Helper()
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return queue.Len()
+}
+
+func installClient(t *testing.T, device *deviceSimulator, client mqtt.Client) {
+	t.Helper()
+	if err := device.setClient(client); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func establishReady(t *testing.T, device *deviceSimulator, client *lifecycleFakeClient) {
+	t.Helper()
+	installClient(t, device, client)
+	device.onConnect(client)
+	if !device.isReady() {
+		t.Fatal("test setup did not establish READY")
+	}
+}
+
+func waitClosed(t *testing.T, done <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+func assertReturns(t *testing.T, fn func(), message string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal(message)
+	}
+}
+
+func waitForCondition(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal(message)
+}
+
+func simulatorIsStopping(device *deviceSimulator) bool {
+	device.lifecycleMu.Lock()
+	defer device.lifecycleMu.Unlock()
+	return device.stopping
+}
+
+type lifecycleFakeClient struct {
+	mqtt.Client
+	mu                    sync.Mutex
+	connected             bool
+	subscribeTokens       map[string][]mqtt.Token
+	publishTokens         map[string][]mqtt.Token
+	publishAdmissionGates map[string][]*publishCallGate
+	publishCallGates      map[string][]*publishCallGate
+	subscribedTopics      []string
+	published             []fakePublish
+	actions               []string
+	disconnects           int
+}
+
+type fakePublish struct {
+	topic    string
+	retained bool
+	payload  interface{}
+}
+
+func newLifecycleFakeClient() *lifecycleFakeClient {
+	return &lifecycleFakeClient{
+		connected:             true,
+		subscribeTokens:       make(map[string][]mqtt.Token),
+		publishTokens:         make(map[string][]mqtt.Token),
+		publishAdmissionGates: make(map[string][]*publishCallGate),
+		publishCallGates:      make(map[string][]*publishCallGate),
+	}
+}
+
+func (f *lifecycleFakeClient) setSubscribeToken(topic string, token mqtt.Token) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribeTokens[topic] = append(f.subscribeTokens[topic], token)
+}
+
+func (f *lifecycleFakeClient) setPublishToken(topic string, token mqtt.Token) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publishTokens[topic] = append(f.publishTokens[topic], token)
+}
+
+func (f *lifecycleFakeClient) setPublishAdmissionGate(topic string, gate *publishCallGate) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publishAdmissionGates[topic] = append(f.publishAdmissionGates[topic], gate)
+}
+
+func (f *lifecycleFakeClient) setPublishCallGate(topic string, gate *publishCallGate) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publishCallGates[topic] = append(f.publishCallGates[topic], gate)
+}
+
+func (f *lifecycleFakeClient) Subscribe(topic string, qos byte, _ mqtt.MessageHandler) mqtt.Token {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribedTopics = append(f.subscribedTopics, topic)
+	f.actions = append(f.actions, "subscribe:"+topic)
+	if token := popToken(f.subscribeTokens, topic); token != nil {
+		return token
+	}
+	return fakeSubscribeToken{result: map[string]byte{topic: qos}}
+}
+
+func (f *lifecycleFakeClient) Publish(topic string, _ byte, retained bool, payload interface{}) mqtt.Token {
+	f.mu.Lock()
+	admissionGate := popPublishCallGate(f.publishAdmissionGates, topic)
+	f.mu.Unlock()
+	if admissionGate != nil {
+		admissionGate.markStarted()
+		<-admissionGate.release
+	}
+
+	f.mu.Lock()
+	f.published = append(f.published, fakePublish{topic: topic, retained: retained, payload: payload})
+	if online, ok := statusOnline(payload); ok {
+		if online {
+			f.actions = append(f.actions, "status:online")
+		} else {
+			f.actions = append(f.actions, "status:offline")
+		}
+	} else {
+		f.actions = append(f.actions, "publish:"+topic)
+	}
+	token := popToken(f.publishTokens, topic)
+	if token == nil {
+		token = immediateToken{}
+	}
+	callGate := popPublishCallGate(f.publishCallGates, topic)
+	f.mu.Unlock()
+
+	if callGate != nil {
+		callGate.markStarted()
+		<-callGate.release
+	}
+	return token
+}
+
+func popPublishCallGate(gates map[string][]*publishCallGate, topic string) *publishCallGate {
+	queued := gates[topic]
+	if len(queued) == 0 {
+		return nil
+	}
+	gate := queued[0]
+	if len(queued) == 1 {
+		delete(gates, topic)
+	} else {
+		gates[topic] = queued[1:]
+	}
+	return gate
+}
+
+func popToken(tokens map[string][]mqtt.Token, topic string) mqtt.Token {
+	queued := tokens[topic]
+	if len(queued) == 0 {
+		return nil
+	}
+	token := queued[0]
+	if len(queued) == 1 {
+		delete(tokens, topic)
+	} else {
+		tokens[topic] = queued[1:]
+	}
+	return token
+}
+
+func (f *lifecycleFakeClient) IsConnected() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connected
+}
+
+func (f *lifecycleFakeClient) Disconnect(_ uint) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connected = false
+	f.disconnects++
+	f.actions = append(f.actions, "disconnect")
+}
+
+func (f *lifecycleFakeClient) subscriptionCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.subscribedTopics)
+}
+
+func (f *lifecycleFakeClient) countPublished(topic string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, published := range f.published {
+		if published.topic == topic {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *lifecycleFakeClient) countStatus(online bool) int {
+	return f.countStatusTopic("device/"+simulator.DefaultMAC+"/status", online)
+}
+
+func (f *lifecycleFakeClient) countStatusTopic(topic string, online bool) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, published := range f.published {
+		if value, ok := statusOnline(published.payload); published.topic == topic && ok && value == online {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *lifecycleFakeClient) statusWasRetained(online bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, published := range f.published {
+		if value, ok := statusOnline(published.payload); ok && value == online {
+			return published.retained
+		}
+	}
+	return false
+}
+
+func (f *lifecycleFakeClient) statusPublications() []fakePublish {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	statuses := make([]fakePublish, 0, len(f.published))
+	for _, published := range f.published {
+		if _, ok := statusOnline(published.payload); ok {
+			statuses = append(statuses, published)
+		}
+	}
+	return statuses
+}
+
+func (f *lifecycleFakeClient) disconnectCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.disconnects
+}
+
+func (f *lifecycleFakeClient) offlinePrecededDisconnect() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	offline := -1
+	disconnect := -1
+	for i, action := range f.actions {
+		switch action {
+		case "status:offline":
+			offline = i
+		case "disconnect":
+			disconnect = i
+		}
+	}
+	return offline >= 0 && disconnect > offline
+}
+
+func statusOnline(payload interface{}) (bool, bool) {
+	var body []byte
+	switch value := payload.(type) {
+	case []byte:
+		body = value
+	case string:
+		body = []byte(value)
+	default:
+		return false, false
+	}
+	var status struct {
+		Online *bool `json:"online"`
+	}
+	if err := json.Unmarshal(body, &status); err != nil || status.Online == nil {
+		return false, false
+	}
+	return *status.Online, true
+}
+
+type publishCallGate struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newPublishCallGate() *publishCallGate {
+	return &publishCallGate{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *publishCallGate) markStarted() {
+	g.once.Do(func() { close(g.started) })
+}
+
+type immediateToken struct {
+	err error
+}
+
+func (immediateToken) Wait() bool                     { return true }
+func (immediateToken) WaitTimeout(time.Duration) bool { return true }
+func (immediateToken) Done() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+func (token immediateToken) Error() error { return token.err }
+
+type fakeSubscribeToken struct {
+	immediateToken
+	result map[string]byte
+}
+
+func (token fakeSubscribeToken) Result() map[string]byte { return token.result }
+
+type gatedErrorToken struct {
+	*gatedToken
+	err error
+}
+
+func (t gatedErrorToken) Error() error { return t.err }
+
+type gatedToken struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newGatedToken() *gatedToken {
+	return &gatedToken{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (t *gatedToken) markStarted() {
+	t.once.Do(func() { close(t.started) })
+}
+
+func (t *gatedToken) Wait() bool {
+	t.markStarted()
+	<-t.release
+	return true
+}
+
+func (t *gatedToken) WaitTimeout(timeout time.Duration) bool {
+	t.markStarted()
+	select {
+	case <-t.release:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func (t *gatedToken) Done() <-chan struct{} { return t.release }
+func (t *gatedToken) Error() error          { return nil }
+
+type neverCompletingToken struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func newNeverCompletingToken() *neverCompletingToken {
+	return &neverCompletingToken{started: make(chan struct{})}
+}
+
+func (t *neverCompletingToken) markStarted() {
+	t.once.Do(func() { close(t.started) })
+}
+
+func (t *neverCompletingToken) Wait() bool {
+	t.markStarted()
+	select {}
+}
+
+func (t *neverCompletingToken) WaitTimeout(timeout time.Duration) bool {
+	t.markStarted()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	<-timer.C
+	return false
+}
+
+func (*neverCompletingToken) Done() <-chan struct{} { return make(chan struct{}) }
+func (*neverCompletingToken) Error() error          { return nil }
+
+func TestAckWaiterIdentityIsolation(t *testing.T) {
+	device := &deviceSimulator{pending: make(map[ackKey][]chan simulator.Ack)}
+	wanted := simulator.TelemetryIdentity{BootCounter: 7, Sequence: 11}
+	waiter := device.registerAck(wanted)
+
+	device.resolveAck(simulator.Ack{BootCounter: 8, Sequence: 11, Status: "stored"})
+	assertNoAck(t, waiter, "different boot counter")
+	device.resolveAck(simulator.Ack{BootCounter: 7, Sequence: 12, Status: "stored"})
+	assertNoAck(t, waiter, "different sequence")
+	device.resolveAck(simulator.Ack{BootCounter: 99, Sequence: 99, Status: "stored"})
+	assertNoAck(t, waiter, "unknown identity")
+
+	device.resolveAck(simulator.Ack{BootCounter: 7, Sequence: 11, Status: "stored"})
+	select {
+	case ack := <-waiter:
+		if ack.BootCounter != wanted.BootCounter || ack.Sequence != wanted.Sequence {
+			t.Fatalf("resolved wrong waiter identity: %+v", ack)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("matching ACK did not resolve waiter")
+	}
+}
+
+type testMQTTMessage struct {
+	mqtt.Message
+	topic   string
+	payload []byte
+}
+
+func (m testMQTTMessage) Topic() string   { return m.topic }
+func (m testMQTTMessage) Payload() []byte { return m.payload }
+
+func assertNoAck(t *testing.T, waiter <-chan simulator.Ack, reason string) {
+	t.Helper()
+	select {
+	case ack := <-waiter:
+		t.Fatalf("ACK for %s resolved waiter: %+v", reason, ack)
+	default:
+	}
+}
+
 func TestOfflineQueuePreservesConfiguredRecordedAt(t *testing.T) {
 	recordedAt := time.Unix(1786021200, 0).UTC()
 	generator, err := simulator.NewGenerator(simulator.DefaultMAC, "test-fw", 1, 20)
@@ -53,5 +1961,58 @@ func TestOfflineQueuePreservesConfiguredRecordedAt(t *testing.T) {
 	}
 	if device.offlineQueue[0].Timestamp != recordedAt.Unix() || device.offlineQueue[1].Timestamp != recordedAt.Add(5*time.Second).Unix() {
 		t.Fatalf("offline queue changed timestamps: %+v", device.offlineQueue)
+	}
+}
+
+func TestQueuedTelemetryWaitsForReadyThenReplaysExactPayload(t *testing.T) {
+	device := newLifecycleDevice(t)
+	queue, err := device.telemetryQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := simulator.Telemetry{MAC: simulator.DefaultMAC, BootCounter: 22, Sequence: 220, Timestamp: 1786021200}
+	payload := []byte(`{"mac":"AABBCCDDEEFF","boot_counter":22,"seq":220,"ts":1786021200}`)
+	if err := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	client := newLifecycleFakeClient()
+	installClient(t, device, client)
+	if err := device.publishQueuedAndWait(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: payload}); err == nil {
+		t.Fatal("queued telemetry published before readiness")
+	}
+	if got := client.countPublished("device/upload/data"); got != 0 {
+		t.Fatalf("telemetry published before readiness: %d", got)
+	}
+	if queue.Len() != 1 {
+		t.Fatalf("not-ready attempt removed queue item: %d", queue.Len())
+	}
+
+	establishReady(t, device, client)
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- device.replayPending(context.Background()) }()
+	waitForCondition(t, func() bool { return client.countPublished("device/upload/data") == 1 }, "queued replay was not published")
+	device.resolveAck(simulator.Ack{BootCounter: telemetry.BootCounter, Sequence: telemetry.Sequence, Status: "stored"})
+	select {
+	case err := <-replayDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued replay did not complete after ACK")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("terminal replay ACK left queue length=%d", queue.Len())
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var got []byte
+	for _, published := range client.published {
+		if published.topic == "device/upload/data" {
+			got, _ = published.payload.([]byte)
+			break
+		}
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("replay payload=%q, want %q", got, payload)
 	}
 }
