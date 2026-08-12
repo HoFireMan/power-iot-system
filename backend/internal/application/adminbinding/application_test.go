@@ -21,6 +21,7 @@ type fakeLookup struct {
 	assignments map[uuid.UUID]*domain.DeviceAssignment
 	activeDev   map[uint]uuid.UUID
 	activePoint map[uuid.UUID]uuid.UUID
+	relations   map[uint]map[uint]bool
 }
 
 func (f *fakeLookup) FindShop(_ context.Context, id uint) (*domain.Shop, error) {
@@ -29,6 +30,10 @@ func (f *fakeLookup) FindShop(_ context.Context, id uint) (*domain.Shop, error) 
 
 func (f *fakeLookup) FindMeasurementPoint(_ context.Context, id uuid.UUID) (*domain.MeasurementPoint, error) {
 	return f.points[id], nil
+}
+
+func (f *fakeLookup) UserHasShop(_ context.Context, userID, shopID uint) (bool, error) {
+	return f.relations[userID][shopID], nil
 }
 
 func (f *fakeLookup) FindDeviceByID(_ context.Context, id uint) (*domain.Device, error) {
@@ -62,8 +67,8 @@ func newBindingFixture() (*fakeLookup, domain.ActorContext, uint, uint, uuid.UUI
 	serialA, serialB, serialC := "SERIAL-A", "SERIAL-B", "SERIAL-C"
 	lookup := &fakeLookup{
 		shops: map[uint]*domain.Shop{
-			shop1: {ID: shop1, Name: "Shop 1"},
-			shop2: {ID: shop2, Name: "Shop 2"},
+			shop1: {ID: shop1, ClientID: 1, Name: "Shop 1"},
+			shop2: {ID: shop2, ClientID: 1, Name: "Shop 2"},
 		},
 		points: map[uuid.UUID]*domain.MeasurementPoint{
 			mp1: {ID: mp1, ShopID: shop1, Name: "MP 1"},
@@ -80,6 +85,7 @@ func newBindingFixture() (*fakeLookup, domain.ActorContext, uint, uint, uuid.UUI
 		assignments: map[uuid.UUID]*domain.DeviceAssignment{},
 		activeDev:   map[uint]uuid.UUID{},
 		activePoint: map[uuid.UUID]uuid.UUID{},
+		relations:   map[uint]map[uint]bool{900: {shop1: true, shop2: true}},
 	}
 	assignmentID := uuid.New()
 	lookup.assignments[assignmentID] = &domain.DeviceAssignment{ID: assignmentID, DeviceID: devA, MeasurementPointID: mp1, ValidFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
@@ -391,6 +397,33 @@ func TestCreateMeasurementPointPlanning(t *testing.T) {
 	cmd.Actor = unauthorized
 	if got := codeOf(t, func() error { _, err := app.CreateMeasurementPoint(context.Background(), cmd); return err }()); got != domain.ErrSiteScopeDenied {
 		t.Fatalf("unauthorized shop code=%s", got)
+	}
+}
+
+func TestCrossClientBindingTransitionsFailClosedOnRelationalClientFacts(t *testing.T) {
+	lookup, actor, devA, devB, _, _, mp3, assignmentID := newBindingFixture()
+	lookup.shops[22].ClientID = 2
+	clientOne := uint(1)
+	lookup.devices[devB].InventoryOwnerClientID = &clientOne
+	app := New(lookup)
+	crossBind := domain.BindDeviceCommand{DeviceRef: refID(devB), MeasurementPointID: mp3, RequestIdentity: "cross-client-bind", Actor: actor}
+	if got := codeOf(t, func() error { _, err := app.BindDevice(context.Background(), crossBind); return err }()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("cross-client bind code=%s", got)
+	}
+
+	clientTwo := uint(2)
+	lookup.devices[devB].InventoryOwnerClientID = &clientTwo
+	crossReplace := domain.ReplaceDeviceCommand{CurrentAssignmentID: assignmentID, ReplacementDeviceRef: refID(devB), RequestIdentity: "cross-client-replace", Actor: actor}
+	if got := codeOf(t, func() error { _, err := app.ReplaceDevice(context.Background(), crossReplace); return err }()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("cross-client replace code=%s", got)
+	}
+
+	// The device has no owner in this case; the source/target relational path
+	// still makes relocation fail closed. Device.ShopID is not consulted.
+	lookup.devices[devA].InventoryOwnerClientID = nil
+	crossRelocate := domain.RelocateDeviceCommand{CurrentAssignmentID: assignmentID, TargetMeasurementPointID: mp3, RequestIdentity: "cross-client-relocate", Actor: actor}
+	if got := codeOf(t, func() error { _, err := app.RelocateDevice(context.Background(), crossRelocate); return err }()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("cross-client relocate code=%s", got)
 	}
 }
 

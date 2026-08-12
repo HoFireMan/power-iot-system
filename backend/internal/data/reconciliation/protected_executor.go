@@ -108,19 +108,22 @@ type ProtectedExecutor struct {
 }
 
 type protectedExecutionHooks struct {
-	AfterFence           func(context.Context, *migrations.ExclusiveWriterFence) error
-	AfterTransaction     func(context.Context, *sql.Tx) error
-	AfterFrozenTime      func(context.Context, *sql.Tx, time.Time) error
-	FrozenTime           func(time.Time) time.Time
-	AfterFreshPlan       func(context.Context, *sql.Tx, FactSet, Plan) error
-	BeforeWrite          func(context.Context, *sql.Tx, FactSet, Plan) error
-	AfterWrite           func(context.Context, *sql.Tx, FactSet, Plan, PlanItem, int) error
-	BeforeTriggerRestore func(context.Context, *sql.Tx) error
-	AfterTriggerRestore  func(context.Context, *sql.Tx) error
-	BeforeCommit         func(context.Context, *sql.Tx, FactSet, Plan) error
-	Commit               func(context.Context, *sql.Tx) error
-	AfterCommit          func(context.Context, *sql.Conn) error
-	CloseFence           func(*migrations.ExclusiveWriterFence) error
+	AfterFence       func(context.Context, *migrations.ExclusiveWriterFence) error
+	AfterTransaction func(context.Context, *sql.Tx) error
+	// AfterEntityLockPrefix fires only after the complete deterministic row-lock
+	// prefix has been acquired and before frozen time/fact collection.
+	AfterEntityLockPrefix func(context.Context, *sql.Tx) error
+	AfterFrozenTime       func(context.Context, *sql.Tx, time.Time) error
+	FrozenTime            func(time.Time) time.Time
+	AfterFreshPlan        func(context.Context, *sql.Tx, FactSet, Plan) error
+	BeforeWrite           func(context.Context, *sql.Tx, FactSet, Plan) error
+	AfterWrite            func(context.Context, *sql.Tx, FactSet, Plan, PlanItem, int) error
+	BeforeTriggerRestore  func(context.Context, *sql.Tx) error
+	AfterTriggerRestore   func(context.Context, *sql.Tx) error
+	BeforeCommit          func(context.Context, *sql.Tx, FactSet, Plan) error
+	Commit                func(context.Context, *sql.Tx) error
+	AfterCommit           func(context.Context, *sql.Conn) error
+	CloseFence            func(*migrations.ExclusiveWriterFence) error
 }
 
 // MappingResolver is a narrow execution seam for an artifact selected after
@@ -273,8 +276,22 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 		return report, protectedError(report, cause)
 	}
 
+	// The full entity lock prefix precedes every authoritative collection and
+	// mutation: Devices by ascending ID, then MeasurementPoints by UUID, then
+	// assignments by UUID. Keep these statements together; adding a write or a
+	// fact query before the prefix re-opens the reconciliation race.
+	if err := lockProtectedEntityPrefix(ctx, tx); err != nil {
+		return fail(PhaseTransaction, err)
+	}
+	if hooks.AfterEntityLockPrefix != nil {
+		if err := hooks.AfterEntityLockPrefix(ctx, tx); err != nil {
+			return fail(PhaseTransaction, err)
+		}
+	}
+
 	// transaction_timestamp() is stable for this transaction and is sampled
-	// exactly once. It is the sole temporal authority input for this execution.
+	// exactly once, after the complete lock prefix. It is the sole temporal
+	// authority input for this execution.
 	if err := tx.QueryRowContext(ctx, "SELECT transaction_timestamp()").Scan(&report.FrozenAt); err != nil {
 		return fail(PhaseTransaction, err)
 	}
@@ -472,6 +489,43 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 	report.Outcome = ExecutionCommittedAndVerified
 	report.Phase = PhasePostVerify
 	return report, nil
+}
+
+// lockProtectedEntityPrefix is the canonical protected reconciliation row
+// lock order. The collector currently reads the complete entity sets, so the
+// safe narrow prefix is the complete Device, MeasurementPoint, and assignment
+// tables. Every result is consumed before the next statement, ensuring all
+// rows are locked before any authoritative collection or mutation begins.
+func lockProtectedEntityPrefix(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return errors.New("protected reconciliation transaction is required")
+	}
+	queries := []string{
+		`SELECT id FROM public.devices ORDER BY id FOR UPDATE`,
+		`SELECT id FROM public.measurement_points ORDER BY id FOR UPDATE`,
+		`SELECT id FROM public.device_assignments ORDER BY id FOR UPDATE`,
+	}
+	for _, query := range queries {
+		rows, err := tx.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("lock protected entity prefix: %w", err)
+		}
+		for rows.Next() {
+			var id interface{}
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan protected entity lock prefix: %w", err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("read protected entity lock prefix: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close protected entity lock prefix: %w", err)
+		}
+	}
+	return nil
 }
 
 func protectedError(report ExecutionReport, cause error) error {

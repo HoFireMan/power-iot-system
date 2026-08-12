@@ -103,11 +103,14 @@ type UnbindDeviceCommand struct {
 // intentionally has no effective timestamp; 3B-3 must fill that only after
 // acquiring all required locks and sampling the database clock.
 type AuditIntent struct {
-	Action                BindingAction
-	RequestIdentity       string
-	ActorID               uint
-	ScopeKey              string
-	ScopeSnapshot         ScopeSnapshot
+	Action          BindingAction
+	RequestIdentity string
+	ActorID         uint
+	ScopeKey        string
+	ScopeSnapshot   ScopeSnapshot
+	// ClientID is derived from Shop -> Client relational facts, never from
+	// request values or the verified actor snapshot.
+	ClientID              *uint
 	Reason                string
 	DeviceID              *uint
 	DeviceSerialNumber    string

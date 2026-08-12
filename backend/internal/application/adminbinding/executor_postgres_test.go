@@ -61,6 +61,9 @@ func newExecutorFixture(t *testing.T, db *gorm.DB, pointCount, deviceCount int) 
 	if err := db.Create(&fixture.shop).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Create(&domain.UserShopRelation{UserID: fixture.user.ID, ShopID: fixture.shop.ID, ShopRole: "staff"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < pointCount; i++ {
 		fixture.points = append(fixture.points, domain.MeasurementPoint{ID: uuid.New(), ShopID: fixture.shop.ID, Name: fmt.Sprintf("MP-%d", i)})
 		if err := db.Create(&fixture.points[i]).Error; err != nil {
@@ -202,6 +205,17 @@ func TestExecutorAllAssignmentTransitionsShareOneBoundaryAndReplay(t *testing.T)
 	if bind.EffectiveAt == nil || bind.NewAssignmentID == nil {
 		t.Fatalf("incomplete bind result: %+v", bind)
 	}
+	var bindOperation domain.AdminBindingOperation
+	var bindAudit domain.AdminBindingAudit
+	if err := db.Where("operation_id = ?", bind.OperationID).First(&bindOperation).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("operation_id = ?", bind.OperationID).First(&bindAudit).Error; err != nil {
+		t.Fatal(err)
+	}
+	if bindOperation.ClientID == nil || bindAudit.ClientID == nil || *bindOperation.ClientID != fixture.client.ID || *bindAudit.ClientID != *bindOperation.ClientID {
+		t.Fatalf("bind provenance Client IDs operation=%v audit=%v want=%d", bindOperation.ClientID, bindAudit.ClientID, fixture.client.ID)
+	}
 	replaceCmd := domain.ReplaceDeviceCommand{CurrentAssignmentID: *bind.NewAssignmentID, ReplacementDeviceRef: idRef(fixture.devices[1].ID), RequestIdentity: "replace-" + uuid.NewString(), Actor: commandActor(fixture)}
 	replace, err := e.ReplaceDevice(context.Background(), replaceCmd)
 	if err != nil {
@@ -253,6 +267,63 @@ func TestExecutorAllAssignmentTransitionsShareOneBoundaryAndReplay(t *testing.T)
 	}
 }
 
+func TestExecutorCrossClientBindingTransitionsFailClosed(t *testing.T) {
+	db := openExecutorDB(t)
+	fixture := newExecutorFixture(t, db, 2, 3)
+	otherClient := domain.Client{Code: "exec-cross-client-" + uuid.NewString()[:8], Name: "Other Executor Client"}
+	if err := db.Create(&otherClient).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherShop := domain.Shop{ClientID: otherClient.ID, Code: "exec-cross-shop-" + uuid.NewString()[:8], Name: "Other Executor Shop"}
+	if err := db.Create(&otherShop).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherPoint := domain.MeasurementPoint{ID: uuid.New(), ShopID: otherShop.ID, Name: "Other MP"}
+	if err := db.Create(&otherPoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	actor := fixture.actor
+	actor.Scope.ShopIDs = append(actor.Scope.ShopIDs, otherShop.ID)
+	actor.Scope.DeviceIDs = append(actor.Scope.DeviceIDs, fixture.devices[2].ID)
+	clientOne := fixture.client.ID
+	clientTwo := otherClient.ID
+	if err := db.Model(&domain.Device{}).Where("id = ?", fixture.devices[1].ID).Update("inventory_owner_client_id", clientOne).Error; err != nil {
+		t.Fatal(err)
+	}
+	bindKey := "cross-client-bind-" + uuid.NewString()
+	if _, err := NewExecutor(db).BindDevice(context.Background(), domain.BindDeviceCommand{DeviceRef: idRef(fixture.devices[1].ID), MeasurementPointID: otherPoint.ID, RequestIdentity: bindKey, Actor: actor}); domain.CodeOf(err) != domain.ErrTenantScopeDenied {
+		t.Fatalf("cross-client bind code=%s err=%v", domain.CodeOf(err), err)
+	}
+	if err := db.Model(&domain.Device{}).Where("id = ?", fixture.devices[1].ID).Update("inventory_owner_client_id", clientTwo).Error; err != nil {
+		t.Fatal(err)
+	}
+	assignment := domain.DeviceAssignment{ID: uuid.New(), DeviceID: fixture.devices[0].ID, MeasurementPointID: fixture.points[0].ID, ValidFrom: time.Now().UTC().Add(-time.Hour)}
+	if err := db.Create(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+	replaceKey := "cross-client-replace-" + uuid.NewString()
+	if _, err := NewExecutor(db).ReplaceDevice(context.Background(), domain.ReplaceDeviceCommand{CurrentAssignmentID: assignment.ID, ReplacementDeviceRef: idRef(fixture.devices[1].ID), RequestIdentity: replaceKey, Actor: actor}); domain.CodeOf(err) != domain.ErrTenantScopeDenied {
+		t.Fatalf("cross-client replace code=%s err=%v", domain.CodeOf(err), err)
+	}
+	if err := db.Model(&domain.Device{}).Where("id = ?", fixture.devices[0].ID).Update("inventory_owner_client_id", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	relocateKey := "cross-client-relocate-" + uuid.NewString()
+	if _, err := NewExecutor(db).RelocateDevice(context.Background(), domain.RelocateDeviceCommand{CurrentAssignmentID: assignment.ID, TargetMeasurementPointID: otherPoint.ID, RequestIdentity: relocateKey, Actor: actor}); domain.CodeOf(err) != domain.ErrTenantScopeDenied {
+		t.Fatalf("cross-client relocate code=%s err=%v", domain.CodeOf(err), err)
+	}
+	var operations, audits int64
+	if err := db.Model(&domain.AdminBindingOperation{}).Where("idempotency_key IN ?", []string{bindKey, replaceKey, relocateKey}).Count(&operations).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&domain.AdminBindingAudit{}).Where("request_identity IN ?", []string{bindKey, replaceKey, relocateKey}).Count(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 || audits != 0 {
+		t.Fatalf("cross-client rejection left provenance rows: operations=%d audits=%d", operations, audits)
+	}
+}
+
 func TestBindSkipsTIME01ForNewAssignment(t *testing.T) {
 	db := openExecutorDB(t)
 	fixture := newExecutorFixture(t, db, 1, 1)
@@ -289,6 +360,16 @@ func TestExecutorTransitionFailureRollsBackCloseAndOpenTogether(t *testing.T) {
 	db.Model(&domain.DeviceAssignment{}).Where("device_id = ? AND valid_to IS NULL", fixture.devices[1].ID).Count(&replacementCount)
 	if replacementCount != 0 {
 		t.Fatal("failed replacement left a new active assignment")
+	}
+	var failedOperations, failedAudits int64
+	if err := db.Model(&domain.AdminBindingOperation{}).Where("idempotency_key = ?", cmd.RequestIdentity).Count(&failedOperations).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&domain.AdminBindingAudit{}).Where("request_identity = ?", cmd.RequestIdentity).Count(&failedAudits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if failedOperations != 0 || failedAudits != 0 {
+		t.Fatalf("failed replacement left provenance rows: operations=%d audits=%d", failedOperations, failedAudits)
 	}
 	if _, err := NewExecutor(db).ReplaceDevice(context.Background(), cmd); err != nil {
 		t.Fatalf("replacement key was not reclaimable: %v", err)

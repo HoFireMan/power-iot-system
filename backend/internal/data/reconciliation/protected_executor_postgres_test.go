@@ -120,6 +120,41 @@ func artifactResolverFor(operation uuid.UUID, client uint) MappingResolver {
 	}
 }
 
+func TestProtectedExecutionLocksEntityPrefixBeforeFrozenCollection(t *testing.T) {
+	db := protectedTestDB(t)
+	createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	prefixReached := false
+	executor.hooks.AfterEntityLockPrefix = func(ctx context.Context, tx *sql.Tx) error {
+		var locked bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(*) = 3
+			  FROM pg_locks AS lock
+			  JOIN pg_class AS relation ON relation.oid = lock.relation
+			 WHERE lock.pid = pg_backend_pid()
+			   AND lock.mode = 'RowShareLock'
+			   AND lock.granted
+			   AND relation.relname IN ('devices', 'measurement_points', 'device_assignments')`).Scan(&locked); err != nil {
+			return err
+		}
+		if !locked {
+			return errors.New("entity lock prefix did not hold all three table locks")
+		}
+		prefixReached = true
+		return nil
+	}
+	executor.hooks.AfterFrozenTime = func(context.Context, *sql.Tx, time.Time) error {
+		if !prefixReached {
+			return errors.New("frozen time sampled before entity lock prefix")
+		}
+		return nil
+	}
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err != nil || report.Outcome != ExecutionCommittedAndVerified {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
 func TestProtectedExecutionReconcilesDeviceAndAdminAtomically(t *testing.T) {
 	db := protectedTestDB(t)
 	fixture := createProtectedFixture(t, db, true)

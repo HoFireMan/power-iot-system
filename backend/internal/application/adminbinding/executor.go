@@ -257,6 +257,10 @@ func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domai
 		ActorID:              actor.ActorID,
 		ScopeSnapshot:        snapshot,
 		CanonicalRequestHash: append([]byte(nil), hash...),
+		// ClientID is intentionally left NULL during claim. The authoritative
+		// Shop -> Client fact is established by the locked, revalidated plan
+		// before any business mutation or commit.
+		ClientID: nil,
 	}
 	existing, claimed, err := persistence.ClaimAdminBindingOperation(tx, &operation)
 	if err != nil {
@@ -293,6 +297,9 @@ func (e *Executor) createMeasurementPointInTransaction(ctx context.Context, tx *
 	planner := New(persistence.NewTransactionLookup(tx))
 	plan, err := planner.CreateMeasurementPoint(ctx, cmd)
 	if err != nil {
+		return domain.AdminBindingResult{}, err
+	}
+	if err := e.setOperationClient(tx, &operation, plan.Audit.ClientID); err != nil {
 		return domain.AdminBindingResult{}, err
 	}
 	point := domain.MeasurementPoint{ID: plan.MeasurementPointID, ShopID: plan.ShopID, Name: plan.Name}
@@ -334,6 +341,9 @@ func (e *Executor) bindInTransaction(ctx context.Context, tx *gorm.DB, cmd domai
 	}
 	plan, err := planner.BindDevice(ctx, cmd)
 	if err != nil {
+		return domain.AdminBindingResult{}, err
+	}
+	if err := e.setOperationClient(tx, &operation, plan.Audit.ClientID); err != nil {
 		return domain.AdminBindingResult{}, err
 	}
 	t, err := persistence.DatabaseTransitionTime(tx)
@@ -382,6 +392,9 @@ func (e *Executor) replaceInTransaction(ctx context.Context, tx *gorm.DB, cmd do
 	}
 	plan, err := planner.ReplaceDevice(ctx, cmd)
 	if err != nil {
+		return domain.AdminBindingResult{}, err
+	}
+	if err := e.setOperationClient(tx, &operation, plan.Audit.ClientID); err != nil {
 		return domain.AdminBindingResult{}, err
 	}
 	start := assignmentStart(tx, *plan.CurrentAssignmentID)
@@ -446,6 +459,9 @@ func (e *Executor) relocateInTransaction(ctx context.Context, tx *gorm.DB, cmd d
 	if err != nil {
 		return domain.AdminBindingResult{}, err
 	}
+	if err := e.setOperationClient(tx, &operation, plan.Audit.ClientID); err != nil {
+		return domain.AdminBindingResult{}, err
+	}
 	start := assignmentStart(tx, *plan.CurrentAssignmentID)
 	t, err := persistence.DatabaseTransitionTime(tx)
 	if err != nil {
@@ -508,6 +524,9 @@ func (e *Executor) unbindInTransaction(ctx context.Context, tx *gorm.DB, cmd dom
 	if err != nil {
 		return domain.AdminBindingResult{}, err
 	}
+	if err := e.setOperationClient(tx, &operation, plan.Audit.ClientID); err != nil {
+		return domain.AdminBindingResult{}, err
+	}
 	start := assignmentStart(tx, *plan.CurrentAssignmentID)
 	t, err := persistence.DatabaseTransitionTime(tx)
 	if err != nil {
@@ -543,7 +562,13 @@ func (e *Executor) unbindInTransaction(ctx context.Context, tx *gorm.DB, cmd dom
 }
 
 func (e *Executor) persistAudit(tx *gorm.DB, operation domain.AdminBindingOperation, intent domain.AuditIntent, effectiveAt *time.Time) error {
-	audit := domain.AdminBindingAudit{OperationID: operation.OperationID, RequestIdentity: intent.RequestIdentity, ActorID: intent.ActorID, ScopeKey: intent.ScopeKey, ScopeSnapshot: mustScopeJSON(intent.ScopeSnapshot), Action: string(intent.Action), EffectiveAt: effectiveAt, ShopID: cloneUintPtr(intent.ShopID), MeasurementPointID: cloneUUID(intent.MeasurementPointID), DeviceID: cloneUintPtr(intent.DeviceID), DeviceSerialNumber: stringPtr(intent.DeviceSerialNumber), DeviceMAC: stringPtr(intent.DeviceMAC), OldMeasurementPointID: cloneUUID(intent.OldMeasurementPointID), NewMeasurementPointID: cloneUUID(intent.NewMeasurementPointID), OldAssignmentID: cloneUUID(intent.OldAssignmentID), NewAssignmentID: cloneUUID(intent.NewAssignmentID), Reason: intent.Reason}
+	if intent.ClientID == nil || *intent.ClientID == 0 {
+		return domain.NewDomainError(domain.ErrTenantScopeDenied, "authoritative operation Client is unavailable")
+	}
+	if operation.ClientID == nil || *operation.ClientID != *intent.ClientID {
+		return domain.NewDomainError(domain.ErrTenantScopeDenied, "operation and audit Client provenance differ")
+	}
+	audit := domain.AdminBindingAudit{OperationID: operation.OperationID, RequestIdentity: intent.RequestIdentity, ActorID: intent.ActorID, ScopeKey: intent.ScopeKey, ScopeSnapshot: mustScopeJSON(intent.ScopeSnapshot), ClientID: cloneUintPtr(intent.ClientID), Action: string(intent.Action), EffectiveAt: effectiveAt, ShopID: cloneUintPtr(intent.ShopID), MeasurementPointID: cloneUUID(intent.MeasurementPointID), DeviceID: cloneUintPtr(intent.DeviceID), DeviceSerialNumber: stringPtr(intent.DeviceSerialNumber), DeviceMAC: stringPtr(intent.DeviceMAC), OldMeasurementPointID: cloneUUID(intent.OldMeasurementPointID), NewMeasurementPointID: cloneUUID(intent.NewMeasurementPointID), OldAssignmentID: cloneUUID(intent.OldAssignmentID), NewAssignmentID: cloneUUID(intent.NewAssignmentID), Reason: intent.Reason}
 	if audit.DeviceSerialNumber != nil && *audit.DeviceSerialNumber == "" {
 		audit.DeviceSerialNumber = nil
 	}
@@ -551,6 +576,20 @@ func (e *Executor) persistAudit(tx *gorm.DB, operation domain.AdminBindingOperat
 		audit.DeviceMAC = nil
 	}
 	return persistence.AppendAdminBindingAudit(tx, &audit)
+}
+
+func (e *Executor) setOperationClient(tx *gorm.DB, operation *domain.AdminBindingOperation, clientID *uint) error {
+	if operation == nil || clientID == nil || *clientID == 0 {
+		return domain.NewDomainError(domain.ErrTenantScopeDenied, "authoritative operation Client is unavailable")
+	}
+	if err := persistence.SetAdminBindingOperationClientID(tx, operation.OperationID, *clientID); err != nil {
+		if errors.Is(err, persistence.ErrOperationClientConflict) {
+			return domain.NewDomainError(domain.ErrTenantScopeDenied, "operation Client provenance could not be established")
+		}
+		return domainError(err)
+	}
+	operation.ClientID = cloneUintPtr(clientID)
+	return nil
 }
 
 func (e *Executor) persistResult(tx *gorm.DB, operation domain.AdminBindingOperation, result domain.AdminBindingResult) error {
