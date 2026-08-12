@@ -108,7 +108,7 @@ func createProtectedFixture(t *testing.T, db *sql.DB, withAdmin bool) protectedF
 
 func artifactResolverFor(operation uuid.UUID, client uint) MappingResolver {
 	return func(_ context.Context, facts FactSet) (*MappingArtifact, error) {
-		_, digest, err := CanonicalSourceFacts(facts)
+		digest, err := MappingSourceFactsDigest(facts)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +301,7 @@ func TestProtectedExecutionUsesFreshMappingDigest(t *testing.T) {
 	resolverCalls := 0
 	resolver := func(_ context.Context, facts FactSet) (*MappingArtifact, error) {
 		resolverCalls++
-		_, digest, err := CanonicalSourceFacts(facts)
+		digest, err := MappingSourceFactsDigest(facts)
 		if err != nil {
 			return nil, err
 		}
@@ -320,5 +320,480 @@ func TestProtectedExecutionUsesFreshMappingDigest(t *testing.T) {
 	}
 	if owner != fixture.client1 {
 		t.Fatalf("fresh execution owner=%d want %d", owner, fixture.client1)
+	}
+}
+
+func waitProtectedSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+func waitForBlockedSharedLock(t *testing.T, db *sql.DB, pid int64) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted)`, pid).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("writer pid %d never became an observable blocked advisory waiter", pid)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForExclusiveFenceWaiter(t *testing.T, db *sql.DB) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query ILIKE '%pg_advisory_lock%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("exclusive fence request was not observable as waiting")
+		case <-ticker.C:
+		}
+	}
+}
+func assertWriterFenceAvailable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var acquired bool
+	if err := conn.QueryRowContext(context.Background(), `SELECT pg_try_advisory_lock($1::bigint)`, migrations.WriterFenceKey).Scan(&acquired); err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("writer fence remained held")
+	}
+	var unlocked bool
+	if err := conn.QueryRowContext(context.Background(), `SELECT pg_advisory_unlock($1::bigint)`, migrations.WriterFenceKey).Scan(&unlocked); err != nil || !unlocked {
+		t.Fatalf("unlock=%t err=%v", unlocked, err)
+	}
+}
+func assertAuditTriggerRestored(t *testing.T, db *sql.DB, auditID uuid.UUID) {
+	t.Helper()
+	var enabled string
+	if err := db.QueryRow(`SELECT tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE c.relname='admin_binding_audits' AND t.tgname='admin_binding_audits_immutable'`).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != "O" {
+		t.Fatalf("trigger enabled=%q", enabled)
+	}
+	if _, err := db.Exec(`UPDATE admin_binding_audits SET client_id = NULL WHERE id = $1`, auditID); err == nil {
+		t.Fatal("immutable audit trigger was not restored")
+	}
+}
+
+func TestProtectedExecutionDrainsExistingCooperativeWriter(t *testing.T) {
+	db := protectedTestDB(t)
+	createProtectedFixture(t, db, false)
+	writerTx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.AcquireSharedWriterFence(context.Background(), writerTx); err != nil {
+		_ = writerTx.Rollback()
+		t.Fatal(err)
+	}
+	admitted := make(chan struct{})
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.AfterFence = func(context.Context, *migrations.ExclusiveWriterFence) error { close(admitted); return nil }
+	started := make(chan struct{})
+	result := make(chan struct {
+		report ExecutionReport
+		err    error
+	}, 1)
+	go func() {
+		close(started)
+		r, e := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+		result <- struct {
+			report ExecutionReport
+			err    error
+		}{r, e}
+	}()
+	waitProtectedSignal(t, started, "executor start")
+	waitForExclusiveFenceWaiter(t, db)
+	if err := writerTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	waitProtectedSignal(t, admitted, "exclusive admission after shared writer drain")
+	got := <-result
+	if got.err != nil || got.report.Outcome != ExecutionCommittedAndVerified {
+		t.Fatalf("report=%+v err=%v", got.report, got.err)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionBlocksNewCooperativeWriterUntilRelease(t *testing.T) {
+	db := protectedTestDB(t)
+	createProtectedFixture(t, db, false)
+	release, admitted := make(chan struct{}), make(chan struct{})
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.AfterFreshPlan = func(context.Context, *sql.Tx, FactSet, Plan) error { close(admitted); <-release; return nil }
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+		result <- err
+	}()
+	waitProtectedSignal(t, started, "executor start")
+	waitProtectedSignal(t, admitted, "protected execution")
+	writerTx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writerPID int64
+	if err := writerTx.QueryRow(`SELECT pg_backend_pid()`).Scan(&writerPID); err != nil {
+		t.Fatal(err)
+	}
+	entered, writerErr := make(chan struct{}), make(chan error, 1)
+	go func() {
+		err := migrations.AcquireSharedWriterFence(context.Background(), writerTx)
+		if err == nil {
+			close(entered)
+		}
+		writerErr <- err
+	}()
+	waitForBlockedSharedLock(t, db, writerPID)
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	waitProtectedSignal(t, entered, "new cooperative writer after release")
+	if err := <-writerErr; err != nil {
+		t.Fatal(err)
+	}
+	_ = writerTx.Rollback()
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestSecondProtectedExecutionWaitsAndFreshlyConverges(t *testing.T) {
+	db := protectedTestDB(t)
+	createProtectedFixture(t, db, false)
+	release, firstAdmitted, secondAdmitted := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	first, second := NewProtectedExecutor(nil), NewProtectedExecutor(nil)
+	first.hooks.AfterFreshPlan = func(context.Context, *sql.Tx, FactSet, Plan) error { close(firstAdmitted); <-release; return nil }
+	second.hooks.AfterFence = func(context.Context, *migrations.ExclusiveWriterFence) error { close(secondAdmitted); return nil }
+	type result struct {
+		report ExecutionReport
+		err    error
+	}
+	firstResult, secondResult := make(chan result, 1), make(chan result, 1)
+	firstStarted, secondStarted := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(firstStarted)
+		r, e := first.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+		firstResult <- result{r, e}
+	}()
+	waitProtectedSignal(t, firstStarted, "first executor start")
+	waitProtectedSignal(t, firstAdmitted, "first protected execution")
+	go func() {
+		close(secondStarted)
+		r, e := second.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+		secondResult <- result{r, e}
+	}()
+	waitProtectedSignal(t, secondStarted, "second executor start")
+	waitForExclusiveFenceWaiter(t, db)
+	close(release)
+	one := <-firstResult
+	if one.err != nil || one.report.Outcome != ExecutionCommittedAndVerified {
+		t.Fatalf("first=%+v err=%v", one.report, one.err)
+	}
+	waitProtectedSignal(t, secondAdmitted, "second reconciler admission")
+	two := <-secondResult
+	if two.err != nil || two.report.Outcome != ExecutionCommittedAndVerified {
+		t.Fatalf("second=%+v err=%v", two.report, two.err)
+	}
+	if two.report.AppliedAffectedCounts[ExpectedCountInventoryOwnerUpdates] != 0 {
+		t.Fatalf("second run mutated: %+v", two.report.AppliedAffectedCounts)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionInjectedFailureAfterWriteRollsBackDurably(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.AfterWrite = func(context.Context, *sql.Tx, FactSet, Plan, PlanItem, int) error {
+		return errors.New("injected after-write failure")
+	}
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err == nil || report.Outcome != ExecutionNotCommitted || report.Committed {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var owner sql.NullInt64
+	if err := db.QueryRow(`SELECT inventory_owner_client_id FROM devices WHERE id=$1`, fixture.device).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner.Valid {
+		t.Fatalf("rollback left owner=%d", owner.Int64)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionAdminFailureRestoresTriggerAndRollsBack(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, true)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.AfterWrite = func(_ context.Context, _ *sql.Tx, _ FactSet, _ Plan, item PlanItem, _ int) error {
+		if item.AuditID != uuid.Nil {
+			return errors.New("injected audit failure")
+		}
+		return nil
+	}
+	report, err := executor.ExecuteWithMappingResolver(context.Background(), os.Getenv("TEST_DATABASE_URL"), artifactResolverFor(fixture.operation, uint(fixture.client1)))
+	if err == nil || report.Outcome != ExecutionNotCommitted {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var op, audit sql.NullInt64
+	if err := db.QueryRow(`SELECT client_id FROM admin_binding_operations WHERE operation_id=$1`, fixture.operation).Scan(&op); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT client_id FROM admin_binding_audits WHERE id=$1`, fixture.audit).Scan(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if op.Valid || audit.Valid {
+		t.Fatalf("admin rollback op/audit=%v/%v", op, audit)
+	}
+	assertAuditTriggerRestored(t, db, fixture.audit)
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionPreCommitFailureRollsBack(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.BeforeCommit = func(context.Context, *sql.Tx, FactSet, Plan) error { return errors.New("injected pre-commit failure") }
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err == nil || report.Outcome != ExecutionNotCommitted {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var owner sql.NullInt64
+	if err := db.QueryRow(`SELECT inventory_owner_client_id FROM devices WHERE id=$1`, fixture.device).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner.Valid {
+		t.Fatalf("precommit left owner=%d", owner.Int64)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionTriggerRestoreFailureRollsBackAndRestores(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, true)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.BeforeTriggerRestore = func(context.Context, *sql.Tx) error { return errors.New("injected trigger restore failure") }
+	report, err := executor.ExecuteWithMappingResolver(context.Background(), os.Getenv("TEST_DATABASE_URL"), artifactResolverFor(fixture.operation, uint(fixture.client1)))
+	if err == nil || report.Outcome != ExecutionNotCommitted {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var audit sql.NullInt64
+	if err := db.QueryRow(`SELECT client_id FROM admin_binding_audits WHERE id=$1`, fixture.audit).Scan(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.Valid {
+		t.Fatalf("trigger failure left audit=%d", audit.Int64)
+	}
+	assertAuditTriggerRestored(t, db, fixture.audit)
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionCommitAmbiguityDoesNotAutoRetry(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.Commit = func(_ context.Context, tx *sql.Tx) error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return errors.New("commit acknowledgement lost")
+	}
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err == nil || report.Outcome != ExecutionCommitOutcomeUnknown || report.Committed {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var owner int64
+	if err := db.QueryRow(`SELECT inventory_owner_client_id FROM devices WHERE id=$1`, fixture.device).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != fixture.client1 {
+		t.Fatalf("ambiguous durable owner=%d want=%d", owner, fixture.client1)
+	}
+	fresh, err := NewProtectedExecutor(nil).Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err != nil || fresh.Outcome != ExecutionCommittedAndVerified || fresh.AppliedAffectedCounts[ExpectedCountInventoryOwnerUpdates] != 0 {
+		t.Fatalf("fresh recovery report=%+v err=%v", fresh, err)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionCleanupFailurePreservesCommittedOutcome(t *testing.T) {
+	db := protectedTestDB(t)
+	createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.CloseFence = func(f *migrations.ExclusiveWriterFence) error {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return errors.New("injected cleanup report failure")
+	}
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err == nil || report.Outcome != ExecutionCommittedAndVerified || report.CleanupError == "" {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionConnectionLossBeforeCommitRollsBack(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.AfterWrite = func(ctx context.Context, tx *sql.Tx, _ FactSet, _ Plan, _ PlanItem, _ int) error {
+		var pid int64
+		if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+			return err
+		}
+		var terminated bool
+		if err := db.QueryRowContext(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil {
+			return err
+		}
+		if !terminated {
+			return errors.New("backend termination rejected")
+		}
+		return nil
+	}
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err == nil || report.Outcome != ExecutionNotCommitted {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var owner sql.NullInt64
+	if err := db.QueryRow(`SELECT inventory_owner_client_id FROM devices WHERE id=$1`, fixture.device).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner.Valid {
+		t.Fatalf("connection-loss left owner=%d", owner.Int64)
+	}
+	assertWriterFenceAvailable(t, db)
+}
+
+func TestProtectedExecutionConnectionLossAfterCommitIsPostverifyFailure(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, false)
+	executor := NewProtectedExecutor(nil)
+	executor.hooks.AfterCommit = func(ctx context.Context, conn *sql.Conn) error {
+		var pid int64
+		if err := conn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+			return err
+		}
+		var terminated bool
+		if err := db.QueryRowContext(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil {
+			return err
+		}
+		if !terminated {
+			return errors.New("post-commit termination rejected")
+		}
+		return nil
+	}
+	report, err := executor.Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err == nil || report.Outcome != ExecutionCommittedPostVerifyFailed || !report.Committed {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	var owner int64
+	if err := db.QueryRow(`SELECT inventory_owner_client_id FROM devices WHERE id=$1`, fixture.device).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != fixture.client1 {
+		t.Fatalf("postcommit owner=%d want=%d", owner, fixture.client1)
+	}
+}
+
+func TestProtectedExecutionFreshMappingRaceIsRejected(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, false)
+	diagnostic, err := DiagnoseV5(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := &MappingArtifact{SchemaVersion: MappingSchema, Version: 5, SourceFactsDigest: diagnostic.MappingBasisDigest, Mappings: []MappingEntry{{Category: MappingDevice, DeviceID: uint(fixture.device), ClientID: uint(fixture.client1)}}}
+	if _, err := db.Exec(`UPDATE devices SET inventory_owner_client_id=$1 WHERE id=$2`, fixture.client2, fixture.device); err != nil {
+		t.Fatal(err)
+	}
+	report, err := NewProtectedExecutor(nil).Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), artifact)
+	if err == nil || report.Outcome != ExecutionNotCommitted {
+		t.Fatalf("stale report=%+v err=%v", report, err)
+	}
+	var owner int64
+	if err := db.QueryRow(`SELECT inventory_owner_client_id FROM devices WHERE id=$1`, fixture.device).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != fixture.client2 {
+		t.Fatalf("stale mapping changed owner=%d", owner)
+	}
+}
+
+func TestProtectedExecutionIdempotentRerunAndPartialAdminRecovery(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, true)
+	resolver := artifactResolverFor(fixture.operation, uint(fixture.client1))
+	first, err := NewProtectedExecutor(nil).ExecuteWithMappingResolver(context.Background(), os.Getenv("TEST_DATABASE_URL"), resolver)
+	if err != nil || first.Outcome != ExecutionCommittedAndVerified {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := NewProtectedExecutor(nil).Execute(context.Background(), os.Getenv("TEST_DATABASE_URL"), nil)
+	if err != nil || second.Outcome != ExecutionCommittedAndVerified {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if second.AppliedAffectedCounts[ExpectedCountInventoryOwnerUpdates] != 0 || second.AppliedAffectedCounts[ExpectedCountAdminClientUpdates] != 0 {
+		t.Fatalf("rerun mutated=%v", second.AppliedAffectedCounts)
+	}
+	fixture = createProtectedFixture(t, db, true)
+	if _, err := db.Exec(`UPDATE admin_binding_operations SET client_id=$1 WHERE operation_id=$2`, fixture.client1, fixture.operation); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := NewProtectedExecutor(nil).ExecuteWithMappingResolver(context.Background(), os.Getenv("TEST_DATABASE_URL"), artifactResolverFor(fixture.operation, uint(fixture.client1)))
+	if err != nil || partial.Outcome != ExecutionCommittedAndVerified || partial.AppliedAffectedCounts[ExpectedCountAdminClientUpdates] != 1 {
+		t.Fatalf("partial=%+v err=%v", partial, err)
+	}
+}
+
+func TestProtectedExecutionContradictoryAdminProvenanceBlocks(t *testing.T) {
+	db := protectedTestDB(t)
+	fixture := createProtectedFixture(t, db, true)
+	if _, err := db.Exec(`UPDATE admin_binding_operations SET client_id=$1 WHERE operation_id=$2`, fixture.client2, fixture.operation); err != nil {
+		t.Fatal(err)
+	}
+	report, err := NewProtectedExecutor(nil).ExecuteWithMappingResolver(context.Background(), os.Getenv("TEST_DATABASE_URL"), artifactResolverFor(fixture.operation, uint(fixture.client1)))
+	if err == nil || report.Outcome != ExecutionNotCommitted {
+		t.Fatalf("contradictory=%+v err=%v", report, err)
+	}
+	var audit sql.NullInt64
+	if err := db.QueryRow(`SELECT client_id FROM admin_binding_audits WHERE id=$1`, fixture.audit).Scan(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.Valid {
+		t.Fatalf("contradictory changed audit=%d", audit.Int64)
 	}
 }

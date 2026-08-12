@@ -51,7 +51,9 @@ type ExecutionReport struct {
 	Phase                  ExecutionPhase
 	FrozenAt               time.Time
 	PlanID                 uuid.UUID
+	PlanDigest             string
 	SourceFactsDigest      string
+	MappingBasisDigest     string
 	MappingDigest          string
 	ExpectedAffectedCounts map[string]int
 	AppliedAffectedCounts  map[string]int
@@ -106,14 +108,25 @@ type ProtectedExecutor struct {
 }
 
 type protectedExecutionHooks struct {
-	BeforeWrite func(context.Context, *sql.Tx, FactSet, Plan) error
-	AfterCommit func(context.Context, *sql.Conn) error
+	AfterFence           func(context.Context, *migrations.ExclusiveWriterFence) error
+	AfterTransaction     func(context.Context, *sql.Tx) error
+	AfterFrozenTime      func(context.Context, *sql.Tx, time.Time) error
+	FrozenTime           func(time.Time) time.Time
+	AfterFreshPlan       func(context.Context, *sql.Tx, FactSet, Plan) error
+	BeforeWrite          func(context.Context, *sql.Tx, FactSet, Plan) error
+	AfterWrite           func(context.Context, *sql.Tx, FactSet, Plan, PlanItem, int) error
+	BeforeTriggerRestore func(context.Context, *sql.Tx) error
+	AfterTriggerRestore  func(context.Context, *sql.Tx) error
+	BeforeCommit         func(context.Context, *sql.Tx, FactSet, Plan) error
+	Commit               func(context.Context, *sql.Tx) error
+	AfterCommit          func(context.Context, *sql.Conn) error
+	CloseFence           func(*migrations.ExclusiveWriterFence) error
 }
 
 // MappingResolver is a narrow execution seam for an artifact selected after
-// the authoritative fresh snapshot exists. It is useful when the artifact's
-// source digest includes FactSet.AsOf, which is frozen by PostgreSQL only after
-// the protected transaction starts.
+// the authoritative fresh snapshot exists. Its mapping-basis digest includes
+// planner-relevant temporal state, while raw FactSet.AsOf remains execution
+// metadata frozen by PostgreSQL only after the protected transaction starts.
 type MappingResolver func(context.Context, FactSet) (*MappingArtifact, error)
 
 func NewProtectedExecutor(collector ReadOnlyCollectorWithConnection) *ProtectedExecutor {
@@ -147,8 +160,12 @@ func (e *ProtectedExecutor) execute(ctx context.Context, dsn string, mapping *Ma
 		return ExecutionReport{Outcome: ExecutionNotCommitted, Phase: PhaseFence}, &ExecutionError{Outcome: ExecutionNotCommitted, Phase: PhaseFence, Cause: err}
 	}
 	report.BackendPID = fence.BackendPID()
+	closeFence := e.hooks.CloseFence
+	if closeFence == nil {
+		closeFence = func(f *migrations.ExclusiveWriterFence) error { return f.Close() }
+	}
 	defer func() {
-		closeErr := fence.Close()
+		closeErr := closeFence(fence)
 		report.FenceState = fence.State()
 		if closeErr == nil {
 			return
@@ -174,7 +191,12 @@ func (e *ProtectedExecutor) execute(ctx context.Context, dsn string, mapping *Ma
 	collector := e.Collector
 	var gormDB *gorm.DB
 	if collector == nil {
-		gormDB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		driverURL, filterErr := filteredPostgresURL(dsn)
+		if filterErr != nil {
+			report.Outcome, report.Phase = ExecutionNotCommitted, PhaseFence
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: filterErr}
+		}
+		gormDB, err = gorm.Open(postgres.Open(driverURL), &gorm.Config{})
 		if err != nil {
 			report.Outcome, report.Phase = ExecutionNotCommitted, PhaseFence
 			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: err}
@@ -203,6 +225,11 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 	if fence == nil || fence.Conn() == nil {
 		return report, protectedError(report, errors.New("pinned exclusive writer fence is required"))
 	}
+	if hooks.AfterFence != nil {
+		if err := hooks.AfterFence(ctx, fence); err != nil {
+			return report, protectedError(report, err)
+		}
+	}
 	capability, err := fence.Capability()
 	if err != nil {
 		return report, protectedError(report, err)
@@ -220,7 +247,15 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 		report.Phase = PhaseTransaction
 		return report, protectedError(report, err)
 	}
+	report.Phase = PhaseTransaction
 	transactionOpen := true
+	if hooks.AfterTransaction != nil {
+		if err := hooks.AfterTransaction(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			transactionOpen = false
+			return report, protectedError(report, err)
+		}
+	}
 	rollback := func() error {
 		if !transactionOpen {
 			return nil
@@ -244,6 +279,14 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 		return fail(PhaseTransaction, err)
 	}
 	report.FrozenAt = report.FrozenAt.UTC()
+	if hooks.FrozenTime != nil {
+		report.FrozenAt = hooks.FrozenTime(report.FrozenAt).UTC()
+	}
+	if hooks.AfterFrozenTime != nil {
+		if err := hooks.AfterFrozenTime(ctx, tx, report.FrozenAt); err != nil {
+			return fail(PhaseTransaction, err)
+		}
+	}
 
 	facts, err := collector.CollectV5Pinned(ctx, report.FrozenAt, tx)
 	if err != nil {
@@ -266,7 +309,13 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 		return fail(PhasePlan, err)
 	}
 	report.PlanID = plan.PlanID
+	report.PlanDigest = hex.EncodeToString(plan.Digest)
 	report.SourceFactsDigest = plan.SourceFactsDigest
+	if mappingBasisDigest, digestErr := MappingSourceFactsDigest(facts); digestErr != nil {
+		return fail(PhasePlan, digestErr)
+	} else {
+		report.MappingBasisDigest = hex.EncodeToString(mappingBasisDigest)
+	}
 	report.MappingDigest = plan.MappingDigest
 	report.ExpectedAffectedCounts = copyCounts(plan.ExpectedAffectedCounts)
 	if len(plan.Blockers) != 0 || len(plan.RequiredExplicitMappings) != 0 {
@@ -275,6 +324,11 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 	}
 	if err := validateExecutablePlan(plan, facts); err != nil {
 		return fail(PhasePlan, err)
+	}
+	if hooks.AfterFreshPlan != nil {
+		if err := hooks.AfterFreshPlan(ctx, tx, facts, plan); err != nil {
+			return fail(PhasePlan, err)
+		}
 	}
 
 	before := facts
@@ -300,18 +354,28 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 		if !triggerDisabled {
 			return nil
 		}
+		if hooks.BeforeTriggerRestore != nil {
+			if err := hooks.BeforeTriggerRestore(ctx, tx); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE public.admin_binding_audits ENABLE TRIGGER admin_binding_audits_immutable`); err != nil {
 			return err
 		}
 		if err := verifyAuditTriggerEnabled(tx); err != nil {
 			return err
 		}
+		if hooks.AfterTriggerRestore != nil {
+			if err := hooks.AfterTriggerRestore(ctx, tx); err != nil {
+				return err
+			}
+		}
 		triggerDisabled = false
 		report.TriggerRestored = true
 		return nil
 	}
 
-	for _, item := range items {
+	for itemIndex, item := range items {
 		if item.Kind == PlanItemAdmin && item.AuditID != uuid.Nil && !triggerDisabled {
 			if _, err := tx.ExecContext(ctx, `ALTER TABLE public.admin_binding_audits DISABLE TRIGGER admin_binding_audits_immutable`); err != nil {
 				return fail(PhaseWrite, err)
@@ -325,6 +389,14 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 			return fail(PhaseWrite, err)
 		}
 		incrementAffected(report.AppliedAffectedCounts, item)
+		if hooks.AfterWrite != nil {
+			if err := hooks.AfterWrite(ctx, tx, facts, plan, item, itemIndex); err != nil {
+				if restoreErr := restoreTrigger(); restoreErr != nil {
+					err = errors.Join(err, fmt.Errorf("restore audit trigger: %w", restoreErr))
+				}
+				return fail(PhaseWrite, err)
+			}
+		}
 	}
 	if err := restoreTrigger(); err != nil {
 		return fail(PhaseVerify, err)
@@ -348,7 +420,16 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 	}
 	report.TriggerRestored = !hasAuditWrites(items) || triggerDisabled == false
 
-	if err := tx.Commit(); err != nil {
+	if hooks.BeforeCommit != nil {
+		if err := hooks.BeforeCommit(ctx, tx, facts, plan); err != nil {
+			return fail(PhaseVerify, err)
+		}
+	}
+	commit := hooks.Commit
+	if commit == nil {
+		commit = func(_ context.Context, tx *sql.Tx) error { return tx.Commit() }
+	}
+	if err := commit(ctx, tx); err != nil {
 		transactionOpen = false
 		report.Phase = PhaseCommit
 		report.Outcome = ExecutionCommitOutcomeUnknown

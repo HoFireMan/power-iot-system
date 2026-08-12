@@ -256,6 +256,81 @@ func SourceFactsDigest(facts FactSet) ([]byte, error) {
 	return digest, err
 }
 
+// CanonicalMappingBasis returns the stable authority evidence bound into a
+// v5 explicit mapping artifact. The execution snapshot timestamp itself is
+// omitted, while assignment interval rows and their planner-derived temporal
+// states remain present. Thus harmless wall-clock movement does not stale an
+// artifact, but a validity-boundary transition or any source/authority change
+// does.
+func CanonicalMappingBasis(facts FactSet) ([]byte, []byte, error) {
+	if err := facts.validateVersion(); err != nil {
+		return nil, nil, err
+	}
+	n := normalizeFacts(facts)
+	if err := validateFactIdentities(n); err != nil {
+		return nil, nil, err
+	}
+	if err := canonicalizeAdminJSON(&n); err != nil {
+		return nil, nil, err
+	}
+	decisions, err := Classify(n)
+	if err != nil {
+		return nil, nil, err
+	}
+	classes, err := ClassifyFacts(n)
+	if err != nil {
+		return nil, nil, err
+	}
+	factsJSON, err := json.Marshal(n)
+	if err != nil {
+		return nil, nil, err
+	}
+	var factObject map[string]json.RawMessage
+	if err := json.Unmarshal(factsJSON, &factObject); err != nil {
+		return nil, nil, err
+	}
+	delete(factObject, "as_of")
+	states := make([]mappingAssignmentState, 0, len(n.DeviceAssignments))
+	for _, assignment := range n.DeviceAssignments {
+		states = append(states, mappingAssignmentState{ID: assignment.ID, State: assignmentTemporalState(assignment, n.AsOf)})
+	}
+	type basis struct {
+		Facts               map[string]json.RawMessage `json:"facts"`
+		AssignmentStates    []mappingAssignmentState   `json:"assignment_temporal_states"`
+		Decisions           []Decision                 `json:"device_decisions"`
+		FactClassifications []FactClassification       `json:"fact_classifications"`
+	}
+	body, err := json.Marshal(basis{Facts: factObject, AssignmentStates: states, Decisions: decisions, FactClassifications: classes})
+	if err != nil {
+		return nil, nil, err
+	}
+	sum := sha256.Sum256(body)
+	return body, sum[:], nil
+}
+
+func MappingSourceFactsDigest(facts FactSet) ([]byte, error) {
+	_, digest, err := CanonicalMappingBasis(facts)
+	return digest, err
+}
+
+type mappingAssignmentState struct {
+	ID    uuid.UUID `json:"id"`
+	State string    `json:"state"`
+}
+
+func assignmentTemporalState(assignment DeviceAssignmentFact, asOf time.Time) string {
+	if assignment.ID == uuid.Nil || assignment.DeviceID == 0 || assignment.MeasurementPointID == uuid.Nil || assignment.ValidFrom.IsZero() || (assignment.ValidTo != nil && !assignment.ValidTo.After(assignment.ValidFrom)) {
+		return "invalid"
+	}
+	if assignment.ValidFrom.After(asOf) {
+		return "future"
+	}
+	if assignment.ValidTo == nil || asOf.Before(*assignment.ValidTo) {
+		return "active"
+	}
+	return "historical"
+}
+
 // validateFactIdentities makes malformed duplicate snapshots fail closed before
 // they can be bound to a digest. Classification performs richer relational
 // validation; this guard only covers top-level row identities.
@@ -1388,6 +1463,10 @@ func BuildPlan(facts FactSet, artifact *MappingArtifact) (Plan, error) {
 	if err != nil {
 		return plan, err
 	}
+	_, mappingBasisDigest, err := CanonicalMappingBasis(facts)
+	if err != nil {
+		return plan, err
+	}
 	var mappingDigest []byte
 	deviceMappings := map[uint]MappingEntry{}
 	shopMappings := map[uint]MappingEntry{}
@@ -1399,7 +1478,11 @@ func BuildPlan(facts FactSet, artifact *MappingArtifact) (Plan, error) {
 		if artifact.SourceFactsDigest == "" {
 			return plan, errors.New("explicit mapping artifact must bind source facts digest")
 		}
-		if artifact.SourceFactsDigest != hex.EncodeToString(sourceDigest) {
+		mappingDigestHex := hex.EncodeToString(mappingBasisDigest)
+		rawDigestHex := hex.EncodeToString(sourceDigest)
+		// Accept the pre-F1 raw snapshot digest only as a compatibility form;
+		// it remains time-bound and therefore cannot bypass stale protection.
+		if artifact.SourceFactsDigest != mappingDigestHex && artifact.SourceFactsDigest != rawDigestHex {
 			return plan, errors.New("explicit mapping artifact is stale for source facts")
 		}
 		mappingDigest, err = artifact.Digest()

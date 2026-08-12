@@ -40,7 +40,7 @@ func TestNullShopIsExplicitAndProducesPlanIntent(t *testing.T) {
 	if shopClass.Classification != ExplicitMappingRequired {
 		t.Fatalf("shop=%+v", shopClass)
 	}
-	_, digest, _ := CanonicalSourceFacts(facts)
+	digest, _ := MappingSourceFactsDigest(facts)
 	artifact := &MappingArtifact{SchemaVersion: MappingSchema, Version: 5, SourceFactsDigest: hex.EncodeToString(digest), Mappings: []MappingEntry{{Category: MappingShop, ShopID: 100, ClientID: 10}}}
 	plan, err := BuildPlan(facts, artifact)
 	if err != nil {
@@ -276,7 +276,7 @@ func TestCanonicalFactsAndPlanAreOrderIndependent(t *testing.T) {
 
 func TestMappingCategoriesAndStaleSourceBinding(t *testing.T) {
 	facts := testFacts()
-	_, digest, err := CanonicalSourceFacts(facts)
+	digest, err := MappingSourceFactsDigest(facts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestMappingCategoriesAndStaleSourceBinding(t *testing.T) {
 
 func TestMappingStrictCanonicalDigestAndStructuralUse(t *testing.T) {
 	facts := testFacts()
-	_, sourceDigest, err := CanonicalSourceFacts(facts)
+	sourceDigest, err := MappingSourceFactsDigest(facts)
 	if err != nil {
 		t.Fatal(err)
 	}
