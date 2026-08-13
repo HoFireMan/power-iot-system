@@ -113,7 +113,12 @@ func DiagnoseV5(ctx context.Context, dsn string, mapping *MappingArtifact) (repo
 			_ = sqlDB.Close()
 		}
 	}()
-	collector := NewPostgresFactCollector(db)
+	metadataTable, err := migrations.ConfiguredMigrationTable(ctx, dsn, fence.Conn())
+	if err != nil {
+		report.Error = safeOperatorError(err)
+		return report, err
+	}
+	collector := NewPostgresFactCollectorWithMetadataTable(db, metadataTable)
 	tx, err := fence.Conn().BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		report.Error = err.Error()

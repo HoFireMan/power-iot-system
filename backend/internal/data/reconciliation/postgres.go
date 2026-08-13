@@ -13,10 +13,20 @@ import (
 // PostgresFactCollector performs only SELECTs. It owns no transaction and has
 // no method capable of INSERT/UPDATE/DELETE, making accidental reconciliation
 // writes impossible through this A2.1 interface.
-type PostgresFactCollector struct{ DB *gorm.DB }
+type PostgresFactCollector struct {
+	DB            *gorm.DB
+	metadataTable string
+}
 
 func NewPostgresFactCollector(db *gorm.DB) *PostgresFactCollector {
-	return &PostgresFactCollector{DB: db}
+	return &PostgresFactCollector{DB: db, metadataTable: `"public"."schema_migrations"`}
+}
+
+func NewPostgresFactCollectorWithMetadataTable(db *gorm.DB, metadataTable string) *PostgresFactCollector {
+	if metadataTable == "" {
+		return NewPostgresFactCollector(db)
+	}
+	return &PostgresFactCollector{DB: db, metadataTable: metadataTable}
 }
 
 func (c *PostgresFactCollector) CollectV5(ctx context.Context, asOf time.Time) (FactSet, error) {
@@ -34,7 +44,7 @@ func (c *PostgresFactCollector) collectV5(ctx context.Context, asOf time.Time, d
 	// migration metadata proves exactly one clean v5 row. This is SELECT-only
 	// and intentionally occurs before any source table is inspected.
 	var migrationRows int64
-	if err := db.Raw(`SELECT count(*) FROM public.schema_migrations`).Scan(&migrationRows).Error; err != nil {
+	if err := db.Raw("SELECT count(*) FROM " + c.metadataTable).Scan(&migrationRows).Error; err != nil {
 		return FactSet{}, fmt.Errorf("count migration metadata: %w", err)
 	}
 	if migrationRows != 1 {
@@ -42,7 +52,7 @@ func (c *PostgresFactCollector) collectV5(ctx context.Context, asOf time.Time, d
 	}
 	var version int
 	var dirty bool
-	row := db.Raw(`SELECT version, dirty FROM public.schema_migrations`).Row()
+	row := db.Raw("SELECT version, dirty FROM " + c.metadataTable).Row()
 	if err := row.Scan(&version, &dirty); err != nil {
 		return FactSet{}, fmt.Errorf("verify migration metadata: %w", err)
 	}

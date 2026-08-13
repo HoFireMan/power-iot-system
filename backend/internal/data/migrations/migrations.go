@@ -205,7 +205,7 @@ type migrationStateStore interface {
 //go:embed sql/*.sql
 var Files embed.FS
 
-func newMigratorLocked(ctx context.Context, databaseURL string) (*migrationHandle, error) {
+func newMigratorLocked(ctx context.Context, databaseURL string, action migrationGateAction) (*migrationHandle, error) {
 	parsed, err := parsePostgresDatabaseURL(databaseURL)
 	if err != nil {
 		return nil, err
@@ -220,6 +220,20 @@ func newMigratorLocked(ctx context.Context, databaseURL string) (*migrationHandl
 		return nil, err
 	}
 	if err := RequireProtectedWork(capability); err != nil {
+		_ = fence.Close()
+		return nil, err
+	}
+	metadata, err := inspectMigrationMetadata(ctx, fence.Conn(), parsed.config)
+	if err != nil {
+		_ = fence.Close()
+		return nil, err
+	}
+	embeddedLatest, err := latestEmbeddedMigrationVersion()
+	if err != nil {
+		_ = fence.Close()
+		return nil, err
+	}
+	if err := classifyMigrationAdmission(metadata, action, embeddedLatest); err != nil {
 		_ = fence.Close()
 		return nil, err
 	}
@@ -409,10 +423,17 @@ func (m *migrationHandle) downOneStep() (err error) {
 	return handleDownFailure(m.databaseDriver, original, target, stepErr)
 }
 
-// Up applies every pending migration while one pinned session owns the
-// canonical exclusive writer fence. ErrNoChange is a successful no-op.
+// Bootstrap advances only through the pre-v5 migration policy to clean v5.
+// It is the shared entrypoint for server, devseed, CLI, and test bootstrap;
+// protected v5->v6 remains owned by the future dedicated A3 runner.
+func Bootstrap(databaseURL string) error {
+	return Up(databaseURL)
+}
+
+// Up is retained as the compatibility API, but is now the same capped,
+// fail-closed bootstrap route rather than an unrestricted generic Up.
 func Up(databaseURL string) (err error) {
-	m, err := newMigratorLocked(context.Background(), databaseURL)
+	m, err := newMigratorLocked(context.Background(), databaseURL, migrationGateUp)
 	if err != nil {
 		return err
 	}
@@ -421,7 +442,10 @@ func Up(databaseURL string) (err error) {
 			err = closeErr
 		}
 	}()
-	if migrateErr := m.Up(); migrateErr != nil && !errors.Is(migrateErr, migrate.ErrNoChange) {
+	// D1 owns only the capped pre-v5 bootstrap route. A future migration
+	// beyond v5 belongs to the dedicated A3 runner and must never be crossed
+	// by this generic entrypoint.
+	if migrateErr := m.Migrate.Migrate(protectedSchemaVersion); migrateErr != nil && !errors.Is(migrateErr, migrate.ErrNoChange) {
 		return migrateErr
 	}
 	state, stateErr := m.state()
@@ -438,7 +462,7 @@ func Up(databaseURL string) (err error) {
 // session owns the canonical exclusive fence. Destructive or irreversible
 // compatibility changes fail closed in their SQL Down file.
 func Down(databaseURL string) (err error) {
-	m, err := newMigratorLocked(context.Background(), databaseURL)
+	m, err := newMigratorLocked(context.Background(), databaseURL, migrationGateDown)
 	if err != nil {
 		return err
 	}

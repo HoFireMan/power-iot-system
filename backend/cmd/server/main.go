@@ -40,10 +40,12 @@ func main() {
 		log.Fatal("database connection failed: ", err)
 	}
 
-	if err := migrations.Up(databaseURL); err != nil {
-		log.Fatal("versioned schema migration failed: ", err)
+	if err := migrations.Bootstrap(databaseURL); err != nil {
+		log.Fatal("schema admission/bootstrap failed: ", err)
 	}
-	initData(db)
+	if err := initData(db); err != nil {
+		log.Fatal("initial data bootstrap failed: ", err)
+	}
 
 	mqttConfig, err := iot.LoadMqttConfigFromEnv()
 	if err != nil {
@@ -83,7 +85,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func initData(db *gorm.DB) {
+func initData(db *gorm.DB) error {
 	err := db.WithContext(context.Background()).Transaction(func(tx *gorm.DB) error {
 		if err := migrations.AcquireSharedWriterFenceOnGORM(context.Background(), tx); err != nil {
 			return err
@@ -96,7 +98,5 @@ func initData(db *gorm.DB) {
 		}
 		return nil
 	})
-	if err != nil {
-		log.Printf("carbon factor seed failed: %v", err)
-	}
+	return err
 }

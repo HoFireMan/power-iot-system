@@ -212,6 +212,11 @@ func (e *ProtectedExecutor) execute(ctx context.Context, dsn string, mapping *Ma
 				_ = db.Close()
 			}
 		}()
+		metadataTable, tableErr := migrations.ConfiguredMigrationTable(ctx, dsn, fence.Conn())
+		if tableErr != nil {
+			return ExecutionReport{Outcome: ExecutionNotCommitted, Phase: PhaseFence}, &ExecutionError{Outcome: ExecutionNotCommitted, Phase: PhaseFence, Cause: tableErr}
+		}
+		collector = NewPostgresFactCollectorWithMetadataTable(gormDB, metadataTable)
 	}
 
 	innerReport, innerErr := executeProtected(ctx, fence, collector, mapping, resolver, e.hooks)

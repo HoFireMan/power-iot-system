@@ -1,6 +1,7 @@
 package adminbinding
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -58,6 +59,16 @@ func (e *Executor) CreateMeasurementPoint(ctx context.Context, cmd domain.Create
 		return domain.AdminBindingResult{}, err
 	}
 	return e.run(ctx, domain.ActionCreateMeasurementPoint, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).CreateMeasurementPoint(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.createMeasurementPointInTransaction(ctx, tx, cmd, operation)
 		})
@@ -70,6 +81,16 @@ func (e *Executor) BindDevice(ctx context.Context, cmd domain.BindDeviceCommand)
 		return domain.AdminBindingResult{}, err
 	}
 	return e.run(ctx, domain.ActionBind, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).BindDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.bindInTransaction(ctx, tx, cmd, operation)
 		})
@@ -82,6 +103,16 @@ func (e *Executor) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDeviceCo
 		return domain.AdminBindingResult{}, err
 	}
 	return e.run(ctx, domain.ActionReplace, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).ReplaceDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.replaceInTransaction(ctx, tx, cmd, operation)
 		})
@@ -94,6 +125,16 @@ func (e *Executor) RelocateDevice(ctx context.Context, cmd domain.RelocateDevice
 		return domain.AdminBindingResult{}, err
 	}
 	return e.run(ctx, domain.ActionRelocate, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).RelocateDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.relocateInTransaction(ctx, tx, cmd, operation)
 		})
@@ -106,6 +147,16 @@ func (e *Executor) UnbindDevice(ctx context.Context, cmd domain.UnbindDeviceComm
 		return domain.AdminBindingResult{}, err
 	}
 	return e.run(ctx, domain.ActionUnbind, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).UnbindDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.unbindInTransaction(ctx, tx, cmd, operation)
 		})
@@ -123,6 +174,16 @@ func (e *Executor) CreateMeasurementPointInTransaction(ctx context.Context, tx *
 		return domain.AdminBindingResult{}, err
 	}
 	return e.executeClaimed(ctx, tx, domain.ActionCreateMeasurementPoint, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).CreateMeasurementPoint(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.createMeasurementPointInTransaction(ctx, tx, cmd, operation)
 		})
@@ -138,6 +199,16 @@ func (e *Executor) BindDeviceInTransaction(ctx context.Context, tx *gorm.DB, cmd
 		return domain.AdminBindingResult{}, err
 	}
 	return e.executeClaimed(ctx, tx, domain.ActionBind, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).BindDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.bindInTransaction(ctx, tx, cmd, operation)
 		})
@@ -153,6 +224,16 @@ func (e *Executor) ReplaceDeviceInTransaction(ctx context.Context, tx *gorm.DB, 
 		return domain.AdminBindingResult{}, err
 	}
 	return e.executeClaimed(ctx, tx, domain.ActionReplace, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).ReplaceDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.replaceInTransaction(ctx, tx, cmd, operation)
 		})
@@ -168,6 +249,16 @@ func (e *Executor) RelocateDeviceInTransaction(ctx context.Context, tx *gorm.DB,
 		return domain.AdminBindingResult{}, err
 	}
 	return e.executeClaimed(ctx, tx, domain.ActionRelocate, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).RelocateDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.relocateInTransaction(ctx, tx, cmd, operation)
 		})
@@ -183,12 +274,24 @@ func (e *Executor) UnbindDeviceInTransaction(ctx context.Context, tx *gorm.DB, c
 		return domain.AdminBindingResult{}, err
 	}
 	return e.executeClaimed(ctx, tx, domain.ActionUnbind, cmd.RequestIdentity, cmd.Actor, hash,
+		func(tx *gorm.DB) (uint, error) {
+			plan, err := New(persistence.NewTransactionLookup(tx)).UnbindDevice(ctx, cmd)
+			if err != nil {
+				return 0, err
+			}
+			if plan.Audit.ClientID == nil {
+				return 0, errors.New("authoritative operation Client provenance is required")
+			}
+			return *plan.Audit.ClientID, nil
+		},
 		func(tx *gorm.DB, operation domain.AdminBindingOperation) (domain.AdminBindingResult, error) {
 			return e.unbindInTransaction(ctx, tx, cmd, operation)
 		})
 }
 
-func (e *Executor) run(ctx context.Context, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
+type operationClientResolver func(*gorm.DB) (uint, error)
+
+func (e *Executor) run(ctx context.Context, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, resolveClient operationClientResolver, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
 	ctx = normalizeExecutionContext(ctx)
 	if e == nil || e.db == nil {
 		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "database is not configured")
@@ -205,7 +308,7 @@ func (e *Executor) run(ctx context.Context, action domain.BindingAction, key str
 		result = domain.AdminBindingResult{}
 		err := e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			var callbackErr error
-			result, callbackErr = e.executeClaimed(ctx, tx, action, key, actor, hash, work)
+			result, callbackErr = e.executeClaimed(ctx, tx, action, key, actor, hash, resolveClient, work)
 			return callbackErr
 		})
 		if err == nil {
@@ -232,7 +335,7 @@ func (e *Executor) run(ctx context.Context, action domain.BindingAction, key str
 	return result, domain.NewDomainError(domain.ErrConcurrentTransition, "transaction could not be serialized")
 }
 
-func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
+func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, resolveClient operationClientResolver, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
 	ctx = normalizeExecutionContext(ctx)
 	if tx == nil {
 		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "caller-owned transaction is required")
@@ -243,6 +346,39 @@ func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domai
 	// must occur only after the shared fence is held.
 	if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
 		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "shared writer admission failed")
+	}
+	// Replay lookup is the only read before authority planning. New operations
+	// carry authoritative Client provenance at INSERT time, so the same writer
+	// remains compatible with the future v6 NOT NULL column.
+	existing, lookupErr := persistence.LoadAdminBindingOperation(tx, actor.ActorID, actor.ScopeKey, string(action), key)
+	if lookupErr == nil {
+		if !bytes.Equal(existing.CanonicalRequestHash, hash) {
+			return domain.AdminBindingResult{}, domainError(persistence.ErrIdempotencyKeyReused)
+		}
+		if existing.CommittedAt == nil || len(existing.CommittedResponse) == 0 {
+			return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrConcurrentTransition, "idempotency operation is not committed")
+		}
+		var replay domain.AdminBindingResult
+		if err := json.Unmarshal(existing.CommittedResponse, &replay); err != nil {
+			return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "committed operation result is invalid")
+		}
+		if replay.OperationID != existing.OperationID {
+			return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "committed operation result identity is invalid")
+		}
+		return replay, nil
+	}
+	if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		return domain.AdminBindingResult{}, domainError(lookupErr)
+	}
+	if resolveClient == nil {
+		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "authoritative operation Client resolver is required")
+	}
+	clientID, err := resolveClient(tx)
+	if err != nil || clientID == 0 {
+		if err == nil {
+			err = errors.New("authoritative operation Client provenance is required")
+		}
+		return domain.AdminBindingResult{}, domainError(err)
 	}
 	snapshot, err := json.Marshal(actor.Scope)
 	if err != nil {
@@ -257,10 +393,7 @@ func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domai
 		ActorID:              actor.ActorID,
 		ScopeSnapshot:        snapshot,
 		CanonicalRequestHash: append([]byte(nil), hash...),
-		// ClientID is intentionally left NULL during claim. The authoritative
-		// Shop -> Client fact is established by the locked, revalidated plan
-		// before any business mutation or commit.
-		ClientID: nil,
+		ClientID:             &clientID,
 	}
 	existing, claimed, err := persistence.ClaimAdminBindingOperation(tx, &operation)
 	if err != nil {
@@ -274,8 +407,6 @@ func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domai
 		if err := json.Unmarshal(existing.CommittedResponse, &replay); err != nil {
 			return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "committed operation result is invalid")
 		}
-		// This is intentionally the only path before planning for a committed
-		// operation. In particular, it does not resolve current assignments.
 		if replay.OperationID != existing.OperationID {
 			return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "committed operation result identity is invalid")
 		}
