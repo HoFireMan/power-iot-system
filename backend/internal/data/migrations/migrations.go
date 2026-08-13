@@ -216,45 +216,35 @@ func newMigratorLocked(ctx context.Context, databaseURL string, action migration
 	}
 	capability, err := fence.Capability()
 	if err != nil {
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, fence.Close())
 	}
 	if err := RequireProtectedWork(capability); err != nil {
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, fence.Close())
 	}
 	metadata, err := inspectMigrationMetadata(ctx, fence.Conn(), parsed.config)
 	if err != nil {
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, fence.Close())
 	}
 	embeddedLatest, err := latestEmbeddedMigrationVersion()
 	if err != nil {
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, fence.Close())
 	}
 	if err := classifyMigrationAdmission(metadata, action, embeddedLatest); err != nil {
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, fence.Close())
 	}
 	sourceDriver, err := iofs.New(Files, "sql")
 	if err != nil {
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, fence.Close())
 	}
 	// WithConnection must be initialized only after the canonical fence is
 	// owned, and receives the exact pinned session held by the fence.
 	databaseDriver, err := postgres.WithConnection(ctx, fence.Conn(), parsed.config)
 	if err != nil {
-		_ = sourceDriver.Close()
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, sourceDriver.Close(), fence.Close())
 	}
 	m, err := migrate.NewWithInstance("iofs", sourceDriver, "postgres", databaseDriver)
 	if err != nil {
-		_ = sourceDriver.Close()
-		_ = fence.Close()
-		return nil, err
+		return nil, errors.Join(err, sourceDriver.Close(), fence.Close())
 	}
 	return &migrationHandle{Migrate: m, sourceDriver: sourceDriver, databaseDriver: databaseDriver, fence: fence}, nil
 }
@@ -438,8 +428,8 @@ func Up(databaseURL string) (err error) {
 		return err
 	}
 	defer func() {
-		if closeErr := m.close(); err == nil && closeErr != nil {
-			err = closeErr
+		if closeErr := m.close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
 		}
 	}()
 	// D1 owns only the capped pre-v5 bootstrap route. A future migration
@@ -467,8 +457,8 @@ func Down(databaseURL string) (err error) {
 		return err
 	}
 	defer func() {
-		if closeErr := m.close(); err == nil && closeErr != nil {
-			err = closeErr
+		if closeErr := m.close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
 		}
 	}()
 	return m.downOneStep()
