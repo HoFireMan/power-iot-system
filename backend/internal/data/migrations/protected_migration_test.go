@@ -56,19 +56,24 @@ func TestClassifyCatalogTablesIsExactAndFailClosed(t *testing.T) {
 	}
 }
 
-func TestProtectedMigrationSpecRejectsAmbiguousV6Expectations(t *testing.T) {
-	base := ProtectedMigrationSpec{V6CatalogTables: []string{"a", "b"}, Apply: func(_ context.Context, _ *sql.Tx) error { return nil }}
+func TestProtectedMigrationSpecRejectsCallerControlledV6Expectations(t *testing.T) {
+	base := ProtectedMigrationSpec{V6CatalogTables: append([]string(nil), protectedV6CatalogTables...), Apply: func(_ context.Context, _ *sql.Tx) error { return nil }}
 	base.V5SemanticVerifier = func(context.Context, ProtectedMigrationQueryer) error { return nil }
 	base.V6SemanticVerifier = func(context.Context, ProtectedMigrationQueryer) error { return nil }
 	if err := validateProtectedMigrationSpec(base, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, tables := range [][]string{nil, {}, {"a", "a"}, {"a", "bad.name"}, {"a", "bad\"name"}} {
+	for _, tables := range [][]string{{"a", "b"}, {}, {"a", "a"}, {"a", "bad.name"}, {"a", "bad\"name"}} {
 		spec := base
 		spec.V6CatalogTables = tables
 		if err := validateProtectedMigrationSpec(spec, false); !errors.Is(err, ErrProtectedMigrationSpec) {
-			t.Fatalf("tables=%v err=%v", tables, err)
+			t.Fatalf("caller tables=%v err=%v", tables, err)
 		}
+	}
+	omitted := base
+	omitted.V6CatalogTables = nil
+	if err := validateProtectedMigrationSpec(omitted, false); err != nil {
+		t.Fatalf("omitted compatibility field was treated as authority: %v", err)
 	}
 	missingApply := base
 	missingApply.Apply = nil
@@ -85,5 +90,18 @@ func TestProtectedMigrationSpecRejectsAmbiguousV6Expectations(t *testing.T) {
 func TestProtectedRecoveryActionNamesAreExplicit(t *testing.T) {
 	if ProtectedRecoveryRestoreCleanV5 == ProtectedRecoveryCompleteCleanV6 {
 		t.Fatal("recovery actions must remain distinct")
+	}
+}
+
+func TestProtectedRunnerRejectsForgeableAdmissionBeforeOpeningDatabase(t *testing.T) {
+	spec := ProtectedMigrationSpec{
+		ExternalWriterAdmission: ExternalWriterAdmission{ManagedCooperativeWriters: true, DirectSQLControlled: true, OperationalDrainEvidence: true},
+		V6CatalogTables:         append([]string(nil), protectedV6CatalogTables...),
+		Apply:                   func(context.Context, *sql.Tx) error { return nil },
+		V5SemanticVerifier:      func(context.Context, ProtectedMigrationQueryer) error { return nil },
+		V6SemanticVerifier:      func(context.Context, ProtectedMigrationQueryer) error { return nil },
+	}
+	if _, err := RunProtectedMigration(context.Background(), "not-a-database-url", spec); !errors.Is(err, ErrExternalWriterAdmissionRequired) {
+		t.Fatalf("forgeable admission reached database setup: %v", err)
 	}
 }

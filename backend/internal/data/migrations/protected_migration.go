@@ -316,8 +316,9 @@ func recoverProtectedMigration(ctx context.Context, databaseURL string, spec Pro
 		report.Phase = ProtectedPhaseRecovery
 		if errors.Is(err, ErrProtectedMigrationUnknownCommit) {
 			report.Outcome = ProtectedCommitOutcomeUnknown
-			report.PostCommitState, report.PostCommitCatalog = resolveUnknown(ctx, parsed, spec)
-			return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseRecovery, errors.Join(err, ErrProtectedMigrationNoRetry))
+			var cleanupErr error
+			report.PostCommitState, report.PostCommitCatalog, cleanupErr = resolveUnknown(ctx, parsed, spec, fence, lock)
+			return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseRecovery, errors.Join(err, ErrProtectedMigrationNoRetry, cleanupErr))
 		}
 		return report, protectedError(&report, ProtectedNotCommitted, ProtectedPhaseRecovery, err)
 	}
@@ -444,8 +445,9 @@ func runProtectedMigration(ctx context.Context, databaseURL string, spec Protect
 	}
 	if err := commit(ctx, markerTx); err != nil {
 		report.Phase, report.Outcome = ProtectedPhaseDirtyMarker, ProtectedCommitOutcomeUnknown
-		report.PostCommitState, report.PostCommitCatalog = resolveUnknown(ctx, parsed, spec)
-		return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseDirtyMarker, errors.Join(ErrProtectedMigrationUnknownCommit, ErrProtectedMigrationNoRetry, err))
+		var cleanupErr error
+		report.PostCommitState, report.PostCommitCatalog, cleanupErr = resolveUnknown(ctx, parsed, spec, fence, lock)
+		return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseDirtyMarker, errors.Join(ErrProtectedMigrationUnknownCommit, ErrProtectedMigrationNoRetry, err, cleanupErr))
 	}
 
 	bodyTx, err := fence.Conn().BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
@@ -476,8 +478,9 @@ func runProtectedMigration(ctx context.Context, databaseURL string, spec Protect
 			if restoreErr := setProtectedMetadataWithHooks(ctx, fence.Conn(), parsed.config, 5, false, spec, hooks); restoreErr != nil {
 				if errors.Is(restoreErr, ErrProtectedMigrationUnknownCommit) {
 					report.Phase, report.Outcome = ProtectedPhaseRecovery, ProtectedCommitOutcomeUnknown
-					report.PostCommitState, report.PostCommitCatalog = resolveUnknown(ctx, parsed, spec)
-					return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseRecovery, errors.Join(err, restoreErr, ErrProtectedMigrationNoRetry))
+					var cleanupErr error
+					report.PostCommitState, report.PostCommitCatalog, cleanupErr = resolveUnknown(ctx, parsed, spec, fence, lock)
+					return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseRecovery, errors.Join(err, restoreErr, ErrProtectedMigrationNoRetry, cleanupErr))
 				}
 				return report, protectedError(&report, ProtectedCommittedPostVerifyFail, ProtectedPhasePostVerification, errors.Join(err, restoreErr, ErrProtectedMigrationPostVerification, ErrProtectedMigrationNoRetry))
 			}
@@ -512,8 +515,9 @@ func runProtectedMigration(ctx context.Context, databaseURL string, spec Protect
 	}
 	if err := commit(ctx, bodyTx); err != nil {
 		report.Phase, report.Outcome = ProtectedPhaseEnforcement, ProtectedCommitOutcomeUnknown
-		report.PostCommitState, report.PostCommitCatalog = resolveUnknown(ctx, parsed, spec)
-		return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseEnforcement, errors.Join(ErrProtectedMigrationUnknownCommit, ErrProtectedMigrationNoRetry, err))
+		var cleanupErr error
+		report.PostCommitState, report.PostCommitCatalog, cleanupErr = resolveUnknown(ctx, parsed, spec, fence, lock)
+		return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseEnforcement, errors.Join(ErrProtectedMigrationUnknownCommit, ErrProtectedMigrationNoRetry, err, cleanupErr))
 	}
 	report.Committed = true
 	postBody, err := pinnedProtectedInspection(ctx, fence.Conn(), parsed.config, spec)
@@ -552,8 +556,9 @@ func runProtectedMigration(ctx context.Context, databaseURL string, spec Protect
 	}
 	if err := commit(ctx, finalTx); err != nil {
 		report.Phase, report.Outcome = ProtectedPhaseFinalMarker, ProtectedCommitOutcomeUnknown
-		report.PostCommitState, report.PostCommitCatalog = resolveUnknown(ctx, parsed, spec)
-		return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseFinalMarker, errors.Join(ErrProtectedMigrationUnknownCommit, ErrProtectedMigrationNoRetry, err))
+		var cleanupErr error
+		report.PostCommitState, report.PostCommitCatalog, cleanupErr = resolveUnknown(ctx, parsed, spec, fence, lock)
+		return report, protectedError(&report, ProtectedCommitOutcomeUnknown, ProtectedPhaseFinalMarker, errors.Join(ErrProtectedMigrationUnknownCommit, ErrProtectedMigrationNoRetry, err, cleanupErr))
 	}
 	finalProof, err := pinnedProtectedInspection(ctx, fence.Conn(), parsed.config, spec)
 	if err != nil || finalProof.State != ProtectedStateCleanV6 || finalProof.Catalog != ProtectedCatalogExactV6 {
@@ -606,15 +611,20 @@ func fillProtectedReport(report ProtectedMigrationReport, inspection protectedIn
 }
 
 func validateProtectedMigrationSpec(spec ProtectedMigrationSpec, requireApply bool) error {
-	if len(spec.V6CatalogTables) == 0 {
-		return fmt.Errorf("%w: exact v6 catalog table set is required", ErrProtectedMigrationSpec)
-	}
-	seen := map[string]bool{}
-	for _, table := range spec.V6CatalogTables {
-		if table == "" || strings.ContainsAny(table, "\".;") || seen[table] {
-			return fmt.Errorf("%w: invalid or duplicate v6 catalog table %q", ErrProtectedMigrationSpec, table)
+	// V6CatalogTables is retained as a compatibility field, but it is not an
+	// authority input. A caller may omit it or repeat the canonical expectation;
+	// it may never replace or shrink D3's protected catalog universe.
+	if spec.V6CatalogTables != nil {
+		seen := map[string]bool{}
+		for _, table := range spec.V6CatalogTables {
+			if table == "" || strings.ContainsAny(table, "\".;") || seen[table] {
+				return fmt.Errorf("%w: invalid or duplicate v6 catalog table %q", ErrProtectedMigrationSpec, table)
+			}
+			seen[table] = true
 		}
-		seen[table] = true
+		if !catalogTablesEqual(spec.V6CatalogTables, protectedV6CatalogTables) {
+			return fmt.Errorf("%w: caller v6 catalog table set is not the canonical protected expectation", ErrProtectedMigrationSpec)
+		}
 	}
 	if requireApply {
 		if spec.Apply == nil {
@@ -647,13 +657,13 @@ func inspectProtectedOn(ctx context.Context, q ProtectedMigrationQueryer, config
 		catalog = ProtectedCatalogEmpty
 	}
 	var v5ProofErr, v6ProofErr error
-	if catalogTablesEqual(catalogTables, spec.V6CatalogTables) {
+	if catalogTablesContainExpected(catalogTables, protectedV6CatalogTables) {
 		v6ProofErr = verifySecurityCatalog(ctx, q, schema, true)
 		if v6ProofErr == nil {
 			catalog = ProtectedCatalogExactV6
 		}
 	}
-	if catalog != ProtectedCatalogExactV6 && catalogTablesEqual(catalogTables, v5CatalogTables) {
+	if catalog != ProtectedCatalogExactV6 && catalogTablesContainExpected(catalogTables, v5CatalogTables) {
 		v5ProofErr = verifySecurityCatalog(ctx, q, schema, false)
 		if v5ProofErr == nil {
 			catalog = ProtectedCatalogExactV5
@@ -797,6 +807,23 @@ func catalogTablesEqual(actual, expected []string) bool {
 	return true
 }
 
+// catalogTablesContainExpected deliberately ignores unrelated relations. The
+// protected proof is closed-world only for the specified Security-owned
+// objects; rejecting every unrelated table would incorrectly make a shared
+// schema impossible to inspect.
+func catalogTablesContainExpected(actual, expected []string) bool {
+	seen := make(map[string]struct{}, len(actual))
+	for _, table := range actual {
+		seen[table] = struct{}{}
+	}
+	for _, table := range expected {
+		if _, ok := seen[table]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func classifyCatalogTables(actual, v6 []string) ProtectedCatalogState {
 	if len(actual) == 0 {
 		return ProtectedCatalogEmpty
@@ -827,6 +854,10 @@ func classifyCatalogTables(actual, v6 []string) ProtectedCatalogState {
 
 var v5CatalogTables = []string{"admin_binding_audits", "admin_binding_operations", "alert_logs", "clients", "daily_usages", "device_alert_settings", "device_assignments", "device_types", "devices", "measurement_points", "power_readings", "refresh_sessions", "refresh_tokens", "shops", "system_configs", "telemetry_ingest_keys", "user_shop_relations", "users"}
 
+// The current checkpoint has no 000006 table additions. Keep this authority
+// owned by D3 rather than accepting a caller-selected inventory.
+var protectedV6CatalogTables = append([]string(nil), v5CatalogTables...)
+
 var targetForeignKeys = []string{"security_shops_client_id_fkey", "security_devices_inventory_owner_client_id_fkey", "security_user_shop_relations_user_id_fkey", "security_user_shop_relations_shop_id_fkey", "security_admin_binding_operations_client_id_fkey", "security_admin_binding_audits_client_id_fkey", "security_admin_binding_audits_client_provenance_fkey"}
 
 type protectedForeignKeyShape struct {
@@ -845,6 +876,67 @@ var protectedForeignKeyShapes = map[string]protectedForeignKeyShape{
 
 var targetNullableColumns = []string{"shops.client_id", "devices.inventory_owner_client_id", "admin_binding_operations.client_id", "admin_binding_audits.client_id"}
 
+// These are compared to pg_get_functiondef(), PostgreSQL's deterministic
+// canonical function representation. Whitespace-only formatting differences
+// are immaterial; a same-name body replacement changes the canonical text.
+var protectedFunctionDefinitions = map[string]string{
+	"validate_admin_binding_audit_client_provenance": `CREATE OR REPLACE FUNCTION public.validate_admin_binding_audit_client_provenance()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    operation_client_id BIGINT;
+BEGIN
+    SELECT operation.client_id
+      INTO operation_client_id
+      FROM admin_binding_operations AS operation
+     WHERE operation.operation_id = NEW.operation_id
+       AND operation.operation = NEW.action
+       AND operation.actor_id = NEW.actor_id
+       AND operation.scope_key = NEW.scope_key;
+
+    IF NOT FOUND OR operation_client_id IS DISTINCT FROM NEW.client_id THEN
+        RAISE EXCEPTION 'admin binding audit Client provenance does not match its operation';
+    END IF;
+    RETURN NEW;
+END;
+$function$`,
+	"prevent_admin_binding_audit_mutation": `CREATE OR REPLACE FUNCTION public.prevent_admin_binding_audit_mutation()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RAISE EXCEPTION 'admin_binding_audits is immutable';
+END;
+$function$`,
+}
+
+var protectedForeignKeyParents = []string{"shops", "devices", "user_shop_relations", "admin_binding_operations", "admin_binding_audits"}
+
+// Only these columns define the protected FK target universe. Existing
+// unrelated provenance FKs on the same tables remain portable, while a
+// differently named FK that touches a protected column is rejected.
+var protectedForeignKeyTargetColumns = map[string]map[string]bool{
+	"shops":                    {"client_id": true},
+	"devices":                  {"inventory_owner_client_id": true},
+	"user_shop_relations":      {"user_id": true, "shop_id": true},
+	"admin_binding_operations": {"client_id": true},
+	"admin_binding_audits":     {"client_id": true},
+}
+
+func touchesProtectedForeignKeyTarget(parent, childColumns string) bool {
+	targets := protectedForeignKeyTargetColumns[parent]
+	if len(targets) == 0 {
+		return false
+	}
+	for _, column := range strings.Split(childColumns, ",") {
+		if targets[column] {
+			return true
+		}
+	}
+	return false
+}
+
 func verifySecurityCatalog(ctx context.Context, q ProtectedMigrationQueryer, schema string, validated bool) error {
 	expectedOIDs := make(map[string][2]int64, len(protectedForeignKeyShapes))
 	for name, shape := range protectedForeignKeyShapes {
@@ -857,7 +949,7 @@ func verifySecurityCatalog(ctx context.Context, q ProtectedMigrationQueryer, sch
 		}
 		expectedOIDs[name] = [2]int64{parentOID, referenceOID}
 	}
-	rows, err := q.QueryContext(ctx, `SELECT c.conname, c.convalidated, c.contype, c.confdeltype, c.confupdtype, c.confmatchtype, c.condeferrable, c.condeferred, r.oid::bigint, ref.oid::bigint, r.relname, refn.nspname, ref.relname, (SELECT string_agg(a.attname, ',' ORDER BY u.ord) FROM unnest(c.conkey) WITH ORDINALITY AS u(attnum, ord) JOIN pg_attribute AS a ON a.attrelid = c.conrelid AND a.attnum = u.attnum), (SELECT string_agg(a.attname, ',' ORDER BY u.ord) FROM unnest(c.confkey) WITH ORDINALITY AS u(attnum, ord) JOIN pg_attribute AS a ON a.attrelid = c.confrelid AND a.attnum = u.attnum) FROM pg_constraint AS c JOIN pg_class AS r ON r.oid = c.conrelid JOIN pg_class AS ref ON ref.oid = c.confrelid JOIN pg_namespace AS n ON n.oid = r.relnamespace JOIN pg_namespace AS refn ON refn.oid = ref.relnamespace WHERE n.nspname = $1 AND c.conname = ANY($2)`, schema, pq.Array(targetForeignKeys))
+	rows, err := q.QueryContext(ctx, `SELECT c.conname, c.convalidated, c.contype, c.confdeltype, c.confupdtype, c.confmatchtype, c.condeferrable, c.condeferred, r.oid::bigint, ref.oid::bigint, r.relname, refn.nspname, ref.relname, (SELECT string_agg(a.attname, ',' ORDER BY u.ord) FROM unnest(c.conkey) WITH ORDINALITY AS u(attnum, ord) JOIN pg_attribute AS a ON a.attrelid = c.conrelid AND a.attnum = u.attnum), (SELECT string_agg(a.attname, ',' ORDER BY u.ord) FROM unnest(c.confkey) WITH ORDINALITY AS u(attnum, ord) JOIN pg_attribute AS a ON a.attrelid = c.confrelid AND a.attnum = u.attnum) FROM pg_constraint AS c JOIN pg_class AS r ON r.oid = c.conrelid JOIN pg_class AS ref ON ref.oid = c.confrelid JOIN pg_namespace AS n ON n.oid = r.relnamespace JOIN pg_namespace AS refn ON refn.oid = ref.relnamespace WHERE n.nspname = $1 AND c.contype = 'f' AND r.relname = ANY($2)`, schema, pq.Array(protectedForeignKeyParents))
 	if err != nil {
 		return err
 	}
@@ -871,9 +963,16 @@ func verifySecurityCatalog(ctx context.Context, q ProtectedMigrationQueryer, sch
 			rows.Close()
 			return err
 		}
-		shape, ok := protectedForeignKeyShapes[name]
+		shape, expected := protectedForeignKeyShapes[name]
+		if !expected {
+			if touchesProtectedForeignKeyTarget(parent, childColumns) {
+				rows.Close()
+				return fmt.Errorf("%w: unexpected protected foreign key %s on %s(%s)", ErrProtectedMigrationCatalog, name, parent, childColumns)
+			}
+			continue
+		}
 		oids := expectedOIDs[name]
-		if !ok || typ != "f" || valid != validated || del != "r" || upd != "a" || match != "s" || deferrable || deferred || parentOID != oids[0] || referenceOID != oids[1] || parent != shape.parent || referenceSchema != schema || reference != shape.reference || childColumns != shape.child || referenceColumns != shape.referenceColumns {
+		if typ != "f" || valid != validated || del != "r" || upd != "a" || match != "s" || deferrable || deferred || parentOID != oids[0] || referenceOID != oids[1] || parent != shape.parent || referenceSchema != schema || reference != shape.reference || childColumns != shape.child || referenceColumns != shape.referenceColumns {
 			rows.Close()
 			return fmt.Errorf("%w: foreign key %s properties or columns mismatch", ErrProtectedMigrationCatalog, name)
 		}
@@ -942,10 +1041,15 @@ func verifySecurityCatalog(ctx context.Context, q ProtectedMigrationQueryer, sch
 func verifyProtectedTrigger(ctx context.Context, q ProtectedMigrationQueryer, schema, name, functionSchema, functionName, expectedDefinition string) error {
 	var count int
 	var actualFunctionSchema, actualFunction, enabled, definition string
-	err := q.QueryRowContext(ctx, `SELECT count(*), max(pn.nspname), max(p.proname), max(t.tgenabled), max(pg_get_triggerdef(t.oid, true)) FROM pg_trigger AS t JOIN pg_class AS c ON c.oid=t.tgrelid JOIN pg_namespace AS n ON n.oid=c.relnamespace JOIN pg_proc AS p ON p.oid=t.tgfoid JOIN pg_namespace AS pn ON pn.oid=p.pronamespace WHERE n.nspname=$1 AND c.relname='admin_binding_audits' AND t.tgname=$2 AND NOT t.tgisinternal`, schema, name).Scan(&count, &actualFunctionSchema, &actualFunction, &enabled, &definition)
-	normalized := strings.ToLower(strings.Join(strings.Fields(definition), " "))
-	if err != nil || count != 1 || actualFunctionSchema != functionSchema || actualFunction != functionName || enabled != "O" || normalized != expectedDefinition {
-		return fmt.Errorf("%w: trigger %s count=%d function=%s.%s enabled=%s definition=%q err=%v", ErrProtectedMigrationCatalog, name, count, actualFunctionSchema, actualFunction, enabled, definition, err)
+	var identityArguments, returnType, language, kind, volatility, functionDefinition string
+	var functionOID int64
+	var securityDefiner bool
+	err := q.QueryRowContext(ctx, `SELECT count(*), max(pn.nspname), max(p.proname), max(t.tgenabled), max(pg_get_triggerdef(t.oid, true)), max(p.oid::bigint), max(pg_get_function_identity_arguments(p.oid)), max(format_type(p.prorettype, NULL)), max(l.lanname), max(p.prokind), max(p.provolatile), bool_or(p.prosecdef), max(pg_get_functiondef(p.oid)) FROM pg_trigger AS t JOIN pg_class AS c ON c.oid=t.tgrelid JOIN pg_namespace AS n ON n.oid=c.relnamespace JOIN pg_proc AS p ON p.oid=t.tgfoid JOIN pg_namespace AS pn ON pn.oid=p.pronamespace JOIN pg_language AS l ON l.oid=p.prolang WHERE n.nspname=$1 AND c.relname='admin_binding_audits' AND t.tgname=$2 AND NOT t.tgisinternal`, schema, name).Scan(&count, &actualFunctionSchema, &actualFunction, &enabled, &definition, &functionOID, &identityArguments, &returnType, &language, &kind, &volatility, &securityDefiner, &functionDefinition)
+	normalizedTrigger := strings.ToLower(strings.Join(strings.Fields(definition), " "))
+	expectedFunctionDefinition, knownFunction := protectedFunctionDefinitions[functionName]
+	normalizedFunction := strings.ToLower(strings.Join(strings.Fields(functionDefinition), " "))
+	if err != nil || count != 1 || functionOID == 0 || actualFunctionSchema != functionSchema || actualFunction != functionName || identityArguments != "" || returnType != "trigger" || language != "plpgsql" || kind != "f" || volatility != "v" || securityDefiner || enabled != "O" || normalizedTrigger != expectedDefinition || !knownFunction || normalizedFunction != strings.ToLower(strings.Join(strings.Fields(expectedFunctionDefinition), " ")) {
+		return fmt.Errorf("%w: trigger %s count=%d function=%s.%s oid=%d identity=%q return=%s language=%s kind=%s volatility=%s security_definer=%t enabled=%s definition=%q function_definition=%q err=%v", ErrProtectedMigrationCatalog, name, count, actualFunctionSchema, actualFunction, functionOID, identityArguments, returnType, language, kind, volatility, securityDefiner, enabled, definition, functionDefinition, err)
 	}
 	return nil
 }
@@ -963,13 +1067,12 @@ func verifyCatalog(ctx context.Context, q ProtectedMigrationQueryer, config *pos
 	if err != nil {
 		return err
 	}
-	if !catalogTablesEqual(tables, func() []string {
-		if want == ProtectedCatalogExactV6 {
-			return spec.V6CatalogTables
-		}
-		return v5CatalogTables
-	}()) {
-		return fmt.Errorf("%w: want=%s table set mismatch", ErrProtectedMigrationCatalog, want)
+	expectedTables := v5CatalogTables
+	if want == ProtectedCatalogExactV6 {
+		expectedTables = protectedV6CatalogTables
+	}
+	if !catalogTablesContainExpected(tables, expectedTables) {
+		return fmt.Errorf("%w: want=%s protected table set is incomplete", ErrProtectedMigrationCatalog, want)
 	}
 	return verifySecurityCatalog(ctx, q, schema, want == ProtectedCatalogExactV6)
 }
@@ -1065,19 +1168,99 @@ func pinnedProtectedInspection(ctx context.Context, conn *sql.Conn, config *post
 	return inspection, inspectErr
 }
 
-func resolveUnknown(ctx context.Context, parsed *parsedPostgresDatabaseURL, spec ProtectedMigrationSpec) (ProtectedMigrationState, ProtectedCatalogState) {
+// discardUnknownProtectedSession invalidates the uncertain pinned session
+// before any outcome inspection. A fresh probe independently proves the old
+// backend disappeared and that both session-scoped locks can be acquired and
+// released in canonical reverse order. The old conn is never reused.
+func discardUnknownProtectedSession(fence *ExclusiveWriterFence, lock *migrationAdvisoryLock) error {
+	if fence == nil || lock == nil || fence.pid == 0 || fence.dsn == "" {
+		return ErrPhysicalConnectionDiscardRequired
+	}
+	pid, dsn, migrationKey := fence.pid, fence.dsn, lock.key
+	if fence.conn != nil {
+		_ = fence.conn.Close()
+		fence.conn = nil
+	}
+	if fence.db != nil {
+		_ = fence.db.Close()
+		fence.db = nil
+	}
+	fence.state, fence.discarded = ExclusiveUnknown, true
+	lock.conn, lock.owned, lock.state, lock.discarded = nil, false, ExclusiveUnknown, true
+
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	probeDB, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+	}
+	defer probeDB.Close()
+	probe, err := probeDB.Conn(ctx)
+	if err != nil {
+		return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+	}
+	defer probe.Close()
+	for {
+		var present bool
+		if err := probe.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)`, pid).Scan(&present); err != nil {
+			return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+		}
+		if !present {
+			var fenceOwned bool
+			if err := probe.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1::bigint)", WriterFenceKey).Scan(&fenceOwned); err != nil {
+				return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+			}
+			if fenceOwned {
+				var migrationOwned bool
+				if err := probe.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1::bigint)", migrationKey).Scan(&migrationOwned); err != nil {
+					return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+				}
+				if migrationOwned {
+					var migrationReleased, fenceReleased bool
+					if err := probe.QueryRowContext(ctx, unlockWriterFenceSQL, migrationKey).Scan(&migrationReleased); err != nil {
+						return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+					}
+					if err := probe.QueryRowContext(ctx, unlockWriterFenceSQL, WriterFenceKey).Scan(&fenceReleased); err != nil {
+						return errors.Join(ErrPhysicalConnectionDiscardRequired, err)
+					}
+					if !migrationReleased || !fenceReleased {
+						return errors.Join(ErrPhysicalConnectionDiscardRequired, ErrWriterFenceUnlockFailed)
+					}
+					fence.state, fence.discarded = ExclusiveReleased, true
+					lock.state, lock.discarded = ExclusiveReleased, true
+					return nil
+				}
+				var released bool
+				if err := probe.QueryRowContext(ctx, unlockWriterFenceSQL, WriterFenceKey).Scan(&released); err != nil || !released {
+					return errors.Join(ErrPhysicalConnectionDiscardRequired, ErrWriterFenceUnlockFailed, err)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrPhysicalConnectionDiscardRequired, ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func resolveUnknown(ctx context.Context, parsed *parsedPostgresDatabaseURL, spec ProtectedMigrationSpec, fence *ExclusiveWriterFence, lock *migrationAdvisoryLock) (ProtectedMigrationState, ProtectedCatalogState, error) {
+	if err := discardUnknownProtectedSession(fence, lock); err != nil {
+		return ProtectedStateAmbiguous, ProtectedCatalogUnknown, err
+	}
 	inspection, err := independentProtectedInspection(ctx, parsed, spec)
 	if err != nil {
-		return ProtectedStateAmbiguous, ProtectedCatalogUnknown
+		return ProtectedStateAmbiguous, ProtectedCatalogUnknown, err
 	}
-	return inspection.State, inspection.Catalog
+	return inspection.State, inspection.Catalog, nil
 }
 
 type migrationAdvisoryLock struct {
-	conn  *sql.Conn
-	key   int64
-	owned bool
-	state ExclusiveOwnershipState
+	conn      *sql.Conn
+	key       int64
+	owned     bool
+	state     ExclusiveOwnershipState
+	discarded bool
 }
 
 func acquireMigrationAdvisoryLock(ctx context.Context, conn *sql.Conn, parsed *parsedPostgresDatabaseURL) (*migrationAdvisoryLock, error) {
@@ -1133,7 +1316,7 @@ func acquireMigrationAdvisoryLock(ctx context.Context, conn *sql.Conn, parsed *p
 }
 
 func (l *migrationAdvisoryLock) Close(ctx context.Context) error {
-	if l == nil || (!l.owned && l.state != ExclusiveUnknown) {
+	if l == nil || l.discarded || (!l.owned && l.state != ExclusiveUnknown) {
 		return nil
 	}
 	unlockCtx, cancel := context.WithTimeout(ctx, protectedMigrationUnlockTimeout)

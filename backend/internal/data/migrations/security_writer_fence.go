@@ -90,11 +90,12 @@ type ProtectedWorkCapability struct {
 // protected window. The database is intentionally opened as a private pool so
 // uncertain ownership is never returned to an ordinary application pool.
 type ExclusiveWriterFence struct {
-	dsn   string
-	db    *sql.DB
-	conn  *sql.Conn
-	pid   int64
-	state ExclusiveOwnershipState
+	dsn       string
+	db        *sql.DB
+	conn      *sql.Conn
+	pid       int64
+	state     ExclusiveOwnershipState
+	discarded bool
 }
 
 // OpenExclusiveWriterFence opens and pins one physical PostgreSQL session,
@@ -233,6 +234,11 @@ func (f *ExclusiveWriterFence) Close() error {
 		}
 	}
 	if f.state == ExclusiveUnknown {
+		if f.discarded {
+			// The uncertain session was already invalidated. Do not perform a
+			// second, weaker probe that could mask the primary outcome.
+			return f.closeResources()
+		}
 		return f.discardUnknown()
 	}
 	return f.closeResources()

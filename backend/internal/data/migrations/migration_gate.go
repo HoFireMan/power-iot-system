@@ -21,10 +21,20 @@ var (
 	ErrExternalWriterAdmissionRequired = errors.New("protected work requires external writer drain/deny evidence")
 )
 
+// ExternalWriterAdmission carries operator-facing summaries for diagnostics,
+// but those booleans are never authorization evidence. The unexported proof is
+// issued only by the trusted server-side orchestration seam.
 type ExternalWriterAdmission struct {
 	ManagedCooperativeWriters bool
 	DirectSQLControlled       bool
 	OperationalDrainEvidence  bool
+	evidence                  *externalWriterAdmissionEvidence
+}
+
+type externalWriterAdmissionEvidence struct {
+	managedCooperativeWriters bool
+	directSQLControlled       bool
+	operationalDrainEvidence  bool
 }
 
 // AssessExternalWriterAdmission is deliberately conservative: the repository
@@ -36,7 +46,10 @@ func AssessExternalWriterAdmission() ExternalWriterAdmission {
 }
 
 func RequireExternalWriterAdmission(admission ExternalWriterAdmission) error {
-	if !admission.ManagedCooperativeWriters || !admission.DirectSQLControlled || !admission.OperationalDrainEvidence {
+	// Public summary fields are deliberately ignored. An all-true struct
+	// literal is ordinary caller input and must not authorize protected work.
+	proof := admission.evidence
+	if proof == nil || !proof.managedCooperativeWriters || !proof.directSQLControlled || !proof.operationalDrainEvidence {
 		return ErrExternalWriterAdmissionRequired
 	}
 	return nil

@@ -40,6 +40,19 @@ func TestClassifyMigrationAdmission(t *testing.T) {
 	}
 }
 
+func trustedExternalWriterAdmissionForTest() ExternalWriterAdmission {
+	return ExternalWriterAdmission{
+		ManagedCooperativeWriters: true,
+		DirectSQLControlled:       true,
+		OperationalDrainEvidence:  true,
+		evidence: &externalWriterAdmissionEvidence{
+			managedCooperativeWriters: true,
+			directSQLControlled:       true,
+			operationalDrainEvidence:  true,
+		},
+	}
+}
+
 func TestExternalWriterAdmissionIsConservative(t *testing.T) {
 	admission := AssessExternalWriterAdmission()
 	if !admission.ManagedCooperativeWriters || admission.DirectSQLControlled || admission.OperationalDrainEvidence {
@@ -48,8 +61,11 @@ func TestExternalWriterAdmissionIsConservative(t *testing.T) {
 	if !errors.Is(RequireExternalWriterAdmission(admission), ErrExternalWriterAdmissionRequired) {
 		t.Fatal("missing external drain evidence was not rejected")
 	}
-	if err := RequireExternalWriterAdmission(ExternalWriterAdmission{ManagedCooperativeWriters: true, DirectSQLControlled: true, OperationalDrainEvidence: true}); err != nil {
-		t.Fatalf("complete external admission rejected: %v", err)
+	if err := RequireExternalWriterAdmission(ExternalWriterAdmission{ManagedCooperativeWriters: true, DirectSQLControlled: true, OperationalDrainEvidence: true}); !errors.Is(err, ErrExternalWriterAdmissionRequired) {
+		t.Fatalf("caller-forgeable all-true admission was accepted: %v", err)
+	}
+	if err := RequireExternalWriterAdmission(trustedExternalWriterAdmissionForTest()); err != nil {
+		t.Fatalf("trusted external admission rejected: %v", err)
 	}
 }
 

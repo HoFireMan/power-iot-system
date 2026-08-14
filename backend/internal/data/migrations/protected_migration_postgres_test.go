@@ -53,8 +53,8 @@ func newProtectedEmptyDatabase(t *testing.T) string {
 
 func protectedFixtureSpec(apply func(context.Context, *sql.Tx) error) ProtectedMigrationSpec {
 	return ProtectedMigrationSpec{
-		ExternalWriterAdmission: ExternalWriterAdmission{ManagedCooperativeWriters: true, DirectSQLControlled: true, OperationalDrainEvidence: true},
-		V6CatalogTables:         append([]string(nil), v5CatalogTables...),
+		ExternalWriterAdmission: trustedExternalWriterAdmissionForTest(),
+		V6CatalogTables:         append([]string(nil), protectedV6CatalogTables...),
 		Apply:                   apply,
 		V5SemanticVerifier:      func(context.Context, ProtectedMigrationQueryer) error { return nil },
 		V6SemanticVerifier:      func(context.Context, ProtectedMigrationQueryer) error { return nil },
@@ -133,6 +133,48 @@ func TestProtectedMigrationPostgresClassificationAndCardinality(t *testing.T) {
 	}
 	if _, err := db.Exec(`UPDATE schema_migrations SET dirty = false`); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProtectedMigrationPostgresCanonicalCatalogAuthorityAndUnrelatedObjects(t *testing.T) {
+	dsn := newProtectedFixtureDatabase(t)
+	invalid := protectedFixtureSpec(nil)
+	invalid.V6CatalogTables = []string{"clients"}
+	if _, err := InspectProtectedMigration(context.Background(), dsn, invalid); !errors.Is(err, ErrProtectedMigrationSpec) {
+		t.Fatalf("caller-controlled catalog inventory was accepted: %v", err)
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE d3_unrelated_object(id bigint); ALTER TABLE shops ADD CONSTRAINT d3_unrelated_fk FOREIGN KEY (id) REFERENCES clients(id) NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	spec := protectedFixtureSpec(nil)
+	clean, err := InspectProtectedMigration(context.Background(), dsn, spec)
+	if err != nil || clean.State != ProtectedStateCleanV5 || clean.Catalog != ProtectedCatalogExactV5 {
+		t.Fatalf("unrelated object changed clean-v5 classification: report=%+v err=%v", clean, err)
+	}
+	if _, err := db.Exec(`ALTER TABLE shops ADD CONSTRAINT d3_unexpected_protected_fk FOREIGN KEY (client_id) REFERENCES clients(id) NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	assertProtectedInspectionAmbiguous(t, dsn, spec)
+}
+
+func TestProtectedMigrationPostgresCatalogAuthorityPreservesV6ClassificationWithUnrelatedObject(t *testing.T) {
+	dsn := newProtectedFixtureDatabase(t)
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE d3_unrelated_v6_object(id bigint)`); err != nil {
+		t.Fatal(err)
+	}
+	report, err := RunProtectedMigration(context.Background(), dsn, protectedFixtureSpec(applyFinalFixture))
+	if err != nil || report.PostCommitState != ProtectedStateCleanV6 || report.PostCommitCatalog != ProtectedCatalogExactV6 {
+		t.Fatalf("unrelated object changed clean-v6 classification: report=%+v err=%v", report, err)
 	}
 }
 
@@ -312,6 +354,8 @@ func TestProtectedMigrationPostgresAdversarialTriggerEvidence(t *testing.T) {
 	}{
 		{"missing trigger and decoy relation", `DROP TRIGGER admin_binding_audits_client_provenance ON admin_binding_audits; CREATE SCHEMA decoy_trigger; CREATE TABLE decoy_trigger.admin_binding_audits(id bigint); CREATE FUNCTION decoy_trigger.validate_admin_binding_audit_client_provenance() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER admin_binding_audits_client_provenance BEFORE INSERT ON decoy_trigger.admin_binding_audits FOR EACH ROW EXECUTE FUNCTION decoy_trigger.validate_admin_binding_audit_client_provenance()`},
 		{"wrong trigger function", `CREATE OR REPLACE FUNCTION wrong_d3_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; DROP TRIGGER admin_binding_audits_client_provenance ON admin_binding_audits; CREATE TRIGGER admin_binding_audits_client_provenance BEFORE INSERT ON admin_binding_audits FOR EACH ROW EXECUTE FUNCTION wrong_d3_trigger()`},
+		{"same-name provenance body replacement", `CREATE OR REPLACE FUNCTION validate_admin_binding_audit_client_provenance() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`},
+		{"same-name immutable body replacement", `CREATE OR REPLACE FUNCTION prevent_admin_binding_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
