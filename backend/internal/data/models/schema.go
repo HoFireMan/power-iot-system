@@ -88,7 +88,10 @@ type DeviceType struct {
 type Device struct {
 	ID     uint `gorm:"primaryKey"`
 	ShopID uint `gorm:"index"`
-	TypeID uint `gorm:"index"`
+	// InventoryOwnerClientID is authoritative inventory tenancy. ShopID is a
+	// compatibility placement field and must not authorize or derive tenancy.
+	InventoryOwnerClientID *uint `gorm:"column:inventory_owner_client_id;index"`
+	TypeID                 uint  `gorm:"index"`
 
 	// MacAddress is stored in canonical form: uppercase, no separators, 12 hex chars.
 	// Canonicalization and uniqueness are enforced by versioned SQL migrations.

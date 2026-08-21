@@ -25,6 +25,9 @@ func TestAdminFirstDeviceLockBlocksTelemetryUntilCommit(t *testing.T) {
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Create(&domain.UserShopRelation{UserID: user.ID, ShopID: fixture.shop.ID, ShopRole: "staff"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	actor := domain.ActorContext{ActorID: user.ID, ScopeKey: "admin-first:" + uuid.NewString(), Scope: domain.ScopeSnapshot{TenantKey: "test-tenant", ShopIDs: []uint{fixture.shop.ID}, DeviceIDs: []uint{fixture.first.ID}, AllowedActions: []domain.BindingAction{domain.ActionRelocate}}}
 
 	adminLocked := make(chan struct{})
@@ -127,6 +130,9 @@ func TestTelemetryFirstDeviceLockSerializesAdminTransition(t *testing.T) {
 	}
 	user := domain.User{Account: "telemetry-admin-" + uuid.NewString()[:8], PasswordHash: "test-hash", Name: "Telemetry Admin"}
 	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&domain.UserShopRelation{UserID: user.ID, ShopID: fixture.shop.ID, ShopRole: "staff"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	actor := domain.ActorContext{

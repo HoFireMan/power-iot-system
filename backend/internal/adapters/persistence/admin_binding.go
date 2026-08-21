@@ -23,6 +23,7 @@ import (
 var (
 	ErrIdempotencyKeyReused      = errors.New("idempotency key reused with a different canonical request")
 	ErrOperationAlreadyCommitted = errors.New("idempotency operation is already committed")
+	ErrOperationClientConflict   = errors.New("admin binding operation Client provenance conflict")
 )
 
 // AppendAdminBindingAudit appends one audit fact to the caller's transaction.
@@ -105,6 +106,28 @@ func ClaimAdminBindingOperation(tx *gorm.DB, operation *domain.AdminBindingOpera
 		return existing, false, ErrIdempotencyKeyReused
 	}
 	return existing, false, nil
+}
+
+// SetAdminBindingOperationClientID fills the nullable legacy snapshot exactly
+// once, inside the caller-owned transaction. Reusing the same authoritative
+// Client is harmless; changing it is rejected closed.
+func SetAdminBindingOperationClientID(tx *gorm.DB, operationID uuid.UUID, clientID uint) error {
+	if tx == nil {
+		return errors.New("database transaction is required")
+	}
+	if operationID == uuid.Nil || clientID == 0 {
+		return ErrOperationClientConflict
+	}
+	result := tx.Model(&domain.AdminBindingOperation{}).
+		Where("operation_id = ? AND (client_id IS NULL OR client_id = ?)", operationID, clientID).
+		Update("client_id", clientID)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	return ErrOperationClientConflict
 }
 
 // LoadAdminBindingOperation reloads one scoped operation without changing it.
@@ -192,6 +215,39 @@ type TransactionLookup struct {
 }
 
 func NewTransactionLookup(tx *gorm.DB) *TransactionLookup { return &TransactionLookup{tx: tx} }
+
+// ClientExists verifies that a Shop.ClientID is an actual relational Client
+// row in the same caller-owned transaction.
+func (l *TransactionLookup) ClientExists(_ context.Context, id uint) (bool, error) {
+	if l == nil || l.tx == nil {
+		return false, errors.New("database transaction is required")
+	}
+	if id == 0 {
+		return false, nil
+	}
+	var exists bool
+	if err := l.tx.Raw("SELECT EXISTS (SELECT 1 FROM clients WHERE id = ?)", id).Scan(&exists).Error; err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// UserHasShop is the authoritative authorization relation used by Admin
+// Binding. It is evaluated on the caller-owned transaction, so a planning
+// retry after entity locks cannot rely on a stale scope snapshot.
+func (l *TransactionLookup) UserHasShop(_ context.Context, userID, shopID uint) (bool, error) {
+	if l == nil || l.tx == nil {
+		return false, errors.New("database transaction is required")
+	}
+	if userID == 0 || shopID == 0 {
+		return false, nil
+	}
+	var exists bool
+	if err := l.tx.Raw("SELECT EXISTS (SELECT 1 FROM user_shop_relations WHERE user_id = ? AND shop_id = ?)", userID, shopID).Scan(&exists).Error; err != nil {
+		return false, err
+	}
+	return exists, nil
+}
 
 func (l *TransactionLookup) FindShop(_ context.Context, id uint) (*domain.Shop, error) {
 	var value domain.Shop

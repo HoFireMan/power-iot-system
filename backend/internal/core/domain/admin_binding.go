@@ -19,9 +19,11 @@ type AdminBindingOperation struct {
 	ActorID              uint            `gorm:"column:actor_id;not null"`
 	ScopeSnapshot        json.RawMessage `gorm:"column:scope_snapshot;type:jsonb;not null"`
 	CanonicalRequestHash []byte          `gorm:"column:canonical_request_hash;type:bytea;not null"`
-	CommittedResponse    json.RawMessage `gorm:"column:committed_response;type:jsonb"`
-	CreatedAt            time.Time
-	CommittedAt          *time.Time
+	// ClientID is populated from authoritative relational facts before commit.
+	ClientID          *uint           `gorm:"column:client_id"`
+	CommittedResponse json.RawMessage `gorm:"column:committed_response;type:jsonb"`
+	CreatedAt         time.Time
+	CommittedAt       *time.Time
 }
 
 func (AdminBindingOperation) TableName() string { return "admin_binding_operations" }
@@ -29,12 +31,14 @@ func (AdminBindingOperation) TableName() string { return "admin_binding_operatio
 // AdminBindingAudit is an append-only audit fact. Nullable references are
 // intentional because CreateMeasurementPoint has no Device or assignment.
 type AdminBindingAudit struct {
-	ID                    uuid.UUID       `gorm:"type:uuid;primaryKey"`
-	OperationID           uuid.UUID       `gorm:"column:operation_id;type:uuid;not null"`
-	RequestIdentity       string          `gorm:"column:request_identity;size:255;not null"`
-	ActorID               uint            `gorm:"column:actor_id;not null"`
-	ScopeKey              string          `gorm:"column:scope_key;size:255;not null"`
-	ScopeSnapshot         json.RawMessage `gorm:"column:scope_snapshot;type:jsonb;not null"`
+	ID              uuid.UUID       `gorm:"type:uuid;primaryKey"`
+	OperationID     uuid.UUID       `gorm:"column:operation_id;type:uuid;not null"`
+	RequestIdentity string          `gorm:"column:request_identity;size:255;not null"`
+	ActorID         uint            `gorm:"column:actor_id;not null"`
+	ScopeKey        string          `gorm:"column:scope_key;size:255;not null"`
+	ScopeSnapshot   json.RawMessage `gorm:"column:scope_snapshot;type:jsonb;not null"`
+	// ClientID is the authoritative relational tenant snapshot for this audit.
+	ClientID              *uint           `gorm:"column:client_id"`
 	Action                string          `gorm:"size:40;not null"`
 	OccurredAt            time.Time       `gorm:"column:occurred_at;not null"`
 	EffectiveAt           *time.Time      `gorm:"column:effective_at"`

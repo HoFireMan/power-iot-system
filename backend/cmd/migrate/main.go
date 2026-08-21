@@ -22,7 +22,7 @@ func main() {
 
 	switch strings.ToLower(strings.TrimSpace(*direction)) {
 	case "up":
-		if err := migrations.Up(*databaseURL); err != nil {
+		if err := migrations.Bootstrap(*databaseURL); err != nil {
 			log.Fatal(err)
 		}
 	case "down":

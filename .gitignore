@@ -115,6 +115,7 @@ infrastructure/firmware/certs/*.key
 infrastructure/firmware/certs/*.crt
 infrastructure/firmware/*.bin
 .pi/
+.scratch/
 tools/device-simulator/power-iot-device-simulator
 *:Zone.Identifier
 .env

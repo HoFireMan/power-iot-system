@@ -90,11 +90,12 @@ type ProtectedWorkCapability struct {
 // protected window. The database is intentionally opened as a private pool so
 // uncertain ownership is never returned to an ordinary application pool.
 type ExclusiveWriterFence struct {
-	dsn   string
-	db    *sql.DB
-	conn  *sql.Conn
-	pid   int64
-	state ExclusiveOwnershipState
+	dsn       string
+	db        *sql.DB
+	conn      *sql.Conn
+	pid       int64
+	state     ExclusiveOwnershipState
+	discarded bool
 }
 
 // OpenExclusiveWriterFence opens and pins one physical PostgreSQL session,
@@ -107,7 +108,10 @@ func OpenExclusiveWriterFence(ctx context.Context, dsn string) (*ExclusiveWriter
 	return openExclusiveWriterFence(ctx, parsed)
 }
 
-func openExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabaseURL) (*ExclusiveWriterFence, error) {
+// pinExclusiveWriterFence opens and pins the private physical session but
+// does not acquire the advisory lock. D1-L derives target identity first and
+// then acquires the canonical fence exactly once on this same session.
+func pinExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabaseURL) (*ExclusiveWriterFence, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -130,6 +134,17 @@ func openExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabas
 		_ = conn.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("capture PostgreSQL writer-fence backend PID: %w", err)
+	}
+	return fence, nil
+}
+
+func openExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabaseURL) (*ExclusiveWriterFence, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	fence, err := pinExclusiveWriterFence(ctx, parsed)
+	if err != nil {
+		return nil, err
 	}
 	return fence, fence.acquire(ctx)
 }
@@ -233,6 +248,11 @@ func (f *ExclusiveWriterFence) Close() error {
 		}
 	}
 	if f.state == ExclusiveUnknown {
+		if f.discarded {
+			// The uncertain session was already invalidated. Do not perform a
+			// second, weaker probe that could mask the primary outcome.
+			return f.closeResources()
+		}
 		return f.discardUnknown()
 	}
 	return f.closeResources()

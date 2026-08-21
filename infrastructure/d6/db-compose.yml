@@ -1,0 +1,57 @@
+# Phase-A PowerIoT-DB VM package. Application and D1-L provider PostgreSQL
+# are separate services, databases, and credential domains.
+services:
+  application-db:
+    image: timescale/timescaledb:2.17.2-pg15
+    restart: "no"
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
+    ports:
+      - "${POWERIOT_DB_BIND_ADDRESS:?set private DB-VM bind address}:${APPLICATION_DB_PRIVATE_PORT:?set private application DB port}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [poweriot-db]
+    environment:
+      POSTGRES_DB: ${APPLICATION_DB_NAME:?set restricted application database name}
+      POSTGRES_USER: ${POWERIOT_DB_BOOTSTRAP_USER:?set restricted one-time DB bootstrap role}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-bootstrap-password
+    secrets: [db-bootstrap-password]
+    volumes:
+      - application-db-data:/var/lib/postgresql/data
+
+  d1l-provider-db:
+    image: postgres:15
+    restart: "no"
+    ports:
+      - "${POWERIOT_DB_BIND_ADDRESS:?set private DB-VM bind address}:${D1L_PROVIDER_DB_PRIVATE_PORT:?set private provider DB port}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [poweriot-db]
+    environment:
+      POSTGRES_DB: ${D1L_PROVIDER_DB_NAME:?set restricted provider database name}
+      POSTGRES_USER: ${D1L_PROVIDER_DB_USER:?set restricted provider database user}
+      POSTGRES_PASSWORD_FILE: /run/secrets/provider-db-password
+    secrets: [provider-db-password]
+    volumes:
+      - d1l-provider-db-data:/var/lib/postgresql/data
+
+secrets:
+  db-bootstrap-password:
+    file: ${POWERIOT_DB_BOOTSTRAP_PASSWORD_FILE:?set host-managed one-time DB bootstrap password file}
+  provider-db-password:
+    file: ${POWERIOT_PROVIDER_DB_PASSWORD_FILE:?set host-managed provider DB password file}
+
+volumes:
+  application-db-data:
+    name: ${POWERIOT_APPLICATION_DB_VOLUME:?set isolated application DB volume}
+  d1l-provider-db-data:
+    name: ${POWERIOT_PROVIDER_DB_VOLUME:?set isolated provider DB volume}
+
+networks:
+  poweriot-db:
+    name: ${POWERIOT_DB_NETWORK:?set isolated DB-VM network name}

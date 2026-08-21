@@ -39,8 +39,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := migrations.Up(dsn); err != nil {
-		log.Fatal("versioned schema migration failed: ", err)
+	if err := migrations.Bootstrap(dsn); err != nil {
+		log.Fatal("schema admission/bootstrap failed: ", err)
 	}
 	registrationMessage, fixtureMessage, err := seedFixtures(context.Background(), db, mac, *name, uint(*shopID), *measurementPointName, *assignmentFrom)
 	if err != nil {

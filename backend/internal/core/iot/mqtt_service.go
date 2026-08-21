@@ -25,10 +25,12 @@ type messagePublisher interface {
 type queuedMessage struct {
 	message    mqtt.Message
 	receivedAt time.Time
+	tracked    bool
 }
 
 type MqttService struct {
 	client             mqtt.Client
+	disconnect         func(uint)
 	ackPublisher       messagePublisher
 	db                 *gorm.DB // retained for the legacy compatibility path
 	ingestor           *TelemetryIngestor
@@ -39,19 +41,23 @@ type MqttService struct {
 	stateMu            sync.RWMutex
 	connected          bool
 	subscriptionsReady bool
+	ingestionBlocked   bool
+	smokeOnly          bool
+	inFlight           sync.WaitGroup
 }
 
 // NewMqttService is retained for callers that used the old constructor. New
 // deployments should use NewMqttServiceWithConfig and a tls:// broker URL.
 func NewMqttService(brokerURL string, db *gorm.DB) *MqttService {
 	config := MqttConfig{BrokerURL: brokerURL, ClientID: "power-iot-backend-" + time.Now().UTC().Format("20060102150405.000000000"), TelemetryTopic: TelemetryTopic, CommandPrefix: CommandPrefix, ConnectTimeout: 10 * time.Second, WorkerCount: 4, QueueSize: 64}
-	s := &MqttService{db: db, ingestor: NewTelemetryIngestor(db), config: config, work: make(chan queuedMessage, config.QueueSize), clock: func() time.Time { return time.Now().UTC() }}
+	s := &MqttService{db: db, ingestor: NewTelemetryIngestor(db), config: config, work: make(chan queuedMessage, config.QueueSize), clock: func() time.Time { return time.Now().UTC() }, ingestionBlocked: false}
 	client, err := newMQTTClient(config, s.onConnect, s.onConnectionLost)
 	if err != nil {
 		log.Printf("MQTT client setup failed: %v", err)
 		return s
 	}
 	s.client = client
+	s.disconnect = client.Disconnect
 	return s
 }
 
@@ -75,7 +81,69 @@ func (s *MqttService) Connect() error {
 func (s *MqttService) Ready() bool {
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
+	// MQTT dependency readiness is distinct from general ingestion admission.
+	// PRE_CUTOVER may be broker-ready while every general writer remains denied.
 	return s.connected && s.subscriptionsReady
+}
+
+// IngestionBlocked reports the operator-controlled denial state. Broker
+// connectivity remains a separate concern: a connected broker is not an
+// enabled application writer.
+func (s *MqttService) IngestionBlocked() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.ingestionBlocked
+}
+
+// StopIngestion denies callbacks, disconnects the client, and waits for
+// already accepted messages to finish. A disconnected client cannot silently
+// re-enable the old writer because onConnect checks the same denial state.
+func (s *MqttService) StopIngestion(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.stateMu.Lock()
+	s.ingestionBlocked = true
+	s.connected = false
+	s.subscriptionsReady = false
+	s.stateMu.Unlock()
+	if s.disconnect != nil {
+		// Disconnect is idempotent for the Paho client and avoids relying on a
+		// racy connection-state read during the drain boundary.
+		s.disconnect(0)
+	}
+	wait := make(chan struct{})
+	go func() {
+		s.inFlight.Wait()
+		close(wait)
+	}()
+	select {
+	case <-wait:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("MQTT ingestion drain incomplete: %w", ctx.Err())
+	}
+}
+
+// StartBoundedSmoke is the explicit, temporary smoke seam. It permits only
+// the approved telemetry topic; it never opens general ingestion.
+func (s *MqttService) StartBoundedSmoke() error {
+	s.stateMu.Lock()
+	s.ingestionBlocked = false
+	s.smokeOnly = true
+	s.stateMu.Unlock()
+	return s.Connect()
+}
+
+// StartIngestion is the explicit POST_CUTOVER operator action. It is never
+// called by the reconnect callback, so restart/re-entry cannot bypass the
+// pre-cutover decision.
+func (s *MqttService) StartIngestion() error {
+	s.stateMu.Lock()
+	s.ingestionBlocked = false
+	s.smokeOnly = false
+	s.stateMu.Unlock()
+	return s.Connect()
 }
 
 func (s *MqttService) setConnected(connected bool) {
@@ -96,6 +164,9 @@ func (s *MqttService) setSubscriptionsReady(ready bool) {
 // Subscribe subscribes at QoS 1 and starts a bounded worker pool. MQTT's
 // callback only enqueues work; it never creates a goroutine per message.
 func (s *MqttService) Subscribe() {
+	if s.IngestionBlocked() {
+		return
+	}
 	s.startWorkers()
 	if !s.Ready() {
 		s.subscribeTopics()
@@ -164,7 +235,10 @@ func (s *MqttService) telemetryTopic() string {
 	return s.config.TelemetryTopic
 }
 
-func (s *MqttService) onConnect(mqtt.Client) {
+func (s *MqttService) onConnect(client mqtt.Client) {
+	// Broker dependency connectivity is allowed in PRE_CUTOVER. The message
+	// callback enforces the separate ingestion admission state, so reconnect
+	// cannot bypass the mode boundary.
 	log.Printf("MQTT broker connected")
 	s.setConnected(true)
 	s.startWorkers()
@@ -186,15 +260,26 @@ func (s *MqttService) currentTime() time.Time {
 }
 
 func (s *MqttService) handleMessage(_ mqtt.Client, msg mqtt.Message) {
-	queued := queuedMessage{message: msg, receivedAt: s.currentTime()}
+	s.stateMu.Lock()
+	if s.ingestionBlocked || (s.smokeOnly && msg.Topic() != s.telemetryTopic()) {
+		s.stateMu.Unlock()
+		return
+	}
+	s.inFlight.Add(1)
+	s.stateMu.Unlock()
+	queued := queuedMessage{message: msg, receivedAt: s.currentTime(), tracked: true}
 	select {
 	case s.work <- queued:
 	default:
+		s.inFlight.Done()
 		log.Printf("MQTT processing queue full; dropping message from %s", msg.Topic())
 	}
 }
 
 func (s *MqttService) handleQueuedMessage(queued queuedMessage) {
+	if queued.tracked {
+		defer s.inFlight.Done()
+	}
 	msg := queued.message
 	if msg.Topic() == s.telemetryTopic() {
 		s.processTelemetryAt(msg.Payload(), queued.receivedAt)

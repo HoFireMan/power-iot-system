@@ -1,0 +1,38 @@
+events {}
+
+http {
+  upstream poweriot_backend {
+    server backend:8080;
+  }
+
+  server {
+    listen 8081;
+
+    # Liveness/readiness remain available while the protected window is open.
+    location = / {
+      if ($request_method !~ ^(GET|HEAD|OPTIONS)$) {
+        return 503;
+      }
+      proxy_pass http://poweriot_backend;
+      proxy_set_header Host $host;
+    }
+
+    location = /healthz {
+      if ($request_method !~ ^(GET|HEAD|OPTIONS)$) {
+        return 503;
+      }
+      proxy_pass http://poweriot_backend/;
+      proxy_set_header Host $host;
+    }
+
+    # D6 general ingress policy: only read/readiness methods pass. Controlled
+    # smoke uses a separately authorized DB/operator seam, never this route.
+    location / {
+      if ($request_method !~ ^(GET|HEAD|OPTIONS)$) {
+        return 503;
+      }
+      proxy_pass http://poweriot_backend;
+      proxy_set_header Host $host;
+    }
+  }
+}

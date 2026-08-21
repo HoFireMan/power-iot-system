@@ -20,6 +20,7 @@ import (
 type Lookup interface {
 	FindShop(ctx context.Context, id uint) (*domain.Shop, error)
 	FindMeasurementPoint(ctx context.Context, id uuid.UUID) (*domain.MeasurementPoint, error)
+	UserHasShop(ctx context.Context, userID, shopID uint) (bool, error)
 
 	FindDeviceByID(ctx context.Context, id uint) (*domain.Device, error)
 	FindDeviceBySerial(ctx context.Context, serial string) (*domain.Device, error)
@@ -39,6 +40,13 @@ type Application struct {
 
 func New(lookup Lookup) *Application { return &Application{lookup: lookup} }
 
+// relationalClientVerifier is implemented by the PostgreSQL transaction
+// lookup. The optional seam lets pure planning tests provide relational Client
+// IDs without inventing a second generic repository capability.
+type relationalClientVerifier interface {
+	ClientExists(ctx context.Context, id uint) (bool, error)
+}
+
 func (a *Application) CreateMeasurementPoint(ctx context.Context, cmd domain.CreateMeasurementPointCommand) (domain.CreateMeasurementPointPlan, error) {
 	actor := cloneActorContext(cmd.Actor)
 	if err := authorize(actor, domain.ActionCreateMeasurementPoint, nil, nil); err != nil {
@@ -50,11 +58,11 @@ func (a *Application) CreateMeasurementPoint(ctx context.Context, cmd domain.Cre
 	if cmd.ShopID == 0 || !validName(cmd.Name) {
 		return domain.CreateMeasurementPointPlan{}, domain.NewDomainError(domain.ErrInvalidRequest, "shop and non-empty name within 100 characters are required")
 	}
-	shop, err := a.findShop(ctx, cmd.ShopID)
+	shop, clientID, err := a.authoritativeShop(ctx, cmd.ShopID)
 	if err != nil {
 		return domain.CreateMeasurementPointPlan{}, err
 	}
-	if err := authorize(actor, domain.ActionCreateMeasurementPoint, []uint{shop.ID}, nil); err != nil {
+	if err := a.authorizeRelational(ctx, actor, domain.ActionCreateMeasurementPoint, []uint{shop.ID}, nil); err != nil {
 		return domain.CreateMeasurementPointPlan{}, err
 	}
 
@@ -72,6 +80,7 @@ func (a *Application) CreateMeasurementPoint(ctx context.Context, cmd domain.Cre
 			ActorID:            actor.ActorID,
 			ScopeKey:           actor.ScopeKey,
 			ScopeSnapshot:      cloneScopeSnapshot(actor.Scope),
+			ClientID:           uintPtr(clientID),
 			ShopID:             uintPtr(shop.ID),
 			MeasurementPointID: uuidPtr(pointID),
 		},
@@ -94,10 +103,17 @@ func (a *Application) BindDevice(ctx context.Context, cmd domain.BindDeviceComma
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
+	_, clientID, err := a.authoritativeShop(ctx, point.ShopID)
+	if err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
 	if err := ensureEligibleDevice(device); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
-	if err := authorize(actor, domain.ActionBind, []uint{point.ShopID}, []uint{device.ID}); err != nil {
+	if err := a.ensureInventoryOwnerClient(ctx, device, clientID); err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
+	if err := a.authorizeRelational(ctx, actor, domain.ActionBind, []uint{point.ShopID}, []uint{device.ID}); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
 	activeDevice, err := a.findActiveDeviceAssignment(ctx, device.ID)
@@ -115,7 +131,7 @@ func (a *Application) BindDevice(ctx context.Context, cmd domain.BindDeviceComma
 		return domain.AssignmentTransitionPlan{}, domain.NewDomainError(domain.ErrMeasurementPointOccupied, "measurement point already has an active assignment")
 	}
 
-	return assignmentPlan(domain.ActionBind, cmd.RequestIdentity, actor, cmd.Reason, point.ShopID, device, nil, nil, nil, &point.ID, &point.ID), nil
+	return assignmentPlan(domain.ActionBind, cmd.RequestIdentity, actor, cmd.Reason, point.ShopID, clientID, device, nil, nil, nil, &point.ID, &point.ID), nil
 }
 
 func (a *Application) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDeviceCommand) (domain.AssignmentTransitionPlan, error) {
@@ -134,6 +150,10 @@ func (a *Application) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDevic
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
+	_, clientID, err := a.authoritativeShop(ctx, point.ShopID)
+	if err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
 	currentDevice, err := a.findDeviceByID(ctx, assignment.DeviceID)
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
@@ -145,10 +165,16 @@ func (a *Application) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDevic
 	if err := ensureEligibleDevice(replacement); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
+	if err := a.ensureInventoryOwnerClient(ctx, currentDevice, clientID); err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
+	if err := a.ensureInventoryOwnerClient(ctx, replacement, clientID); err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
 	if replacement.ID == currentDevice.ID {
 		return domain.AssignmentTransitionPlan{}, domain.NewDomainError(domain.ErrInvalidStateTransition, "replacement device must be a different physical device")
 	}
-	if err := authorize(actor, domain.ActionReplace, []uint{point.ShopID}, []uint{currentDevice.ID, replacement.ID}); err != nil {
+	if err := a.authorizeRelational(ctx, actor, domain.ActionReplace, []uint{point.ShopID}, []uint{currentDevice.ID, replacement.ID}); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
 	activeReplacement, err := a.findActiveDeviceAssignment(ctx, replacement.ID)
@@ -159,7 +185,7 @@ func (a *Application) ReplaceDevice(ctx context.Context, cmd domain.ReplaceDevic
 		return domain.AssignmentTransitionPlan{}, domain.NewDomainError(domain.ErrDeviceAlreadyAssigned, "replacement device already has an active assignment")
 	}
 
-	return assignmentPlan(domain.ActionReplace, cmd.RequestIdentity, actor, cmd.Reason, point.ShopID, currentDevice, replacement, &assignment.ID, &point.ID, &point.ID, &point.ID), nil
+	return assignmentPlan(domain.ActionReplace, cmd.RequestIdentity, actor, cmd.Reason, point.ShopID, clientID, currentDevice, replacement, &assignment.ID, &point.ID, &point.ID, &point.ID), nil
 }
 
 func (a *Application) RelocateDevice(ctx context.Context, cmd domain.RelocateDeviceCommand) (domain.AssignmentTransitionPlan, error) {
@@ -182,6 +208,17 @@ func (a *Application) RelocateDevice(ctx context.Context, cmd domain.RelocateDev
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
+	_, sourceClientID, err := a.authoritativeShop(ctx, source.ShopID)
+	if err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
+	_, targetClientID, err := a.authoritativeShop(ctx, target.ShopID)
+	if err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
+	if sourceClientID != targetClientID {
+		return domain.AssignmentTransitionPlan{}, domain.NewDomainError(domain.ErrTenantScopeDenied, "source and target Shops belong to different Clients")
+	}
 	if source.ID == target.ID {
 		return domain.AssignmentTransitionPlan{}, domain.NewDomainError(domain.ErrInvalidStateTransition, "relocation target must differ from source")
 	}
@@ -189,7 +226,10 @@ func (a *Application) RelocateDevice(ctx context.Context, cmd domain.RelocateDev
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
-	if err := authorize(actor, domain.ActionRelocate, []uint{source.ShopID, target.ShopID}, []uint{device.ID}); err != nil {
+	if err := a.ensureInventoryOwnerClient(ctx, device, sourceClientID); err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
+	if err := a.authorizeRelational(ctx, actor, domain.ActionRelocate, []uint{source.ShopID, target.ShopID}, []uint{device.ID}); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
 	activeTarget, err := a.findActivePointAssignment(ctx, target.ID)
@@ -200,7 +240,7 @@ func (a *Application) RelocateDevice(ctx context.Context, cmd domain.RelocateDev
 		return domain.AssignmentTransitionPlan{}, domain.NewDomainError(domain.ErrMeasurementPointOccupied, "relocation target already has an active assignment")
 	}
 
-	return assignmentPlan(domain.ActionRelocate, cmd.RequestIdentity, actor, cmd.Reason, target.ShopID, device, nil, &assignment.ID, &source.ID, &target.ID, &target.ID), nil
+	return assignmentPlan(domain.ActionRelocate, cmd.RequestIdentity, actor, cmd.Reason, target.ShopID, sourceClientID, device, nil, &assignment.ID, &source.ID, &target.ID, &target.ID), nil
 }
 
 func (a *Application) UnbindDevice(ctx context.Context, cmd domain.UnbindDeviceCommand) (domain.AssignmentTransitionPlan, error) {
@@ -219,15 +259,19 @@ func (a *Application) UnbindDevice(ctx context.Context, cmd domain.UnbindDeviceC
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
+	_, clientID, err := a.authoritativeShop(ctx, point.ShopID)
+	if err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
 	device, err := a.findDeviceByID(ctx, assignment.DeviceID)
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
-	if err := authorize(actor, domain.ActionUnbind, []uint{point.ShopID}, []uint{device.ID}); err != nil {
+	if err := a.authorizeRelational(ctx, actor, domain.ActionUnbind, []uint{point.ShopID}, []uint{device.ID}); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
 
-	return assignmentPlan(domain.ActionUnbind, cmd.RequestIdentity, actor, cmd.Reason, point.ShopID, device, nil, &assignment.ID, &point.ID, nil, nil), nil
+	return assignmentPlan(domain.ActionUnbind, cmd.RequestIdentity, actor, cmd.Reason, point.ShopID, clientID, device, nil, &assignment.ID, &point.ID, nil, nil), nil
 }
 
 func (a *Application) resolveDeviceRef(ctx context.Context, ref domain.DeviceRef) (*domain.Device, error) {
@@ -289,6 +333,29 @@ func (a *Application) findShop(ctx context.Context, id uint) (*domain.Shop, erro
 		return nil, domain.NewDomainError(domain.ErrShopNotFound, "shop was not found")
 	}
 	return shop, nil
+}
+
+// authoritativeShop resolves the tenant only through the relational Shop ->
+// Client fact. A missing or unverifiable Client is fail-closed. In particular,
+// names/codes, scope JSON, and compatibility placement fields are not inputs.
+func (a *Application) authoritativeShop(ctx context.Context, id uint) (*domain.Shop, uint, error) {
+	shop, err := a.findShop(ctx, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if shop.ClientID == 0 {
+		return nil, 0, domain.NewDomainError(domain.ErrTenantScopeDenied, "Shop has no authoritative Client")
+	}
+	if verifier, ok := a.lookup.(relationalClientVerifier); ok {
+		exists, err := verifier.ClientExists(ctx, shop.ClientID)
+		if err != nil {
+			return nil, 0, persistenceError(err)
+		}
+		if !exists {
+			return nil, 0, domain.NewDomainError(domain.ErrTenantScopeDenied, "Shop Client authority is invalid")
+		}
+	}
+	return shop, shop.ClientID, nil
 }
 
 func (a *Application) findMeasurementPoint(ctx context.Context, id uuid.UUID) (*domain.MeasurementPoint, error) {
@@ -367,6 +434,25 @@ func (a *Application) findActivePointAssignment(ctx context.Context, id uuid.UUI
 	return assignment, nil
 }
 
+func (a *Application) authorizeRelational(ctx context.Context, actor domain.ActorContext, action domain.BindingAction, shopIDs, deviceIDs []uint) error {
+	if err := authorize(actor, action, shopIDs, deviceIDs); err != nil {
+		return err
+	}
+	if a == nil || a.lookup == nil {
+		return domain.NewDomainError(domain.ErrPersistenceFailure, "authorization lookup is unavailable")
+	}
+	for _, shopID := range shopIDs {
+		allowed, err := a.lookup.UserHasShop(ctx, actor.ActorID, shopID)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if !allowed {
+			return domain.NewDomainError(domain.ErrSiteScopeDenied, "actor has no authoritative UserShopRelation for Shop")
+		}
+	}
+	return nil
+}
+
 func ensureEligibleDevice(device *domain.Device) error {
 	if device == nil || device.ID == 0 {
 		return domain.NewDomainError(domain.ErrDeviceNotFound, "device was not found")
@@ -379,6 +465,31 @@ func ensureEligibleDevice(device *domain.Device) error {
 	}
 	// No retirement/disabled field exists in the current canonical Device model.
 	// Eligibility therefore cannot evaluate a lifecycle state in 3B-2.
+	return nil
+}
+
+// ensureInventoryOwnerClient treats a NULL owner as unresolved but not
+// contradictory for a new bind. Any existing authoritative owner must match
+// the relational path Client; Device.ShopID is intentionally ignored.
+func (a *Application) ensureInventoryOwnerClient(ctx context.Context, device *domain.Device, clientID uint) error {
+	if device == nil || clientID == 0 {
+		return domain.NewDomainError(domain.ErrTenantScopeDenied, "authoritative inventory Client is unavailable")
+	}
+	if device.InventoryOwnerClientID == nil {
+		return nil
+	}
+	if *device.InventoryOwnerClientID != clientID {
+		return domain.NewDomainError(domain.ErrTenantScopeDenied, "Device inventory owner belongs to a different Client")
+	}
+	if verifier, ok := a.lookup.(relationalClientVerifier); ok {
+		exists, err := verifier.ClientExists(ctx, *device.InventoryOwnerClientID)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if !exists {
+			return domain.NewDomainError(domain.ErrTenantScopeDenied, "Device inventory owner authority is invalid")
+		}
+	}
 	return nil
 }
 
@@ -433,7 +544,7 @@ func authorize(actor domain.ActorContext, action domain.BindingAction, shopIDs, 
 	return nil
 }
 
-func assignmentPlan(action domain.BindingAction, requestIdentity string, actor domain.ActorContext, reason string, shopID uint, device, replacement *domain.Device, currentAssignmentID, sourcePointID, targetPointID, auditPointID *uuid.UUID) domain.AssignmentTransitionPlan {
+func assignmentPlan(action domain.BindingAction, requestIdentity string, actor domain.ActorContext, reason string, shopID, clientID uint, device, replacement *domain.Device, currentAssignmentID, sourcePointID, targetPointID, auditPointID *uuid.UUID) domain.AssignmentTransitionPlan {
 	frozenActor := cloneActorContext(actor)
 	plan := domain.AssignmentTransitionPlan{
 		Action:              action,
@@ -460,6 +571,7 @@ func assignmentPlan(action domain.BindingAction, requestIdentity string, actor d
 		plan.Audit.DeviceMAC = device.MacAddress
 	}
 	plan.Audit.Action = action
+	plan.Audit.ClientID = uintPtr(clientID)
 	plan.Audit.RequestIdentity = requestIdentity
 	plan.Audit.ShopID = uintPtr(shopID)
 	plan.Audit.ActorID = actor.ActorID
