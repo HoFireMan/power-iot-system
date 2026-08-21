@@ -221,6 +221,9 @@ func newMigratorLocked(ctx context.Context, databaseURL string, action migration
 	if err := RequireProtectedWork(capability); err != nil {
 		return nil, errors.Join(err, fence.Close())
 	}
+	if err := rejectD1LGenericRoute(ctx, fence.Conn(), parsed.config); err != nil {
+		return nil, errors.Join(err, fence.Close())
+	}
 	metadata, err := inspectMigrationMetadata(ctx, fence.Conn(), parsed.config)
 	if err != nil {
 		return nil, errors.Join(err, fence.Close())
@@ -486,6 +489,9 @@ func Version(databaseURL string) (uint, bool, error) {
 	}
 	defer tx.Rollback()
 	if err := AcquireSharedWriterFence(ctx, tx); err != nil {
+		return 0, false, err
+	}
+	if err := rejectD1LGenericRoute(ctx, tx, parsed.config); err != nil {
 		return 0, false, err
 	}
 	var currentSchema string

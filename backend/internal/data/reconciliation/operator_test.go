@@ -2,6 +2,7 @@ package reconciliation
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -58,6 +59,17 @@ func TestFilteredPostgresURLRemovesMigrationOnlyOptions(t *testing.T) {
 	}
 	if strings.Contains(filtered, "x-migrations-table") || !strings.Contains(filtered, "sslmode=disable") {
 		t.Fatalf("filtered URL=%q", filtered)
+	}
+}
+
+func TestOperatorReportExcludesPhysicalFenceEvidence(t *testing.T) {
+	report := OperatorReport{BackendPID: 4242, FenceState: "OWNED"}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "backend_pid") || strings.Contains(string(encoded), "fence_state") || strings.Contains(string(encoded), "4242") {
+		t.Fatalf("physical fence evidence leaked: %s", encoded)
 	}
 }
 

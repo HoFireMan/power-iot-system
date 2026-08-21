@@ -38,6 +38,9 @@ func LoadConfig(get func(string) string) (Config, error) {
 		return Config{}, errors.New("target database is not a provider database")
 	}
 	cert, key, ca := strings.TrimSpace(get("D1L_PROVIDER_TLS_CERT_FILE")), strings.TrimSpace(get("D1L_PROVIDER_TLS_KEY_FILE")), strings.TrimSpace(get("D1L_PROVIDER_TLS_CA_FILE"))
+	if cert == "" || key == "" || ca == "" {
+		return Config{}, errors.New("D1L_PROVIDER_TLS_CERT_FILE, D1L_PROVIDER_TLS_KEY_FILE, and D1L_PROVIDER_TLS_CA_FILE are required")
+	}
 	return Config{DatabaseURL: u, HTTPAddr: strings.TrimSpace(get("D1L_PROVIDER_HTTP_ADDR")), TLSCertFile: cert, TLSKeyFile: key, TLSCAFile: ca}, nil
 }
 

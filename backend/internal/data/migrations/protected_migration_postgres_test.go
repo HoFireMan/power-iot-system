@@ -62,6 +62,9 @@ func protectedFixtureSpec(apply func(context.Context, *sql.Tx) error) ProtectedM
 }
 
 func applyFinalFixture(ctx context.Context, tx *sql.Tx) error {
+	if err := applyD5Migration(ctx, tx); err != nil {
+		return err
+	}
 	for _, name := range targetForeignKeys {
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE `+foreignKeyTable(name)+` VALIDATE CONSTRAINT `+pq.QuoteIdentifier(name)); err != nil {
 			return err

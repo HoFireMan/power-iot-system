@@ -31,6 +31,11 @@ func TestPostgresFactCollectionIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	tx := db.Begin()
 	if tx.Error != nil {
 		t.Fatal(tx.Error)
@@ -77,6 +82,7 @@ func TestFencedRecheckUsesCallerOwnedReadWriteRepeatableReadTransaction(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {

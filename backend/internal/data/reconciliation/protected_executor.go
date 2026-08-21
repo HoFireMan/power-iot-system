@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"power-iot-backend/internal/data/migrations"
@@ -47,9 +48,12 @@ const (
 // ExecutionReport records the durable outcome and the evidence used by the
 // protected execution. It is safe to inspect when Execute returns an error.
 type ExecutionReport struct {
-	Outcome                ExecutionOutcome
-	Phase                  ExecutionPhase
-	FrozenAt               time.Time
+	Outcome  ExecutionOutcome
+	Phase    ExecutionPhase
+	FrozenAt time.Time
+	// OperationID is the owner-issued D1 operation identity. It is distinct
+	// from PlanID, which identifies the reconciliation plan artifact.
+	OperationID            uuid.UUID
 	PlanID                 uuid.UUID
 	PlanDigest             string
 	SourceFactsDigest      string
@@ -60,9 +64,23 @@ type ExecutionReport struct {
 	Committed              bool
 	PostCommitVerified     bool
 	TriggerRestored        bool
-	BackendPID             int64
-	FenceState             migrations.ExclusiveOwnershipState
+	BackendPID             int64                              `json:"-"`
+	FenceState             migrations.ExclusiveOwnershipState `json:"-"`
 	CleanupError           string
+	PostCommitFactsDigest  string
+	PostCommitFactsAsOf    time.Time
+	D007Terminal           D007TerminalEvidence
+
+	// d009Seal is owner-private post-TX2 evidence. It is never included in
+	// reports or diagnostics and is the only source accepted by D3 issuance.
+	d009Seal *d009ExecutionSeal
+}
+
+// String intentionally omits owner-private evidence and continuation state.
+// Reports are commonly included in diagnostics with %+v, which must not turn
+// private seals into an ordinary output channel.
+func (r ExecutionReport) String() string {
+	return fmt.Sprintf("ExecutionReport{outcome=%s phase=%s committed=%t post_commit_verified=%t plan_id=%s}", r.Outcome, r.Phase, r.Committed, r.PostCommitVerified, r.PlanID)
 }
 
 // ExecutionError retains the outcome category while preserving the database
@@ -98,8 +116,25 @@ var (
 // ProtectedExecutor consumes only the accepted A2.1 query-only collector. The
 // executor owns the fence, transaction, writes, commit, post-commit reads, and
 // cleanup when Execute is used.
+// D1LeaseConsumer is the owner-mediated D1 consume seam. The executor only
+// sequences the call; it does not inspect, mint, or reinterpret lease state.
+type D1LeaseConsumer interface {
+	ConsumeLease(context.Context, migrations.D1LLeaseIdentity) error
+}
+
 type ProtectedExecutor struct {
 	Collector ReadOnlyCollectorWithConnection
+	D1        D1LeaseConsumer
+	Lease     *migrations.D1LLeaseIdentity
+	// D007 is the D2-owned bounded issuance ledger. Production constructors use
+	// the process owner so repeated attempts cannot mint a second capability.
+	D007 *D007CapabilityIssuer
+	// D010 is the D3-owned issuance ledger. The resulting handoff is retained
+	// only in d010Handoff below and is never part of ExecutionReport.
+	D010 *D010HandoffIssuer
+
+	continuationMu sync.Mutex
+	d010Handoff    *D010Handoff
 
 	// hooks are narrow fault seams for same-package targeted A2.2 tests. They
 	// are intentionally unexported so production callers cannot add writes or
@@ -123,6 +158,7 @@ type protectedExecutionHooks struct {
 	BeforeCommit          func(context.Context, *sql.Tx, FactSet, Plan) error
 	Commit                func(context.Context, *sql.Tx) error
 	AfterCommit           func(context.Context, *sql.Conn) error
+	AfterTX2              func(context.Context, *sql.Tx) error
 	CloseFence            func(*migrations.ExclusiveWriterFence) error
 }
 
@@ -133,7 +169,16 @@ type protectedExecutionHooks struct {
 type MappingResolver func(context.Context, FactSet) (*MappingArtifact, error)
 
 func NewProtectedExecutor(collector ReadOnlyCollectorWithConnection) *ProtectedExecutor {
-	return &ProtectedExecutor{Collector: collector}
+	return &ProtectedExecutor{Collector: collector, D007: defaultD007Issuer, D010: defaultD010Issuer}
+}
+
+// NewProtectedExecutorWithD1 is the explicit mutating composition seam. The
+// lease identity is copied at construction so the executor consumes exactly
+// the owner-issued identity selected by its caller; a nil consumer or invalid
+// identity can never become a no-op authorization path.
+func NewProtectedExecutorWithD1(collector ReadOnlyCollectorWithConnection, d1 D1LeaseConsumer, lease migrations.D1LLeaseIdentity) *ProtectedExecutor {
+	identity := cloneD1LeaseIdentity(lease)
+	return &ProtectedExecutor{Collector: collector, D1: d1, Lease: &identity, D007: defaultD007Issuer, D010: defaultD010Issuer}
 }
 
 // Execute opens the private pinned session used by the canonical writer fence.
@@ -158,9 +203,13 @@ func (e *ProtectedExecutor) execute(ctx context.Context, dsn string, mapping *Ma
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	initialReport := ExecutionReport{Outcome: ExecutionNotCommitted, Phase: PhaseFence}
+	if e != nil && e.Lease != nil {
+		initialReport.OperationID = e.Lease.OperationID
+	}
 	fence, err := migrations.OpenExclusiveWriterFence(ctx, dsn)
 	if err != nil {
-		return ExecutionReport{Outcome: ExecutionNotCommitted, Phase: PhaseFence}, &ExecutionError{Outcome: ExecutionNotCommitted, Phase: PhaseFence, Cause: err}
+		return initialReport, &ExecutionError{Outcome: ExecutionNotCommitted, Phase: PhaseFence, Cause: err}
 	}
 	report.BackendPID = fence.BackendPID()
 	closeFence := e.hooks.CloseFence
@@ -192,44 +241,100 @@ func (e *ProtectedExecutor) execute(ctx context.Context, dsn string, mapping *Ma
 	}()
 
 	collector := e.Collector
-	var gormDB *gorm.DB
 	if collector == nil {
+		// Keep validating/filtering the configured DSN for compatibility with
+		// the existing PostgreSQL URL contract. GORM must not consume it here:
+		// doing so would open and ping a second pool/session while the fence is
+		// already the authoritative pinned connection.
 		driverURL, filterErr := filteredPostgresURL(dsn)
 		if filterErr != nil {
 			report.Outcome, report.Phase = ExecutionNotCommitted, PhaseFence
 			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: filterErr}
 		}
-		gormDB, err = gorm.Open(postgres.Open(driverURL), &gorm.Config{})
-		if err != nil {
+		gormDB, openErr := gorm.Open(postgres.New(postgres.Config{DSN: driverURL, Conn: fence.Conn()}), &gorm.Config{DisableAutomaticPing: true})
+		if openErr != nil {
 			report.Outcome, report.Phase = ExecutionNotCommitted, PhaseFence
-			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: err}
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: openErr}
 		}
-		collector = NewPostgresFactCollector(gormDB)
-	}
-	if gormDB != nil {
-		defer func() {
-			if db, dbErr := gormDB.DB(); dbErr == nil {
-				_ = db.Close()
-			}
-		}()
+		// The GORM dialector borrows fence.Conn(); closing its *sql.DB would
+		// close the fence connection before the protected window is complete.
+		// ExclusiveWriterFence remains the sole owner and closes it in Execute's
+		// deferred cleanup.
 		metadataTable, tableErr := migrations.ConfiguredMigrationTable(ctx, dsn, fence.Conn())
 		if tableErr != nil {
-			return ExecutionReport{Outcome: ExecutionNotCommitted, Phase: PhaseFence}, &ExecutionError{Outcome: ExecutionNotCommitted, Phase: PhaseFence, Cause: tableErr}
+			return initialReport, &ExecutionError{Outcome: ExecutionNotCommitted, Phase: PhaseFence, Cause: tableErr}
 		}
 		collector = NewPostgresFactCollectorWithMetadataTable(gormDB, metadataTable)
 	}
 
-	innerReport, innerErr := executeProtected(ctx, fence, collector, mapping, resolver, e.hooks)
+	issuer := e.D007
+	if issuer == nil {
+		issuer = defaultD007Issuer
+	}
+	d010Issuer := e.D010
+	if d010Issuer == nil {
+		d010Issuer = defaultD010Issuer
+	}
+	innerReport, innerErr := executeProtected(ctx, fence, collector, mapping, resolver, e.D1, e.Lease, issuer, d010Issuer, e.installD010Handoff, e.hooks)
 	innerReport.BackendPID = fence.BackendPID()
 	report, err = innerReport, innerErr
 	return report, err
 }
 
+// installD010Handoff retains the opaque continuation only on the owner object.
+// It deliberately rejects replacing an unconsumed handoff: losing an issued
+// bearer would otherwise create an untracked live continuation.
+func (e *ProtectedExecutor) installD010Handoff(handoff D010Handoff) error {
+	if e == nil || handoff.state == nil {
+		return ErrD010HandoffInvalid
+	}
+	e.continuationMu.Lock()
+	defer e.continuationMu.Unlock()
+	if e.d010Handoff != nil {
+		return ErrD010HandoffIssued
+	}
+	handoffCopy := handoff
+	e.d010Handoff = &handoffCopy
+	return nil
+}
+
+// ContinueD3Protected is the narrow owner seam for the named D3 protected
+// continuation. It verifies and then consumes the private handoff under one
+// lock; no D4 work is started here. Any failed attempt discards the bearer so
+// copied, forged, stale, mismatched, replayed, or UNKNOWN handoffs fail closed.
+func (e *ProtectedExecutor) ContinueD3Protected(expected D010HandoffContext) error {
+	if e == nil {
+		return ErrD010HandoffInvalid
+	}
+	e.continuationMu.Lock()
+	defer e.continuationMu.Unlock()
+	return e.continueD3ProtectedLocked(expected)
+}
+
+func (e *ProtectedExecutor) continueD3ProtectedLocked(expected D010HandoffContext) error {
+	if e.d010Handoff == nil {
+		return ErrD010HandoffInvalid
+	}
+	handoff := *e.d010Handoff
+	if err := VerifyD010Handoff(handoff, expected); err != nil {
+		e.d010Handoff = nil
+		return err
+	}
+	consumeErr := ConsumeD010Handoff(handoff, expected)
+	e.d010Handoff = nil
+	return consumeErr
+}
+
 // executeProtected runs the complete protected window. The caller keeps the
 // exclusive session lock held until this function returns; post-commit reads
 // therefore occur before Execute's fence.Close releases it.
-func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFence, collector ReadOnlyCollectorWithConnection, mapping *MappingArtifact, resolver MappingResolver, hooks protectedExecutionHooks) (ExecutionReport, error) {
+func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFence, collector ReadOnlyCollectorWithConnection, mapping *MappingArtifact, resolver MappingResolver, d1 D1LeaseConsumer, lease *migrations.D1LLeaseIdentity, d007 *D007CapabilityIssuer, d010 *D010HandoffIssuer, installD010 func(D010Handoff) error, hooks protectedExecutionHooks) (ExecutionReport, error) {
 	report := ExecutionReport{Outcome: ExecutionNotCommitted, Phase: PhaseFence, AppliedAffectedCounts: emptyAffectedCounts()}
+	if lease != nil {
+		// The owner-issued lease is the sole source of the execution operation
+		// identity; never derive it from the plan artifact.
+		report.OperationID = lease.OperationID
+	}
 	if fence == nil || fence.Conn() == nil {
 		return report, protectedError(report, errors.New("pinned exclusive writer fence is required"))
 	}
@@ -372,6 +477,22 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 			return fail(PhaseWrite, err)
 		}
 	}
+	// D1 consumption is deliberately the final gate immediately before the
+	// first A2 mutation/DDL. Mutating execution is fail-closed: a missing owner
+	// consumer or exact owner-issued lease identity is never treated as a
+	// no-op. D1 remains the sole authority for validity, expiry, and one-shot
+	// state.
+	if len(items) != 0 {
+		if d1 == nil {
+			return fail(PhaseWrite, errors.New("D1 lease consumer is required before protected mutation"))
+		}
+		if lease == nil || !validD1LeaseIdentity(*lease) {
+			return fail(PhaseWrite, errors.New("exact owner-issued D1 lease identity is required before protected mutation"))
+		}
+		if err := d1.ConsumeLease(ctx, *lease); err != nil {
+			return fail(PhaseWrite, err)
+		}
+	}
 	restoreTrigger := func() error {
 		if !triggerDisabled {
 			return nil
@@ -467,18 +588,61 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 		}
 	}
 
-	postFacts, err := collector.CollectV5Pinned(ctx, report.FrozenAt, conn)
+	tx2, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		report.Outcome = ExecutionCommittedPostVerifyFailed
 		report.Phase = PhasePostVerify
 		return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
 	}
+	if hooks.AfterTX2 != nil {
+		if err := hooks.AfterTX2(ctx, tx2); err != nil {
+			_ = tx2.Rollback()
+			report.Outcome = ExecutionCommittedPostVerifyFailed
+			report.Phase = PhasePostVerify
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
+		}
+	}
+	var tx2AsOf time.Time
+	if err := tx2.QueryRowContext(ctx, "SELECT transaction_timestamp()").Scan(&tx2AsOf); err != nil {
+		_ = tx2.Rollback()
+		report.Outcome = ExecutionCommittedPostVerifyFailed
+		report.Phase = PhasePostVerify
+		return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
+	}
+	tx2AsOf = tx2AsOf.UTC()
+	postFacts, err := collector.CollectV5Pinned(ctx, tx2AsOf, tx2)
+	if err == nil {
+		err = validatePostCommitFactsAsOf(postFacts, tx2AsOf)
+	}
+	rollbackTX2 := tx2.Rollback()
+	if err == nil && rollbackTX2 != nil && !errors.Is(rollbackTX2, sql.ErrTxDone) {
+		err = rollbackTX2
+	}
+	if err != nil {
+		report.Outcome = ExecutionCommittedPostVerifyFailed
+		report.Phase = PhasePostVerify
+		return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
+	}
+	_, postDigest, digestErr := CanonicalSourceFacts(postFacts)
+	if digestErr != nil {
+		report.Outcome = ExecutionCommittedPostVerifyFailed
+		report.Phase = PhasePostVerify
+		return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, digestErr)}
+	}
+	report.PostCommitFactsDigest = hex.EncodeToString(postDigest)
+	report.PostCommitFactsAsOf = postFacts.AsOf
 	if err := verifyPlanItems(before, postFacts, plan, true); err != nil {
 		report.Outcome = ExecutionCommittedPostVerifyFailed
 		report.Phase = PhasePostVerify
 		return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
 	}
-	if err := equalCanonicalFacts(expectedFacts, postFacts); err != nil {
+	// TX1 and TX2 intentionally have distinct transaction timestamps. The
+	// timestamp was already checked against TX2 above; compare the durable
+	// semantic facts at the TX2 observation without treating that expected
+	// observation-time change as a data mutation.
+	expectedPostCommitFacts := expectedFacts
+	expectedPostCommitFacts.AsOf = postFacts.AsOf
+	if err := equalCanonicalFacts(expectedPostCommitFacts, postFacts); err != nil {
 		report.Outcome = ExecutionCommittedPostVerifyFailed
 		report.Phase = PhasePostVerify
 		return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
@@ -490,10 +654,92 @@ func executeProtected(ctx context.Context, fence *migrations.ExclusiveWriterFenc
 			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, err)}
 		}
 	}
+	// TX2 and every durable post-verification predicate have succeeded. Only
+	// now may the protected executor attach the unexported evidence seal.
 	report.PostCommitVerified = true
 	report.Outcome = ExecutionCommittedAndVerified
 	report.Phase = PhasePostVerify
+	// D2 readiness is strictly post-commit and post-TX2. It receives only the
+	// fresh facts and safe A2 evidence, then issues and consumes one opaque
+	// capability at its owner seam. The capability never enters report output.
+	if d1 != nil && lease != nil {
+		evidenceForReadiness := trustedReconciliationEvidence(report)
+		decision := EvaluateReadiness(ReadinessRequest{
+			Target: ReadinessForCutover, ProtectedState: migrations.ProtectedStateCleanV5,
+			Facts: postFacts, Reconciliation: evidenceForReadiness,
+		})
+		if !decision.Ready {
+			report.Outcome = ExecutionCommittedPostVerifyFailed
+			report.Phase = PhasePostVerify
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, readinessError(decision))}
+		}
+		if len(lease.TargetFingerprint) != 32 {
+			report.Outcome = ExecutionCommittedPostVerifyFailed
+			report.Phase = PhasePostVerify
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, ErrD007CapabilityInvalid)}
+		}
+		var target [32]byte
+		copy(target[:], lease.TargetFingerprint)
+		freshUntil := d007FreshUntil(postFacts)
+		live, issueErr := d007.issue(decision, postFacts, D007Binding{AttemptID: lease.AttemptID, TargetFingerprint: target, Generation: lease.Generation})
+		if issueErr != nil {
+			report.Outcome = ExecutionCommittedPostVerifyFailed
+			report.Phase = PhasePostVerify
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, issueErr)}
+		}
+		_, digestBytes, _ := CanonicalSourceFacts(postFacts)
+		var factsDigest [32]byte
+		copy(factsDigest[:], digestBytes)
+		expected := D007CapabilityBinding{D007Binding: D007Binding{AttemptID: lease.AttemptID, TargetFingerprint: target, Generation: lease.Generation}, FactsDigest: factsDigest, ProofDigest: d007ProofDigest(decision, factsDigest), FreshUntil: freshUntil, PredicateVersion: D007PredicateVersion}
+		evidence, consumeErr := ConsumeLiveD007Capability(live, expected, postFacts.AsOf)
+		if consumeErr != nil {
+			report.Outcome = ExecutionCommittedPostVerifyFailed
+			report.Phase = PhasePostVerify
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, consumeErr)}
+		}
+		report.D007Terminal = evidence
+
+		// D007 is now terminal and TX1/TX2 verification is complete. Build the
+		// sealed D009 projection from this exact owner report, immediately
+		// exchange it for D010, then discard the private seal before returning
+		// the ordinary report.
+		if d010Err := issueProtectedD010(&report, lease, target, d010, installD010); d010Err != nil {
+			report.Outcome = ExecutionCommittedPostVerifyFailed
+			report.Phase = PhasePostVerify
+			return report, &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: errors.Join(ErrProtectedPostVerification, d010Err)}
+		}
+	}
 	return report, nil
+}
+
+func issueProtectedD010(report *ExecutionReport, lease *migrations.D1LLeaseIdentity, target [32]byte, d010 *D010HandoffIssuer, install func(D010Handoff) error) error {
+	if report == nil || lease == nil || d010 == nil || install == nil || lease.OperationID == uuid.Nil || report.OperationID != lease.OperationID {
+		return ErrD010HandoffInvalid
+	}
+	// The seal exists only during this owner-local conversion and is cleared
+	// before any report or diagnostic can observe it.
+	report.d009Seal = makeD009ExecutionSeal(*report, lease, target)
+	d009, err := D009EvidenceFromReport(*report)
+	report.d009Seal = nil
+	if err != nil {
+		return err
+	}
+	issueD010 := IssueD010Handoff
+	if d010 != defaultD010Issuer {
+		issueD010 = d010.Issue
+	}
+	handoff, err := issueD010(report.D007Terminal, d009)
+	if err != nil {
+		return err
+	}
+	return install(handoff)
+}
+
+func validatePostCommitFactsAsOf(facts FactSet, tx2AsOf time.Time) error {
+	if !facts.AsOf.Equal(tx2AsOf) {
+		return fmt.Errorf("collector changed post-commit transaction time: got %s want %s", facts.AsOf, tx2AsOf)
+	}
+	return nil
 }
 
 // lockProtectedEntityPrefix is the canonical protected reconciliation row
@@ -535,6 +781,11 @@ func lockProtectedEntityPrefix(ctx context.Context, tx *sql.Tx) error {
 
 func protectedError(report ExecutionReport, cause error) error {
 	return &ExecutionError{Outcome: report.Outcome, Phase: report.Phase, Cause: cause}
+}
+
+func validD1LeaseIdentity(identity migrations.D1LLeaseIdentity) bool {
+	return identity.LeaseID != uuid.Nil && identity.OperationID != uuid.Nil && identity.AttemptID != uuid.Nil &&
+		identity.Generation > 0 && len(identity.TargetFingerprint) == 32 && len(identity.EvidenceDigest) == 32
 }
 
 func emptyAffectedCounts() map[string]int {

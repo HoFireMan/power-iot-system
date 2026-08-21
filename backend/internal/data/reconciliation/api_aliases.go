@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"power-iot-backend/internal/data/reconciliation/sourceowner"
 )
 
 // Versioned aliases make the v5 boundary explicit at call sites while keeping
 // the short names convenient for package-local orchestration.
+type TrustedSourceSnapshot = sourceowner.Evidence
+
 type SourceFactsV5 = FactSet
 type ClientFactV5 = ClientFact
 type ShopFactV5 = ShopFact

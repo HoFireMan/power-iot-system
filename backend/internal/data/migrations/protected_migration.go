@@ -660,6 +660,9 @@ func inspectProtectedOn(ctx context.Context, q ProtectedMigrationQueryer, config
 	if catalogTablesContainExpected(catalogTables, protectedV6CatalogTables) {
 		v6ProofErr = verifySecurityCatalog(ctx, q, schema, true)
 		if v6ProofErr == nil {
+			v6ProofErr = verifyD5Catalog(ctx, q, schema)
+		}
+		if v6ProofErr == nil {
 			catalog = ProtectedCatalogExactV6
 		}
 	}
@@ -856,7 +859,7 @@ var v5CatalogTables = []string{"admin_binding_audits", "admin_binding_operations
 
 // The current checkpoint has no 000006 table additions. Keep this authority
 // owned by D3 rather than accepting a caller-selected inventory.
-var protectedV6CatalogTables = append([]string(nil), v5CatalogTables...)
+var protectedV6CatalogTables = append(append([]string(nil), v5CatalogTables...), "d4_operation_journal", "d4_operation_ledger")
 
 var targetForeignKeys = []string{"security_shops_client_id_fkey", "security_devices_inventory_owner_client_id_fkey", "security_user_shop_relations_user_id_fkey", "security_user_shop_relations_shop_id_fkey", "security_admin_binding_operations_client_id_fkey", "security_admin_binding_audits_client_id_fkey", "security_admin_binding_audits_client_provenance_fkey"}
 
@@ -1038,6 +1041,189 @@ func verifySecurityCatalog(ctx context.Context, q ProtectedMigrationQueryer, sch
 	return nil
 }
 
+func verifyD5ConstraintLiterals(ctx context.Context, q ProtectedMigrationQueryer, schema, name string, allowed []string) error {
+	var definition string
+	if err := q.QueryRowContext(ctx, `SELECT pg_get_constraintdef(c.oid, true) FROM pg_constraint AS c JOIN pg_namespace AS n ON n.oid=c.connamespace WHERE n.nspname=$1 AND c.conname=$2`, schema, name).Scan(&definition); err != nil {
+		return fmt.Errorf("%w: read D5 constraint %s: %v", ErrProtectedMigrationCatalog, name, err)
+	}
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, value := range allowed {
+		allowedSet[strings.ToLower(value)] = true
+	}
+	for index := 0; index < len(definition); {
+		start := strings.IndexByte(definition[index:], '\'')
+		if start < 0 {
+			break
+		}
+		start += index
+		end := strings.IndexByte(definition[start+1:], '\'')
+		if end < 0 {
+			return fmt.Errorf("%w: unterminated D5 constraint literal %s", ErrProtectedMigrationCatalog, name)
+		}
+		end += start + 1
+		literal := strings.ToLower(definition[start+1 : end])
+		if !allowedSet[literal] {
+			return fmt.Errorf("%w: unexpected D5 constraint literal %q in %s", ErrProtectedMigrationCatalog, literal, name)
+		}
+		index = end + 1
+	}
+	for _, value := range allowed {
+		if !strings.Contains(strings.ToLower(definition), "'"+strings.ToLower(value)+"'") {
+			return fmt.Errorf("%w: missing D5 constraint literal %q in %s", ErrProtectedMigrationCatalog, value, name)
+		}
+	}
+	return nil
+}
+
+func verifyD5Catalog(ctx context.Context, q ProtectedMigrationQueryer, schema string) error {
+	for _, table := range []string{"d4_operation_ledger", "d4_operation_journal"} {
+		var relation sql.NullString
+		if err := q.QueryRowContext(ctx, "SELECT to_regclass($1)", quotedMigrationTable(schema, table)).Scan(&relation); err != nil || !relation.Valid || relation.String == "" {
+			return fmt.Errorf("%w: D5 relation %s is missing: %v", ErrProtectedMigrationCatalog, table, err)
+		}
+	}
+	normalize := func(value string) string { return strings.ToLower(strings.Join(strings.Fields(value), " ")) }
+	constraintTypes := map[string]string{
+		"d4_operation_ledger_pkey": "p", "d4_operation_ledger_operation_attempt_key": "u",
+		"d4_operation_ledger_target_length": "c", "d4_operation_ledger_generation_check": "c",
+		"d4_operation_ledger_state_check": "c", "d4_operation_ledger_claim_check": "c",
+		"d4_operation_ledger_recovery_check": "c", "d4_operation_ledger_disposition_check": "c", "d4_operation_ledger_commit_check": "c", "d4_operation_ledger_post_check": "c", "d4_operation_ledger_cleanup_check": "c", "d4_operation_ledger_certainty_check": "c", "d4_operation_ledger_unknown_check": "c", "d4_operation_ledger_recovery_required_check": "c", "d4_operation_ledger_result_truth_check": "c", "d4_operation_journal_pkey": "p",
+		"d4_operation_journal_target_length": "c", "d4_operation_journal_generation_check": "c",
+		"d4_operation_journal_payload_digest_length": "c",
+	}
+	constraintDefinitions := map[string]string{
+		"d4_operation_ledger_pkey":                    "PRIMARY KEY (operation_id, attempt_id, target_fingerprint, generation)",
+		"d4_operation_ledger_operation_attempt_key":   "UNIQUE (operation_id, attempt_id)",
+		"d4_operation_ledger_target_length":           "CHECK (octet_length(target_fingerprint) = 32)",
+		"d4_operation_ledger_generation_check":        "CHECK (generation > 0)",
+		"d4_operation_ledger_state_check":             "CHECK (state = ANY (ARRAY['RECEIVED'::text, 'ADMITTED'::text, 'EXECUTING'::text, 'RESULT_RECORDED'::text, 'CONTINUATION_PENDING'::text, 'CONTINUATION_CONSUMED'::text, 'WAITING_FOR_MAPPING'::text, 'TERMINAL'::text, 'RECOVERY_REQUIRED'::text]))",
+		"d4_operation_ledger_claim_check":             "CHECK (state = 'RECEIVED'::text AND claim_id IS NULL OR (state = ANY (ARRAY['ADMITTED'::text, 'EXECUTING'::text, 'RESULT_RECORDED'::text, 'CONTINUATION_PENDING'::text, 'CONTINUATION_CONSUMED'::text, 'WAITING_FOR_MAPPING'::text])) AND claim_id IS NOT NULL OR (state = ANY (ARRAY['TERMINAL'::text, 'RECOVERY_REQUIRED'::text])))",
+		"d4_operation_ledger_recovery_check":          "CHECK (recovery_class = ANY (ARRAY[''::text, 'UNKNOWN_COMMIT_OR_CLEANUP'::text, 'COMMITTED_POSTVERIFY_FAILED'::text, 'STALE_OR_REVALIDATION_REQUIRED'::text]))",
+		"d4_operation_ledger_disposition_check":       "CHECK (disposition IS NULL OR (disposition = ANY (ARRAY['SUCCESS'::text, 'NON_SUCCESS'::text])))",
+		"d4_operation_ledger_commit_check":            "CHECK (commit_status IS NULL OR (commit_status = ANY (ARRAY['NOT_COMMITTED'::text, 'COMMITTED'::text, 'COMMIT_UNKNOWN'::text])))",
+		"d4_operation_ledger_post_check":              "CHECK (post_verification_status IS NULL OR (post_verification_status = ANY (ARRAY['NOT_VERIFIED'::text, 'VERIFIED'::text, 'FAILED'::text])))",
+		"d4_operation_ledger_cleanup_check":           "CHECK (cleanup_status IS NULL OR (cleanup_status = ANY (ARRAY['CONFIRMED'::text, 'UNCERTAIN'::text])))",
+		"d4_operation_ledger_certainty_check":         "CHECK (certainty IS NULL OR (certainty = ANY (ARRAY['KNOWN'::text, 'UNKNOWN'::text])))",
+		"d4_operation_ledger_unknown_check":           "CHECK (disposition IS NULL OR unknown = (commit_status = 'COMMIT_UNKNOWN'::text OR cleanup_status = 'UNCERTAIN'::text))",
+		"d4_operation_ledger_recovery_required_check": "CHECK (disposition IS NULL OR recovery_required = (unknown OR post_verification_status = 'FAILED'::text))",
+		"d4_operation_ledger_result_truth_check":      "CHECK (disposition IS NULL OR disposition <> 'SUCCESS'::text OR commit_status = 'COMMITTED'::text AND post_verification_status = 'VERIFIED'::text AND cleanup_status = 'CONFIRMED'::text AND certainty = 'KNOWN'::text AND unknown = false AND recovery_required = false)",
+		"d4_operation_journal_pkey":                   "PRIMARY KEY (event_id)",
+		"d4_operation_journal_target_length":          "CHECK (octet_length(target_fingerprint) = 32)",
+		"d4_operation_journal_generation_check":       "CHECK (generation > 0)",
+		"d4_operation_journal_payload_digest_length":  "CHECK (octet_length(payload_digest) = 32)",
+	}
+	for name, expectedDefinition := range constraintDefinitions {
+		var count int
+		var definition, contype string
+		var validated bool
+		if err := q.QueryRowContext(ctx, `SELECT count(*), max(c.contype), max(pg_get_constraintdef(c.oid, true)), bool_and(c.convalidated) FROM pg_constraint AS c JOIN pg_class AS r ON r.oid = c.conrelid JOIN pg_namespace AS n ON n.oid = r.relnamespace WHERE n.nspname = $1 AND c.conname = $2`, schema, name).Scan(&count, &contype, &definition, &validated); err != nil || count != 1 || !validated || contype != constraintTypes[name] {
+			return fmt.Errorf("%w: D5 constraint %s is missing, duplicated, or unvalidated", ErrProtectedMigrationCatalog, name)
+		}
+		if normalize(definition) != normalize(expectedDefinition) {
+			return fmt.Errorf("%w: D5 constraint %s definition mismatch: %q", ErrProtectedMigrationCatalog, name, definition)
+		}
+	}
+	if err := verifyD5ConstraintLiterals(ctx, q, schema, "d4_operation_ledger_state_check", []string{"RECEIVED", "ADMITTED", "EXECUTING", "RESULT_RECORDED", "CONTINUATION_PENDING", "CONTINUATION_CONSUMED", "WAITING_FOR_MAPPING", "TERMINAL", "RECOVERY_REQUIRED"}); err != nil {
+		return err
+	}
+	if err := verifyD5ConstraintLiterals(ctx, q, schema, "d4_operation_ledger_claim_check", []string{"RECEIVED", "ADMITTED", "EXECUTING", "RESULT_RECORDED", "CONTINUATION_PENDING", "CONTINUATION_CONSUMED", "WAITING_FOR_MAPPING", "TERMINAL", "RECOVERY_REQUIRED"}); err != nil {
+		return err
+	}
+	if err := verifyD5ConstraintLiterals(ctx, q, schema, "d4_operation_ledger_recovery_check", []string{"", "UNKNOWN_COMMIT_OR_CLEANUP", "COMMITTED_POSTVERIFY_FAILED", "STALE_OR_REVALIDATION_REQUIRED"}); err != nil {
+		return err
+	}
+	var fkCount int
+	var fkDefinition string
+	var fkValidated bool
+	if err := q.QueryRowContext(ctx, `SELECT count(*), max(pg_get_constraintdef(c.oid, true)), bool_and(c.convalidated) FROM pg_constraint AS c JOIN pg_class AS r ON r.oid = c.conrelid JOIN pg_namespace AS n ON n.oid = r.relnamespace WHERE n.nspname = $1 AND c.conname = 'd4_operation_journal_ledger_fk' AND c.contype = 'f'`, schema).Scan(&fkCount, &fkDefinition, &fkValidated); err != nil || fkCount != 1 || !fkValidated {
+		return fmt.Errorf("%w: D5 journal FK is missing or unvalidated", ErrProtectedMigrationCatalog)
+	}
+	expectedFK := "FOREIGN KEY (operation_id, attempt_id, target_fingerprint, generation) REFERENCES d4_operation_ledger(operation_id, attempt_id, target_fingerprint, generation) ON DELETE RESTRICT"
+	if normalize(fkDefinition) != normalize(expectedFK) {
+		return fmt.Errorf("%w: D5 journal FK definition mismatch: %q", ErrProtectedMigrationCatalog, fkDefinition)
+	}
+	indexDefinitions := map[string]string{
+		"d4_operation_ledger_state_idx":       "CREATE INDEX d4_operation_ledger_state_idx ON public.d4_operation_ledger USING btree (state, updated_at)",
+		"d4_operation_ledger_recovery_idx":    "CREATE INDEX d4_operation_ledger_recovery_idx ON public.d4_operation_ledger USING btree (updated_at) WHERE (state = 'RECOVERY_REQUIRED'::text)",
+		"d4_operation_journal_tuple_time_idx": "CREATE INDEX d4_operation_journal_tuple_time_idx ON public.d4_operation_journal USING btree (operation_id, attempt_id, target_fingerprint, generation, occurred_at)",
+	}
+	for name, expectedDefinition := range indexDefinitions {
+		var count int
+		var definition string
+		if err := q.QueryRowContext(ctx, `SELECT count(*), max(pg_get_indexdef(i.indexrelid)) FROM pg_index AS i JOIN pg_class AS idx ON idx.oid=i.indexrelid JOIN pg_class AS r ON r.oid=i.indrelid JOIN pg_namespace AS n ON n.oid=idx.relnamespace WHERE n.nspname=$1 AND idx.relname=$2 AND i.indisvalid AND i.indisready`, schema, name).Scan(&count, &definition); err != nil || count != 1 {
+			return fmt.Errorf("%w: D5 index %s is missing or invalid", ErrProtectedMigrationCatalog, name)
+		}
+		if normalize(definition) != normalize(expectedDefinition) {
+			return fmt.Errorf("%w: D5 index %s definition mismatch: %q", ErrProtectedMigrationCatalog, name, definition)
+		}
+	}
+	indexExpectations := map[string]struct {
+		unique    bool
+		method    string
+		columns   []string
+		predicate string
+	}{
+		"d4_operation_ledger_state_idx":       {columns: []string{"state", "updated_at"}, method: "btree"},
+		"d4_operation_ledger_recovery_idx":    {columns: []string{"updated_at"}, method: "btree", predicate: "state = 'RECOVERY_REQUIRED'"},
+		"d4_operation_journal_tuple_time_idx": {columns: []string{"operation_id", "attempt_id", "target_fingerprint", "generation", "occurred_at"}, method: "btree"},
+	}
+	for name, expected := range indexExpectations {
+		var count int
+		var definition, method string
+		var unique bool
+		var predicate sql.NullString
+		if err := q.QueryRowContext(ctx, `SELECT count(*), max(pg_get_indexdef(i.indexrelid)), bool_or(i.indisunique), max(am.amname), max(pg_get_expr(i.indpred, i.indrelid)) FROM pg_index AS i JOIN pg_class AS idx ON idx.oid=i.indexrelid JOIN pg_namespace AS n ON n.oid=idx.relnamespace JOIN pg_am AS am ON am.oid=idx.relam WHERE n.nspname=$1 AND idx.relname=$2 AND i.indisvalid AND i.indisready`, schema, name).Scan(&count, &definition, &unique, &method, &predicate); err != nil || count != 1 || unique != expected.unique || method != expected.method {
+			return fmt.Errorf("%w: D5 index %s properties mismatch", ErrProtectedMigrationCatalog, name)
+		}
+		actual := normalize(definition)
+		for _, column := range expected.columns {
+			if !strings.Contains(actual, normalize(column)) {
+				return fmt.Errorf("%w: D5 index %s column order mismatch", ErrProtectedMigrationCatalog, name)
+			}
+		}
+		if expected.predicate != "" && (!predicate.Valid || !strings.Contains(normalize(predicate.String), normalize(expected.predicate))) {
+			return fmt.Errorf("%w: D5 index %s predicate mismatch", ErrProtectedMigrationCatalog, name)
+		}
+		if expected.predicate == "" && predicate.Valid {
+			return fmt.Errorf("%w: D5 index %s unexpectedly partial", ErrProtectedMigrationCatalog, name)
+		}
+	}
+	var triggerCount int
+	var triggerDefinition, functionDefinition string
+	if err := q.QueryRowContext(ctx, `SELECT count(*), max(pg_get_triggerdef(t.oid, true)), max(pg_get_functiondef(p.oid)) FROM pg_trigger AS t JOIN pg_class AS r ON r.oid=t.tgrelid JOIN pg_namespace AS n ON n.oid=r.relnamespace JOIN pg_proc AS p ON p.oid=t.tgfoid JOIN pg_namespace AS pn ON pn.oid=p.pronamespace WHERE n.nspname=$1 AND r.relname='d4_operation_ledger' AND t.tgname='d4_operation_ledger_immutable' AND p.proname='prevent_d4_terminal_mutation' AND NOT t.tgisinternal`, schema).Scan(&triggerCount, &triggerDefinition, &functionDefinition); err != nil || triggerCount != 1 {
+		return fmt.Errorf("%w: D5 terminal immutability trigger/function is missing", ErrProtectedMigrationCatalog)
+	}
+	expectedTrigger := normalize("CREATE TRIGGER d4_operation_ledger_immutable BEFORE DELETE OR UPDATE ON d4_operation_ledger FOR EACH ROW EXECUTE FUNCTION prevent_d4_terminal_mutation()")
+	expectedFunction := normalize("CREATE OR REPLACE FUNCTION public.prevent_d4_terminal_mutation() RETURNS trigger LANGUAGE plpgsql AS $function$ BEGIN IF OLD.state = 'TERMINAL' THEN RAISE EXCEPTION 'd4_operation_ledger terminal row is immutable'; END IF; RETURN NEW; END; $function$")
+	if normalize(triggerDefinition) != expectedTrigger || normalize(functionDefinition) != expectedFunction {
+		return fmt.Errorf("%w: D5 terminal immutability definition mismatch", ErrProtectedMigrationCatalog)
+	}
+	var journalTriggerCount int
+	var journalTriggerDefinition, journalFunctionDefinition string
+	if err := q.QueryRowContext(ctx, `SELECT count(*), max(pg_get_triggerdef(t.oid, true)), max(pg_get_functiondef(p.oid)) FROM pg_trigger AS t JOIN pg_class AS r ON r.oid=t.tgrelid JOIN pg_namespace AS n ON n.oid=r.relnamespace JOIN pg_proc AS p ON p.oid=t.tgfoid WHERE n.nspname=$1 AND r.relname='d4_operation_journal' AND t.tgname='d4_operation_journal_append_only' AND p.proname='prevent_d4_journal_mutation' AND NOT t.tgisinternal`, schema).Scan(&journalTriggerCount, &journalTriggerDefinition, &journalFunctionDefinition); err != nil || journalTriggerCount != 1 {
+		return fmt.Errorf("%w: D5 journal immutability trigger/function is missing", ErrProtectedMigrationCatalog)
+	}
+	expectedJournalTrigger := normalize("CREATE TRIGGER d4_operation_journal_append_only BEFORE DELETE OR UPDATE ON d4_operation_journal FOR EACH ROW EXECUTE FUNCTION prevent_d4_journal_mutation()")
+	expectedJournalFunction := normalize("CREATE OR REPLACE FUNCTION public.prevent_d4_journal_mutation() RETURNS trigger LANGUAGE plpgsql AS $function$ BEGIN RAISE EXCEPTION 'd4_operation_journal is append-only'; END; $function$")
+	if normalize(journalTriggerDefinition) != expectedJournalTrigger || normalize(journalFunctionDefinition) != expectedJournalFunction {
+		return fmt.Errorf("%w: D5 journal immutability definition mismatch", ErrProtectedMigrationCatalog)
+	}
+	for _, column := range []struct {
+		table, name, typ string
+		required         bool
+	}{
+		{"d4_operation_ledger", "operation_id", "uuid", true}, {"d4_operation_ledger", "attempt_id", "uuid", true}, {"d4_operation_ledger", "target_fingerprint", "bytea", true}, {"d4_operation_ledger", "generation", "bigint", true}, {"d4_operation_ledger", "state", "text", true}, {"d4_operation_ledger", "claim_id", "uuid", false}, {"d4_operation_ledger", "disposition", "text", false}, {"d4_operation_ledger", "commit_status", "text", false}, {"d4_operation_ledger", "post_verification_status", "text", false}, {"d4_operation_ledger", "cleanup_status", "text", false}, {"d4_operation_ledger", "certainty", "text", false}, {"d4_operation_ledger", "unknown", "boolean", true}, {"d4_operation_ledger", "recovery_required", "boolean", true}, {"d4_operation_ledger", "recovery_class", "text", true}, {"d4_operation_ledger", "replay_disposition", "text", false}, {"d4_operation_ledger", "safe_result", "jsonb", false}, {"d4_operation_ledger", "safe_correlation", "jsonb", false}, {"d4_operation_ledger", "updated_at", "timestamp with time zone", true},
+		{"d4_operation_journal", "event_id", "uuid", true}, {"d4_operation_journal", "event_version", "bigint", true}, {"d4_operation_journal", "operation_id", "uuid", true}, {"d4_operation_journal", "attempt_id", "uuid", true}, {"d4_operation_journal", "target_fingerprint", "bytea", true}, {"d4_operation_journal", "generation", "bigint", true}, {"d4_operation_journal", "from_state", "text", true}, {"d4_operation_journal", "to_state", "text", true}, {"d4_operation_journal", "recovery_class", "text", true}, {"d4_operation_journal", "correlation", "text", true}, {"d4_operation_journal", "safe_payload", "jsonb", true}, {"d4_operation_journal", "payload_digest", "bytea", true}, {"d4_operation_journal", "occurred_at", "timestamp with time zone", true},
+	} {
+		var notNull bool
+		var actualType string
+		if err := q.QueryRowContext(ctx, `SELECT a.attnotnull, format_type(a.atttypid, a.atttypmod) FROM pg_attribute AS a JOIN pg_class AS c ON c.oid=a.attrelid JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2 AND a.attname=$3 AND NOT a.attisdropped`, schema, column.table, column.name).Scan(&notNull, &actualType); err != nil || notNull != column.required || actualType != column.typ {
+			return fmt.Errorf("%w: D5 column %s.%s type/nullability mismatch got=%s not_null=%t want=%s", ErrProtectedMigrationCatalog, column.table, column.name, actualType, notNull, column.typ)
+		}
+	}
+	return nil
+}
+
 func verifyProtectedTrigger(ctx context.Context, q ProtectedMigrationQueryer, schema, name, functionSchema, functionName, expectedDefinition string) error {
 	var count int
 	var actualFunctionSchema, actualFunction, enabled, definition string
@@ -1074,7 +1260,13 @@ func verifyCatalog(ctx context.Context, q ProtectedMigrationQueryer, config *pos
 	if !catalogTablesContainExpected(tables, expectedTables) {
 		return fmt.Errorf("%w: want=%s protected table set is incomplete", ErrProtectedMigrationCatalog, want)
 	}
-	return verifySecurityCatalog(ctx, q, schema, want == ProtectedCatalogExactV6)
+	if err := verifySecurityCatalog(ctx, q, schema, want == ProtectedCatalogExactV6); err != nil {
+		return err
+	}
+	if want == ProtectedCatalogExactV6 {
+		return verifyD5Catalog(ctx, q, schema)
+	}
+	return nil
 }
 
 func verifyMetadataOnly(ctx context.Context, q ProtectedMigrationQueryer, config *postgres.Config, version int, dirty bool) error {

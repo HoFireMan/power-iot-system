@@ -15,6 +15,17 @@ import (
 // REPEATABLE READ, READ ONLY snapshot after shared admission. It is diagnostic
 // only and never authorizes protected work.
 func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPreflightResult, error) {
+	return runSecuritySchemaPreflight(ctx, dsn, securitySchemaPreflightBaseVersion)
+}
+
+// RunSecuritySchemaPreflightV5 is the D5 clean-V5 preflight variant. It uses
+// the same complete ownership, membership, assignment, user, and provenance
+// inventory while expecting the Stage-A V5 catalog.
+func RunSecuritySchemaPreflightV5(ctx context.Context, dsn string) (LegacyDataPreflightResult, error) {
+	return runSecuritySchemaPreflight(ctx, dsn, protectedSchemaVersion)
+}
+
+func runSecuritySchemaPreflight(ctx context.Context, dsn string, expectedVersion int) (LegacyDataPreflightResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -30,7 +41,6 @@ func RunSecuritySchemaPreflight(ctx context.Context, dsn string) (LegacyDataPref
 	if err != nil {
 		return result, err
 	}
-	expectedVersion := securitySchemaPreflightBaseVersion
 	result.Migration.ExpectedVersion = expectedVersion
 
 	db, err := sql.Open("postgres", parsed.driverURL)

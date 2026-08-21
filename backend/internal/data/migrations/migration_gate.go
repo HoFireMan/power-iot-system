@@ -19,6 +19,7 @@ var (
 	ErrGuardedV6Down                   = errors.New("migration DOWN refused: clean v6 downgrade is protected")
 	ErrCleanV5MetadataRequired         = errors.New("security reconciliation requires clean v5 migration metadata")
 	ErrExternalWriterAdmissionRequired = errors.New("protected work requires external writer drain/deny evidence")
+	ErrD1LGenericRoute                 = errors.New("generic migration route is reserved for D1-L")
 )
 
 // ExternalWriterAdmission carries operator-facing summaries for diagnostics,
@@ -65,6 +66,35 @@ const (
 // MigrationMetadataSnapshot is a non-authorizing observation of the configured
 // migration metadata relation. A3 authorization must additionally prove the
 // catalog and semantic invariants owned by later units.
+type migrationMetadataQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// rejectD1LGenericRoute prevents the generic migrate APIs from inspecting or
+// mutating the reserved control namespace. The configured relation check is
+// performed before any generic metadata inspection, and the catalog check
+// also catches the ordinary application URL after D1-L has been installed.
+func rejectD1LGenericRoute(ctx context.Context, q migrationMetadataQueryer, config *postgres.Config) error {
+	if config != nil && config.MigrationsTableQuoted {
+		schema, table, ok := parseQuotedMigrationTable(config.MigrationsTable)
+		if ok && schema == "security_control" && table == "control_schema_migrations" {
+			return ErrD1LGenericRoute
+		}
+	}
+	if q == nil {
+		return errors.New("D1-L generic route inspection requires a queryer")
+	}
+	var present bool
+	if err := q.QueryRowContext(ctx, "SELECT to_regclass('security_control.control_schema_migrations') IS NOT NULL").Scan(&present); err != nil {
+		return fmt.Errorf("inspect D1-L reserved namespace: %w", err)
+	}
+	if present {
+		return ErrD1LGenericRoute
+	}
+	return nil
+}
+
 type MigrationMetadataSnapshot struct {
 	Exists         bool
 	CatalogEmpty   bool
@@ -110,14 +140,22 @@ func migrationGateError(reason error, action migrationGateAction, snapshot Migra
 // initializing the migration driver. It deliberately counts every row; the
 // driver's informational Version method is not an admission authority.
 func inspectMigrationMetadata(ctx context.Context, conn *sql.Conn, config *postgres.Config) (MigrationMetadataSnapshot, error) {
-	if conn == nil {
-		return MigrationMetadataSnapshot{}, errors.New("migration metadata inspection requires a pinned connection")
+	return inspectMigrationMetadataOn(ctx, conn, config)
+}
+
+// inspectMigrationMetadataOn is the transaction/pinned-session adapter for the
+// canonical metadata inspection logic. It intentionally performs no driver
+// initialization, so the same observation is valid before and inside the
+// protected transaction.
+func inspectMigrationMetadataOn(ctx context.Context, q migrationMetadataQueryer, config *postgres.Config) (MigrationMetadataSnapshot, error) {
+	if q == nil {
+		return MigrationMetadataSnapshot{}, errors.New("migration metadata inspection requires a queryer")
 	}
 	if config == nil {
 		return MigrationMetadataSnapshot{}, errors.New("migration metadata configuration is required")
 	}
 	var currentSchema string
-	if err := conn.QueryRowContext(ctx, "SELECT current_schema()").Scan(&currentSchema); err != nil {
+	if err := q.QueryRowContext(ctx, "SELECT current_schema()").Scan(&currentSchema); err != nil {
 		return MigrationMetadataSnapshot{}, fmt.Errorf("resolve migration metadata schema: %w", err)
 	}
 	schemaName, tableName, err := migrationMetadataIdentifiers(config, currentSchema)
@@ -126,10 +164,10 @@ func inspectMigrationMetadata(ctx context.Context, conn *sql.Conn, config *postg
 	}
 	qualifiedTable := quotedMigrationTable(schemaName, tableName)
 	var relation sql.NullString
-	if err := conn.QueryRowContext(ctx, "SELECT to_regclass($1)", qualifiedTable).Scan(&relation); err != nil {
+	if err := q.QueryRowContext(ctx, "SELECT to_regclass($1)", qualifiedTable).Scan(&relation); err != nil {
 		return MigrationMetadataSnapshot{}, fmt.Errorf("inspect migration metadata relation: %w", err)
 	}
-	catalogVersion, err := migrationCatalogVersion(ctx, conn, currentSchema, schemaName, tableName)
+	catalogVersion, err := migrationCatalogVersion(ctx, q, currentSchema, schemaName, tableName)
 	if err != nil {
 		return MigrationMetadataSnapshot{}, err
 	}
@@ -137,7 +175,7 @@ func inspectMigrationMetadata(ctx context.Context, conn *sql.Conn, config *postg
 		return MigrationMetadataSnapshot{CatalogEmpty: catalogVersion == 0, CatalogVersion: catalogVersion}, nil
 	}
 
-	rows, err := conn.QueryContext(ctx, "SELECT version, dirty FROM "+qualifiedTable+" ORDER BY version")
+	rows, err := q.QueryContext(ctx, "SELECT version, dirty FROM "+qualifiedTable+" ORDER BY version")
 	if err != nil {
 		return MigrationMetadataSnapshot{Exists: true, CatalogEmpty: catalogVersion == 0, CatalogVersion: catalogVersion}, fmt.Errorf("read migration metadata: %w", err)
 	}
@@ -162,8 +200,8 @@ func inspectMigrationMetadata(ctx context.Context, conn *sql.Conn, config *postg
 	return snapshot, nil
 }
 
-func migrationCatalogVersion(ctx context.Context, conn *sql.Conn, schemaName, metadataSchema, metadataTable string) (int, error) {
-	rows, err := conn.QueryContext(ctx, `
+func migrationCatalogVersion(ctx context.Context, q migrationMetadataQueryer, schemaName, metadataSchema, metadataTable string) (int, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT c.relname
 		FROM pg_class AS c
 		JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -240,6 +278,10 @@ func migrationCatalogVersion(ctx context.Context, conn *sql.Conn, schemaName, me
 }
 
 func classifyMigrationAdmission(snapshot MigrationMetadataSnapshot, action migrationGateAction, embeddedLatest int) error {
+	// embeddedLatest may be ahead of the capped generic target. A clean V5
+	// no-op remains allowed; the generic route still never targets or applies
+	// the protected V5->V6 body.
+	_ = embeddedLatest
 	if !snapshot.Exists || snapshot.RowCount == 0 {
 		if action == migrationGateUp && snapshot.CatalogVersion >= 0 && snapshot.CatalogVersion <= 4 {
 			return nil // only exact empty/recognized pre-v5 catalogs may initialize metadata
@@ -272,9 +314,6 @@ func classifyMigrationAdmission(snapshot MigrationMetadataSnapshot, action migra
 	}
 	if snapshot.Version == protectedSchemaVersion && snapshot.CatalogVersion != protectedSchemaVersion {
 		return migrationGateError(ErrMigrationGateAmbiguous, action, snapshot)
-	}
-	if action == migrationGateUp && snapshot.Version == protectedSchemaVersion && embeddedLatest > protectedSchemaVersion {
-		return migrationGateError(ErrProtectedV5Upgrade, action, snapshot)
 	}
 	return nil
 }

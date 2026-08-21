@@ -22,7 +22,7 @@ func TestClassifyMigrationAdmission(t *testing.T) {
 		{name: "zero metadata unknown catalog", snap: func() MigrationMetadataSnapshot { s := clean(0); s.CatalogVersion = -1; return s }(), action: migrationGateUp, wantErr: ErrMigrationGateAmbiguous},
 		{name: "clean v5 current bootstrap no-op", snap: func() MigrationMetadataSnapshot { s := clean(5); s.CatalogVersion = 5; return s }(), action: migrationGateUp, latest: 5},
 		{name: "partial v5 catalog", snap: clean(5), action: migrationGateUp, latest: 5, wantErr: ErrMigrationGateAmbiguous},
-		{name: "clean v5 protected future upgrade", snap: func() MigrationMetadataSnapshot { s := clean(5); s.CatalogVersion = 5; return s }(), action: migrationGateUp, latest: 6, wantErr: ErrProtectedV5Upgrade},
+		{name: "clean v5 capped no-op with protected future embedded", snap: func() MigrationMetadataSnapshot { s := clean(5); s.CatalogVersion = 5; return s }(), action: migrationGateUp, latest: 6},
 		{name: "dirty v5", snap: MigrationMetadataSnapshot{Exists: true, RowCount: 1, Version: 5, Dirty: true, HasVersion: true}, action: migrationGateUp, wantErr: ErrMigrationGateDirty},
 		{name: "duplicate metadata", snap: MigrationMetadataSnapshot{Exists: true, RowCount: 2, HasVersion: true}, action: migrationGateUp, wantErr: ErrMigrationGateAmbiguous},
 		{name: "clean v6 up", snap: clean(6), action: migrationGateUp, latest: 6, wantErr: ErrMigrationGateFuture},

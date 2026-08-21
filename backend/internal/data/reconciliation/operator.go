@@ -41,8 +41,8 @@ type DiagnosticReport struct {
 	ExpectedAffectedCounts   map[string]int                     `json:"expected_affected_counts,omitempty"`
 	Blockers                 []string                           `json:"blockers,omitempty"`
 	RequiredExplicitMappings []string                           `json:"required_explicit_mappings,omitempty"`
-	BackendPID               int64                              `json:"backend_pid,omitempty"`
-	FenceState               migrations.ExclusiveOwnershipState `json:"fence_state,omitempty"`
+	BackendPID               int64                              `json:"-"`
+	FenceState               migrations.ExclusiveOwnershipState `json:"-"`
 	Error                    string                             `json:"error,omitempty"`
 }
 
@@ -68,9 +68,10 @@ type OperatorReport struct {
 	Committed                bool                               `json:"committed"`
 	PostCommitVerified       bool                               `json:"post_commit_verified"`
 	TriggerRestored          bool                               `json:"trigger_restored"`
-	BackendPID               int64                              `json:"backend_pid,omitempty"`
-	FenceState               migrations.ExclusiveOwnershipState `json:"fence_state,omitempty"`
+	BackendPID               int64                              `json:"-"`
+	FenceState               migrations.ExclusiveOwnershipState `json:"-"`
 	CleanupError             string                             `json:"cleanup_error,omitempty"`
+	D007Terminal             D007TerminalEvidence               `json:"d007_terminal,omitempty"`
 	Error                    string                             `json:"error,omitempty"`
 }
 
@@ -212,7 +213,8 @@ func OperatorReportFromExecution(report ExecutionReport, err error) OperatorRepo
 		Committed: report.Committed, PostCommitVerified: report.PostCommitVerified,
 		TriggerRestored: report.TriggerRestored, BackendPID: report.BackendPID,
 		FenceState: report.FenceState, CleanupError: safeOperatorString(report.CleanupError),
-		Error: diagnosticError("", err),
+		D007Terminal: report.D007Terminal,
+		Error:        diagnosticError("", err),
 	}
 }
 

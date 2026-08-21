@@ -17,16 +17,18 @@ import (
 
 // MqttConfig contains all broker connection settings. No credentials are logged.
 type MqttConfig struct {
-	BrokerURL      string
-	ClientID       string
-	Username       string
-	Password       string
-	CAFile         string
-	TelemetryTopic string
-	CommandPrefix  string
-	ConnectTimeout time.Duration
-	WorkerCount    int
-	QueueSize      int
+	BrokerURL               string
+	ClientID                string
+	Username                string
+	Password                string
+	CAFile                  string
+	TelemetryTopic          string
+	CommandPrefix           string
+	ConnectTimeout          time.Duration
+	WorkerCount             int
+	QueueSize               int
+	InitialIngestionEnabled bool
+	BoundedSmokeEnabled     bool
 }
 
 // MQTTConfig is an acronym-friendly compatibility alias.
@@ -52,10 +54,19 @@ func LoadMqttConfigFromEnv() (MqttConfig, error) {
 	if strings.TrimSpace(os.Getenv("MQTT_USERNAME")) == "" || os.Getenv("MQTT_PASSWORD") == "" {
 		return MqttConfig{}, fmt.Errorf("MQTT_USERNAME and MQTT_PASSWORD are required")
 	}
+	mode := strings.TrimSpace(os.Getenv("D6_RUNTIME_MODE"))
+	if mode == "" {
+		mode = "PRE_CUTOVER"
+	}
+	if mode != "PRE_CUTOVER" && mode != "POST_CUTOVER" {
+		return MqttConfig{}, fmt.Errorf("D6_RUNTIME_MODE must be PRE_CUTOVER or POST_CUTOVER")
+	}
 	return MqttConfig{
 		BrokerURL: broker, ClientID: clientID, Username: os.Getenv("MQTT_USERNAME"), Password: os.Getenv("MQTT_PASSWORD"),
 		CAFile: caFile, TelemetryTopic: envOr("MQTT_TELEMETRY_TOPIC", TelemetryTopic), CommandPrefix: envOr("MQTT_COMMAND_PREFIX", CommandPrefix),
 		ConnectTimeout: 10 * time.Second, WorkerCount: 4, QueueSize: 64,
+		InitialIngestionEnabled: mode == "POST_CUTOVER",
+		BoundedSmokeEnabled:     mode == "PRE_CUTOVER" && strings.TrimSpace(os.Getenv("D6_BOUNDED_SMOKE")) == "1",
 	}, nil
 }
 
@@ -113,11 +124,12 @@ func NewMqttServiceWithConfig(config MqttConfig, db *gorm.DB) (*MqttService, err
 	if config.QueueSize <= 0 {
 		config.QueueSize = 64
 	}
-	s := &MqttService{db: db, ingestor: NewTelemetryIngestor(db), config: config, work: make(chan queuedMessage, config.QueueSize), clock: func() time.Time { return time.Now().UTC() }}
+	s := &MqttService{db: db, ingestor: NewTelemetryIngestor(db), config: config, work: make(chan queuedMessage, config.QueueSize), clock: func() time.Time { return time.Now().UTC() }, ingestionBlocked: !config.InitialIngestionEnabled && !config.BoundedSmokeEnabled, smokeOnly: config.BoundedSmokeEnabled}
 	client, err := newMQTTClient(config, s.onConnect, s.onConnectionLost)
 	if err != nil {
 		return nil, err
 	}
 	s.client = client
+	s.disconnect = client.Disconnect
 	return s, nil
 }
