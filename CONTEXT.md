@@ -6,22 +6,43 @@ rules are in `AGENTS.md`; public/product documentation remains in `README.md`.
 ## Mainline State
 
 - Repository worktree: `/home/admin-195/code/power-iot-system-wt-security-reconciliation`
-- Branch: `work/security-schema-reconciliation`
-- Current accepted HEAD: `64bce24b72f2976e9333e9d853c0c4c78efd139b`
+- Current integration branch: `work/security-schema-reconciliation`
+- Last implementation checkpoint: `b454fd8de195687d81f9f95e3924fbedae4acd1f`
+- Current integration PR: `#6`
 
 A3 status:
 
 - **A3-P1 — Final Enforcement Plan:** FROZEN
 - **A3-D1 — Writer/Startup Gates:** ACCEPTED
 - **A3-D2 — Lifecycle/Readiness Seams:** ACCEPTED
-- **A3-D3 — Dedicated Runner/Recovery:** ACCEPTED after GT reconciliation repair
-- **A3-D4 — Protected Continuous Orchestration:** NEXT
-- **A3-D5 — 000006 + Integration:** NOT STARTED
-- **A3-D6 — Deployment/Bootstrap/Final Cutover:** NOT STARTED
+- **A3-D3 — Dedicated Runner/Recovery:** ACCEPTED
+- **A3-D4 — Protected Continuous Orchestration:** COMPLETE / ACCEPTED
+- **A3-D5 — 000006 + Integration:** COMPLETE / ACCEPTED
+- **A3-D6 SPEC:** APPROVED / FROZEN
+- **A3-D6 PLAN:** APPROVED / FROZEN
+- **A3-D6 IMPLEMENTATION:** COMPLETE
+- **A3-D6 PRODUCTION-SHAPED REHEARSAL:** PASS
+- **A3-D6 PRE-PRODUCTION VALIDATION:** PASS
 
-Dependency: **D1 + D2 + D3 → D4 → D5 → D6**
+Migration `000006_d4_reconciliation`: **IMPLEMENTED / VERIFIED / ACCEPTED**.
 
-## D2 Delivery Summary
+Production boundary:
+
+- `A3_D6_PRODUCTION_EXECUTION_AUTHORIZED = NO`
+- `PRODUCTION_TCRFID01_MUTATED = NO`
+- `PRODUCTION_DB_MUTATED = NO`
+- `PRODUCTION_000006_EXECUTED = NO`
+- `PRODUCTION_CUTOVER = NOT_STARTED`
+
+GitHub integration:
+
+- **PR #6:** OPEN
+- **PR #6 MERGED:** NO
+
+Dependency: **D1 + D2 + D3 → D4 → D5 → D6** is complete through D6
+pre-production validation; production execution remains separately authorized.
+
+## D2 Delivery Summary (Historical Checkpoint)
 
 Accepted D2 checkpoint: `64bce24b72f2976e9333e9d853c0c4c78efd139b`
 
@@ -39,20 +60,17 @@ D2 provides:
 - fresh-fact, semantic, and post-commit evidence checks; and
 - denial for dirty, ambiguous, bootstrap, future, missing, and unsupported states.
 
-Preserved boundaries:
+At the historical D2 checkpoint, the following boundaries were preserved:
 
 - D1 external admission/protected capability;
 - D3 metadata transition, lock, recovery, and UNKNOWN-COMMIT authority;
-- no D4 continuous orchestration;
-- no D5 / 000006;
-- no D6 deployment/cutover;
-- no DML/backfill; and
-- no ownership/Authz redesign.
+- DML/backfill remained excluded; and
+- ownership/Authz redesign remained excluded.
 
-Remaining later-phase work is D4 wiring/integration of these readiness seams
-into protected continuous orchestration, followed by later final v6
-semantic-verifier integration where assigned by the frozen phase plan. This is
-not an unresolved D2 blocker.
+At that checkpoint, later-phase work was D4 wiring/integration of these
+readiness seams into protected continuous orchestration, followed by D5 and
+D6 delivery under the frozen phase plan. Those later phases are now reflected
+in the current Mainline State above and are not unresolved D2 blockers.
 
 ## D3 Status
 
