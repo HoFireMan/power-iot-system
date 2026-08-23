@@ -1,30 +1,47 @@
 // #C:\Code\PowerWork\power-iot-system\mobile\lib\features\profile\screens\profile_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/config/theme.dart';
+import 'package:power_iot_app/features/auth/auth_controller.dart';
+import 'package:power_iot_app/features/profile/domain/models/user_profile.dart';
+import 'package:power_iot_app/features/profile/presentation/providers/profile_provider.dart';
 
-class ProfileScreen extends StatefulWidget {
+class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
 
   @override
-  State<ProfileScreen> createState() => _ProfileScreenState();
+  ConsumerState<ProfileScreen> createState() => _ProfileScreenState();
 }
 
-class _ProfileScreenState extends State<ProfileScreen> {
-  // 模擬當前使用者狀態
-  final bool _isAdmin = true;
-  final String _userName = "助理";
-  final String _currentShop = "維野納複合式餐飲";
-
+class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
+    final remoteState = ref.watch(profileProvider);
+    if (remoteState.status == RemoteStatus.loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (remoteState.status == RemoteStatus.unauthorized) {
+      return const Scaffold(body: Center(child: Text('登入已失效，請重新登入')));
+    }
+    if (remoteState.status == RemoteStatus.error || remoteState.data == null) {
+      return Scaffold(
+        body: Center(
+          child: OutlinedButton(
+            onPressed: () => ref.read(profileProvider.notifier).load(),
+            child: const Text('載入個人資料失敗，重試'),
+          ),
+        ),
+      );
+    }
+    final profile = remoteState.data!;
     return Scaffold(
       backgroundColor: AppTheme.backgroundColor,
       body: SingleChildScrollView(
         child: Column(
           children: [
             // 1. 頂部個人資訊卡片 (已修正：補回手機資訊、登出樣式)
-            _buildProfileHeader(),
+            _buildProfileHeader(profile),
 
             // 2. 功能選單列表
             Padding(
@@ -56,7 +73,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ],
                   ),
-                  if (_isAdmin) ...[
+                  if (profile.isAdmin) ...[
                     const SizedBox(height: 24),
                     _buildSectionLabel("系統管理"),
                     const SizedBox(height: 8),
@@ -70,7 +87,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         _buildMenuItem(
                             icon: Icons.store_mall_directory_outlined,
                             title: "店家列表",
-                            onTap: () {}),
+                            onTap: () => context.go('/shops')),
                         _buildDivider(),
                         _buildMenuItem(
                             icon: Icons.manage_accounts_outlined,
@@ -91,11 +108,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ),
                   ],
                   const SizedBox(height: 40),
-                  if (!_isAdmin)
+                  if (!profile.isAdmin)
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
-                        onPressed: () => context.go('/login'),
+                        onPressed: () async {
+                          await ref.read(authControllerProvider).logout();
+                          if (!context.mounted) return;
+                          context.go('/login');
+                        },
                         icon: const Icon(Icons.logout),
                         label: const Text("登出帳號"),
                         style: OutlinedButton.styleFrom(
@@ -121,7 +142,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // --- UI 元件區 ---
 
-  Widget _buildProfileHeader() {
+  Widget _buildProfileHeader(UserProfile profile) {
     return Container(
       padding: const EdgeInsets.fromLTRB(24, 60, 24, 40),
       decoration: const BoxDecoration(
@@ -159,7 +180,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Hi! $_userName",
+                      'Hi! ${profile.name}',
                       style: const TextStyle(
                           fontSize: 24,
                           fontWeight: FontWeight.bold,
@@ -175,7 +196,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         const SizedBox(width: 6),
                         Flexible(
                           child: Text(
-                            _currentShop,
+                            profile.currentShopId == null
+                                ? '尚未設定主要店家'
+                                : '店家 ${profile.currentShopId}',
                             style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 14,
@@ -186,27 +209,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ],
                     ),
                     const SizedBox(height: 4),
-                    // Email 狀態
-                    const Row(
+                    Row(
                       children: [
-                        Icon(Icons.email_outlined,
+                        const Icon(Icons.email_outlined,
                             color: Colors.white60, size: 16),
-                        SizedBox(width: 6),
-                        Text("尚未設定",
-                            style:
-                                TextStyle(color: Colors.white60, fontSize: 13)),
+                        const SizedBox(width: 6),
+                        Text(profile.email ?? '尚未設定',
+                            style: const TextStyle(
+                                color: Colors.white60, fontSize: 13)),
                       ],
                     ),
                     const SizedBox(height: 2),
-                    // 手機 狀態 (新增補回)
-                    const Row(
+                    Row(
                       children: [
-                        Icon(Icons.phone_iphone_rounded,
+                        const Icon(Icons.phone_iphone_rounded,
                             color: Colors.white60, size: 16),
-                        SizedBox(width: 6),
-                        Text("尚未設定",
-                            style:
-                                TextStyle(color: Colors.white60, fontSize: 13)),
+                        const SizedBox(width: 6),
+                        Text(profile.phone ?? '尚未設定',
+                            style: const TextStyle(
+                                color: Colors.white60, fontSize: 13)),
                       ],
                     ),
                   ],
@@ -215,7 +236,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
               // 登出按鈕 (修正：改成 文字+圖示 樣式)
               GestureDetector(
-                onTap: () => context.go('/login'),
+                onTap: () async {
+                  await ref.read(authControllerProvider).logout();
+                  if (!mounted) return;
+                  context.go('/login');
+                },
                 child: Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 6),

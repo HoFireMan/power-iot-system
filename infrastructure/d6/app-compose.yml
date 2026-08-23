@@ -28,6 +28,9 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       APP_ENV: production
+      # Empty by default: direct-peer-only client IP semantics. Operators must
+      # explicitly inject exact reverse-proxy CIDR(s) when applicable.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       D6_RUNTIME_MODE: ${D6_RUNTIME_MODE:-PRE_CUTOVER}
       D6_BOUNDED_SMOKE: ${D6_BOUNDED_SMOKE:-0}
       DATABASE_URL: ${APPLICATION_DATABASE_URL:?set externally injected application endpoint}
@@ -35,6 +38,8 @@ services:
       MQTT_CA_FILE: /run/poweriot/secrets/mqtt-ca.crt
       MQTT_USERNAME_FILE: /run/poweriot/secrets/mqtt-username
       MQTT_PASSWORD_FILE: /run/poweriot/secrets/mqtt-password
+      JWT_ACTIVE_KID: ${JWT_ACTIVE_KID:?set host-managed JWT active key identifier}
+      JWT_ACTIVE_PRIVATE_KEY_FILE: ${JWT_ACTIVE_PRIVATE_KEY_FILE:?set container JWT active private key path}
       D6_SECRET_SOURCE: HOST_MANAGED_EXTERNALLY_INJECTED_RESTRICTED_SECRETS
     volumes:
       - ${POWERIOT_BACKEND_SECRET_DIR:?set restricted host secret directory}:/run/poweriot/secrets:ro

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # Complete disposable App-VM/DB-VM-shaped D6 rehearsal. It creates only
 # temporary test credentials/certificates, uses a unique Compose project, and
@@ -8,16 +9,67 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 root=$(mktemp -d)
-project="d6-integrated-$(date +%s)-${BASHPID}"
+project="d6-integrated-$(date +%s)-${BASHPID}-$(openssl rand -hex 4)"
 db_network="${project}-db"
 app_network="${project}-app"
 # Disposable daemon boundary: DB publishes only to the host loopback interface;
 # App containers reach it through host.docker.internal, never a DB Docker bridge.
 db_bind_address=127.0.0.1
-app_db_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-provider_db_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-http_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-d1l_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+# Allocate every host port independently in one OS query. The sockets are held
+# together while selecting, then the complete set is checked again immediately
+# before compose starts so a collision fails closed rather than being derived
+# from another service's port.
+allocate_ports() {
+  local selected
+  selected=$(python3 - <<'PY'
+import socket
+sockets = []
+try:
+    for _ in range(5):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        sock.bind(("127.0.0.1", 0))
+        sockets.append(sock)
+        print(sock.getsockname()[1])
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+  )
+  mapfile -t ports <<< "$selected"
+  [[ "${#ports[@]}" == 5 ]] || { echo 'unable to allocate five rehearsal ports' >&2; exit 1; }
+  [[ "$(printf '%s\n' "${ports[@]}" | sort -n | uniq | wc -l)" == 5 ]] || {
+    echo 'rehearsal port allocator returned duplicate ports' >&2
+    exit 1
+  }
+  app_db_port=${ports[0]}
+  provider_db_port=${ports[1]}
+  http_port=${ports[2]}
+  d1l_port=${ports[3]}
+  mqtt_port=${ports[4]}
+}
+validate_ports_available() {
+  python3 - "$@" <<'PY'
+import socket
+import sys
+ports = [int(value) for value in sys.argv[1:]]
+if len(ports) != len(set(ports)):
+    raise SystemExit("duplicate rehearsal host ports")
+sockets = []
+try:
+    for port in ports:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        sock.bind(("127.0.0.1", port))
+        sockets.append(sock)
+except OSError as exc:
+    raise SystemExit(f"rehearsal host port collision: {exc}")
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+}
+allocate_ports
 app_compose="$repo/infrastructure/d6/app-compose.yml"
 db_compose="$repo/infrastructure/d6/db-compose.yml"
 cleanup() {
@@ -30,17 +82,38 @@ cleanup() {
   rm -rf "$root"
 }
 trap cleanup EXIT
+assert_unique_disposable_resources() {
+  local resource
+  docker info >/dev/null 2>&1 || { echo 'Docker daemon unavailable for rehearsal preflight' >&2; exit 1; }
+  [[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]] || {
+    echo "rehearsal Compose project already exists: $project" >&2
+    exit 1
+  }
+  for resource in "$db_network" "$app_network" "${project}-application" "${project}-provider"; do
+    if docker network inspect "$resource" >/dev/null 2>&1 || docker volume inspect "$resource" >/dev/null 2>&1; then
+      echo "rehearsal resource already exists: $resource" >&2
+      exit 1
+    fi
+  done
+  echo "DISPOSABLE_IDENTIFIERS_UNIQUE=PASS project=$project networks=$db_network,$app_network volumes=${project}-application,${project}-provider"
+}
 
 mkdir -p "$root"/{certs,mqtt-config,mqtt-data,backend-secrets,d1l-secrets,db-role-passwords,proxy}
 # Container users are non-root; the temporary directory is traversable while
 # individual test secrets/certificates remain read-only and never leave root.
 chmod 755 "$root" "$root"/{certs,backend-secrets,d1l-secrets,db-role-passwords}
-bootstrap_password='d6-rehearsal-bootstrap-password'
-app_password='d6-rehearsal-app-password'
-runtime_password='d6-rehearsal-runtime-password'
-provider_password='d6-rehearsal-provider-password'
-migration_password='d6-rehearsal-migration-password'
-db_admin_password='d6-rehearsal-db-admin-password'
+random_secret() { openssl rand -hex 24; }
+bootstrap_password=$(random_secret)
+app_password=$(random_secret)
+runtime_password=$(random_secret)
+provider_password=$(random_secret)
+migration_password=$(random_secret)
+db_admin_password=$(random_secret)
+mqtt_username="rehearsal-$(openssl rand -hex 8)"
+mqtt_password=$(random_secret)
+jwt_active_kid=d6-rehearsal-auth-active
+jwt_active_private_key_filename=jwt-active-private.pem
+jwt_active_private_key="$root/backend-secrets/$jwt_active_private_key_filename"
 printf '%s\n' "$bootstrap_password" > "$root/bootstrap-password"
 printf '%s\n' "$app_password" > "$root/db-role-passwords/poweriot"
 printf '%s\n' "$runtime_password" > "$root/db-role-passwords/poweriot_runtime"
@@ -49,10 +122,11 @@ printf '%s\n' "$db_admin_password" > "$root/db-role-passwords/d6_db_admin"
 printf '%s\n' "$runtime_password" > "$root/backend-secrets/application-db-password"
 printf '%s\n' "$app_password" > "$root/app-db-password"
 printf '%s\n' "$provider_password" > "$root/d1l-secrets/provider-db-password"
-printf 'rehearsal-user\n' > "$root/backend-secrets/mqtt-username"
-printf 'rehearsal-pass\n' > "$root/backend-secrets/mqtt-password"
+printf '%s\n' "$mqtt_username" > "$root/backend-secrets/mqtt-username"
+printf '%s\n' "$mqtt_password" > "$root/backend-secrets/mqtt-password"
 chmod 0444 "$root/bootstrap-password" "$root/db-role-passwords"/*
-chmod 644 "$root/backend-secrets"/* "$root/d1l-secrets/provider-db-password"
+chmod 644 "$root/backend-secrets/application-db-password" "$root/backend-secrets/mqtt-username" "$root/d1l-secrets/provider-db-password"
+chmod 0600 "$root/backend-secrets/mqtt-password"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=d6-rehearsal-ca' \
   -keyout "$root/certs/ca.key" -out "$root/certs/ca.crt" >/dev/null 2>&1
@@ -75,16 +149,21 @@ make_cert() {
 make_cert mqtt mqtt 'DNS:mqtt,DNS:localhost,IP:127.0.0.1'
 make_cert provider provider 'DNS:d1l-authority,DNS:localhost,IP:127.0.0.1'
 make_cert runbook runbook 'DNS:runbook' 'spiffe://power-iot/a3/deployment-runbook'
-chmod 644 "$root/certs"/*.crt "$root/certs"/*.key
+chmod 644 "$root/certs"/*.crt
+chmod 0600 "$root/certs"/*.key
 openssl genpkey -algorithm ED25519 -out "$root/certs/admission-private.pem" >/dev/null 2>&1
 openssl pkey -in "$root/certs/admission-private.pem" -pubout -out "$root/backend-secrets/admission-public.pem" >/dev/null 2>&1
-chmod 0600 "$root/certs/admission-private.pem"
+# This is a distinct, disposable JWT signing key for the rehearsal only. It is
+# never reused for admission, MQTT, D1-L, or firmware purposes.
+openssl genpkey -algorithm ED25519 -out "$jwt_active_private_key" >/dev/null 2>&1
+chmod 0600 "$root/certs/admission-private.pem" "$jwt_active_private_key"
 chmod 0444 "$root/backend-secrets/admission-public.pem"
 cp "$root/certs/ca.crt" "$root/backend-secrets/mqtt-ca.crt"
 cp "$root/certs/provider.crt" "$root/d1l-secrets/provider.crt"
 cp "$root/certs/provider.key" "$root/d1l-secrets/provider.key"
 cp "$root/certs/ca.crt" "$root/d1l-secrets/provider-ca.crt"
-chmod 644 "$root/backend-secrets/mqtt-ca.crt" "$root/d1l-secrets"/*
+chmod 644 "$root/backend-secrets/mqtt-ca.crt" "$root/d1l-secrets/provider.crt" "$root/d1l-secrets/provider-ca.crt"
+chmod 0600 "$root/d1l-secrets/provider.key"
 
 cat > "$root/mqtt-config/mosquitto.conf" <<'EOF'
 listener 8883
@@ -98,9 +177,31 @@ log_dest stdout
 EOF
 chmod 644 "$root/mqtt-config/mosquitto.conf"
 touch "$root/certs/passwd"
-docker run --rm -v "$root/certs:/out" eclipse-mosquitto:2 \
-  mosquitto_passwd -b /out/passwd rehearsal-user rehearsal-pass >/dev/null
+assert_unique_disposable_resources
+# Interactive mosquitto_passwd reads both password entries from stdin; the
+# password is never present in this process's argv or the generated command.
+cat "$root/backend-secrets/mqtt-password" "$root/backend-secrets/mqtt-password" | \
+  docker run --rm -i -v "$root/certs:/out" eclipse-mosquitto:2 \
+  mosquitto_passwd /out/passwd "$mqtt_username" >/dev/null
 chmod 644 "$root/certs/passwd"
+# Runtime images use non-root UIDs. Keep the provider key and MQTT password
+# restrictive while assigning ownership through disposable containers (never
+# the host); no credential value is passed as an argument.
+docker run --rm --entrypoint /bin/chown \
+  -v "$root/d1l-secrets:/out" eclipse-mosquitto:2 \
+  10002:10002 /out/provider.key >/dev/null
+docker run --rm --entrypoint /bin/chown \
+  -v "$root/backend-secrets:/out" eclipse-mosquitto:2 \
+  10001:10001 /out/mqtt-password >/dev/null
+docker run --rm --entrypoint /bin/chown \
+  -v "$root/backend-secrets:/out" eclipse-mosquitto:2 \
+  10001:10001 "/out/$jwt_active_private_key_filename" >/dev/null
+# Mosquitto drops privileges to its packaged UID before opening the TLS key.
+# The cert directory is intentionally read-only at runtime, so set ownership
+# before compose starts rather than relying on the entrypoint's chown attempt.
+docker run --rm --entrypoint /bin/chown \
+  -v "$root/certs:/out" eclipse-mosquitto:2 \
+  1883:1883 /out/mqtt.key >/dev/null
 cp "$repo/infrastructure/d6/nginx.conf.template" "$root/proxy/nginx.conf"
 chmod 644 "$root/proxy/nginx.conf"
 
@@ -127,6 +228,8 @@ D1L_TLS_PORT=$d1l_port
 APPLICATION_DATABASE_URL=postgres://poweriot_runtime@host.docker.internal:$app_db_port/power_iot?sslmode=disable
 D1L_PROVIDER_DATABASE_URL=postgres://d1l@host.docker.internal:$provider_db_port/d1l_provider?sslmode=disable
 MQTT_BROKER_URL=tls://mqtt:8883
+JWT_ACTIVE_KID=$jwt_active_kid
+JWT_ACTIVE_PRIVATE_KEY_FILE=/run/poweriot/secrets/$jwt_active_private_key_filename
 POWERIOT_BACKEND_SECRET_DIR=$root/backend-secrets
 POWERIOT_MQTT_CONFIG=$root/mqtt-config
 POWERIOT_MQTT_CERT_DIR=$root/certs
@@ -136,11 +239,19 @@ POWERIOT_APP_NETWORK=$app_network
 POWERIOT_DB_BIND_ADDRESS=$db_bind_address
 APPLICATION_DB_PRIVATE_PORT=$app_db_port
 D1L_PROVIDER_DB_PRIVATE_PORT=$provider_db_port
-MQTT_TLS_PORT=$((http_port + 1))
+MQTT_TLS_PORT=$mqtt_port
 EOF
 
 compose_db=(docker compose -p "$project" --env-file "$root/db.env" -f "$db_compose")
 compose_app=(docker compose -p "$project" --env-file "$root/app.env" -f "$app_compose")
+validate_ports_available "$app_db_port" "$provider_db_port" "$http_port" "$d1l_port" "$mqtt_port"
+# Compose receives only non-secret JWT metadata. The private key remains solely
+# in the restricted mounted directory and is never copied into environment.
+app_config=$("${compose_app[@]}" config)
+printf '%s\n' "$app_config" | grep -Fq "JWT_ACTIVE_KID: $jwt_active_kid" || { echo 'JWT active KID was not injected into Compose config' >&2; exit 1; }
+printf '%s\n' "$app_config" | grep -Fq "JWT_ACTIVE_PRIVATE_KEY_FILE: /run/poweriot/secrets/$jwt_active_private_key_filename" || { echo 'JWT private key container path was not injected into Compose config' >&2; exit 1; }
+echo 'D6_BACKEND_JWT_CONFIG_INJECTED=YES'
+echo "D6_BACKEND_JWT_PRIVATE_KEY_CONTAINER_PATH=/run/poweriot/secrets/$jwt_active_private_key_filename"
 "${compose_db[@]}" up -d >/dev/null
 for service in application-db d1l-provider-db; do
   id=$("${compose_db[@]}" ps -q "$service")
@@ -170,7 +281,7 @@ role_bootstrap() {
     D6_DB_BOOTSTRAP_ROLE=d6_bootstrap D6_DB_BOOTSTRAP_PASSWORD_FILE="$bootstrap_file" \
     D6_DB_ROLE_PASSWORD_DIR="$root/db-role-passwords" D6_DB_LOCAL_ROLE_IDENTITY_FILE="$root/db-role-identity" \
     D6_DB_TARGET=rehearsal D6_APPLICATION_DB_NAME=power_iot \
-    "$repo/infrastructure/d6/d6-db-role-bootstrap.sh"
+    bash "$repo/infrastructure/d6/d6-db-role-bootstrap.sh"
 }
 role_bootstrap
 if role_bootstrap "$root/missing-bootstrap-password" >/dev/null 2>&1; then
@@ -202,6 +313,17 @@ docker run --rm --network "$db_network" -e PGPASSWORD="$app_password" \
 role_bootstrap >/dev/null
 echo 'ROLE_BOOTSTRAP_V5_RERUN=PASS'
 "${compose_app[@]}" build backend d1l-authority >/dev/null
+backend_image="${project}-backend"
+docker image inspect "$backend_image" >/dev/null 2>&1 || { echo 'backend image was not produced' >&2; exit 1; }
+[[ "$(stat -c '%a' "$jwt_active_private_key")" == 600 ]] || { echo 'JWT rehearsal key permissions are not restrictive' >&2; exit 1; }
+[[ "$(stat -c '%u:%g' "$jwt_active_private_key")" == 10001:10001 ]] || { echo 'JWT rehearsal key ownership is not backend UID 10001' >&2; exit 1; }
+# Prove access using the actual backend image and UID, without starting the
+# server or exposing any key bytes.
+docker run --rm --user 10001:10001 --entrypoint /bin/sh \
+  -v "$root/backend-secrets:/run/poweriot/secrets:ro" "$backend_image" \
+  -c "test -r /run/poweriot/secrets/$jwt_active_private_key_filename"
+echo 'D6_BACKEND_JWT_KEY_READABLE_BY_UID_10001=YES'
+validate_ports_available "$http_port" "$d1l_port" "$mqtt_port"
 "${compose_app[@]}" up -d d1l-authority >/dev/null
 for _ in $(seq 1 60); do
   if curl -fsS --cacert "$root/certs/ca.crt" --cert "$root/certs/runbook.crt" --key "$root/certs/runbook.key" "https://127.0.0.1:$d1l_port/readyz" >/tmp/d6-d1l-ready.$$ 2>/dev/null; then
@@ -250,12 +372,29 @@ for _ in \$(seq 1 60); do
   [[ "\$status" == *'"status":"online"'* ]] && break
   sleep 1
 done
+direct=\$(docker run --rm --network "$app_network" nginx:1.27-alpine sh -c 'wget -qO- http://backend:8080/' 2>/dev/null || true)
+[[ "\$direct" == *'"status":"online"'* ]] || { echo "DIRECT_BACKEND_HEALTH_GET=FAIL" >&2; exit 1; }
 [[ "\$status" == *'"d6_runtime_mode":"PRE_CUTOVER"'* && "\$status" == *'"mqtt_ingestion_blocked":true'* && "\$status" == *'"http_writes_blocked":true'* ]] || { echo "READINESS=FAIL \$status" >&2; exit 1; }
+echo DIRECT_BACKEND_HEALTH_GET=PASS
 post=\$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$http_port/")
 [[ "\$post" == 503 ]] || { echo "PRE_CUTOVER_HTTP_BLOCK=FAIL status=\$post" >&2; exit 1; }
+for auth_path in login refresh logout; do
+  auth_status=\$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$http_port/api/v1/auth/\$auth_path")
+  [[ "\$auth_status" == 503 ]] || { echo "PRE_CUTOVER_AUTH_BLOCK=FAIL path=\$auth_path status=\$auth_status" >&2; exit 1; }
+done
+for b6_path in me shops; do
+  b6_status=\$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$http_port/api/v1/\$b6_path")
+  [[ "\$b6_status" == 401 ]] || { echo "PRE_CUTOVER_B6_GET=FAIL path=\$b6_path status=\$b6_status" >&2; exit 1; }
+done
+b7_status=\$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$http_port/api/v1/shops/1/dashboard")
+[[ "\$b7_status" == 401 ]] || { echo "PRE_CUTOVER_B7_GET=FAIL status=\$b7_status" >&2; exit 1; }
 echo PRE_CUTOVER_HTTP_BLOCK=PASS
+echo PRE_CUTOVER_AUTH_POSTS_BLOCK=PASS
+echo PRE_CUTOVER_B6_GET_ALLOWED=PASS
+echo PRE_CUTOVER_B7_GET_ALLOWED=PASS
 echo PRE_CUTOVER_MQTT_BLOCK=PASS
 echo PRE_CUTOVER_READINESS=PASS
+echo D6_BACKEND_BOOTSTRAP_WITH_JWT_KEY=PASS
 echo APPLICATION_DB_REACHED_VIA_PRIVATE_TCP=YES
 EOF
 cat > "$root/db-smoke-hook" <<EOF
@@ -274,13 +413,26 @@ for _ in \$(seq 1 30); do
   [[ "\$status" == *'"status":"online"'* ]] && break
   sleep 1
 done
+direct=\$(docker run --rm --network "$app_network" nginx:1.27-alpine sh -c 'wget -qO- http://backend:8080/' 2>/dev/null || true)
+[[ "\$direct" == *'"status":"online"'* ]] || { echo DIRECT_BACKEND_HEALTH_GET=FAIL >&2; exit 1; }
 [[ "\$status" == *'"http_writes_blocked":true'* && "\$status" == *'"d6_runtime_mode":"PRE_CUTOVER"'* ]] || { echo GENERAL_WRITES_BLOCKED_DURING_SMOKE=FAIL >&2; exit 1; }
+echo DIRECT_BACKEND_HEALTH_GET=PASS
+echo PROXY_HEALTH_GET=PASS
 echo GENERAL_HTTP_WRITES_BLOCKED_DURING_SMOKE=PASS
 echo CONTROLLED_MQTT_EXCEPTION_ONLY=PASS
-"$repo/infrastructure/d6/d6-db-vm-control.sh" inspect >/dev/null
+"$root/db-vm-control-wrapper" inspect >/dev/null
 echo DIRECT_WRITER_DENIED_DURING_SMOKE=PASS
 before=\$(docker compose -p "$project" --env-file "$root/db.env" -f "$db_compose" exec -T application-db sh -c 'env PGPASSWORD="$db_admin_password" psql -U d6_db_admin -d power_iot -Atqc "SELECT count(*) FROM power_readings"')
-docker run --rm --network "$app_network" -v "$root/certs:/certs:ro" eclipse-mosquitto:2 mosquitto_pub -h mqtt -p 8883 --cafile /certs/ca.crt -u rehearsal-user -P rehearsal-pass -t device/upload/data -m '{"mac":"AABBCCDDEEFF","v":230,"c":1.2,"p":276,"kwh":1.25,"ts":1700000000}'
+docker run --rm --network "$app_network" \
+  -v "$repo/backend:/src/backend:ro" \
+  -v "$repo/infrastructure/d6/mqtt-publisher.go:/src/mqtt-publisher.go:ro" \
+  -v "$root/backend-secrets:/run/poweriot/secrets:ro" \
+  -v "$root/certs:/certs:ro" -w /src/backend golang:1.25.4 \
+  go run /src/mqtt-publisher.go --host mqtt --port 8883 --ca-file /certs/ca.crt \
+  --username-file /run/poweriot/secrets/mqtt-username \
+  --password-file /run/poweriot/secrets/mqtt-password \
+  --topic device/upload/data \
+  --message '{"mac":"AABBCCDDEEFF","v":230,"c":1.2,"p":276,"kwh":1.25,"ts":1700000000}'
 sleep 2
 after=\$(docker compose -p "$project" --env-file "$root/db.env" -f "$db_compose" exec -T application-db sh -c 'env PGPASSWORD="$db_admin_password" psql -U d6_db_admin -d power_iot -Atqc "SELECT count(*) FROM power_readings"')
 [[ "\$after" -gt "\$before" ]] || { echo "CONTROLLED_MQTTS_SMOKE=FAIL before=\$before after=\$after" >&2; exit 1; }
@@ -289,12 +441,15 @@ EOF
 cat > "$root/reentry-hook" <<EOF
 #!/bin/bash
 set -euo pipefail
-docker compose -p "$project" --env-file "\$D6_ACTIVE_APP_ENV" -f "$app_compose" restart backend >/dev/null
+docker compose -p "$project" --env-file "\$D6_ACTIVE_APP_ENV" -f "$app_compose" restart backend reverse-proxy >/dev/null
 for _ in \$(seq 1 60); do status=\$(curl -fsS "http://127.0.0.1:$http_port/" 2>/dev/null || true); [[ "\$status" == *'"status":"online"'* ]] && break; sleep 1; done
-[[ "\$status" == *'"d6_runtime_mode":"PRE_CUTOVER"'* && "\$status" == *'"mqtt_ingestion_blocked":true'* ]] || { echo RESTART_REENTRY=FAIL >&2; exit 1; }
+direct=\$(docker run --rm --network "$app_network" nginx:1.27-alpine sh -c 'wget -qO- http://backend:8080/' 2>/dev/null || true)
+[[ "\$direct" == *'"status":"online"'* && "\$status" == *'"d6_runtime_mode":"PRE_CUTOVER"'* && "\$status" == *'"mqtt_ingestion_blocked":true'* ]] || { echo RESTART_REENTRY=FAIL >&2; exit 1; }
+echo DIRECT_BACKEND_HEALTH_GET=PASS
+echo PROXY_HEALTH_GET=PASS
 version=\$(docker compose -p "$project" --env-file "$root/db.env" -f "$db_compose" exec -T application-db sh -c 'env PGPASSWORD="$db_admin_password" psql -U d6_db_admin -d power_iot -Atqc "SELECT version || '\''/'\'' || dirty::text FROM schema_migrations"')
 [[ "\$version" == 6/false ]] || { echo "CLEAN_V6_REENTRY=FAIL \$version" >&2; exit 1; }
-"$repo/infrastructure/d6/d6-db-vm-control.sh" inspect >/dev/null
+"$root/db-vm-control-wrapper" inspect >/dev/null
 echo DIRECT_WRITER_DENIED_AFTER_REENTRY=PASS
 echo "RESTART_REENTRY=PASS schema=\$version"
 EOF
@@ -303,7 +458,7 @@ cat > "$root/final-gates-hook" <<EOF
 set -euo pipefail
 status=\$(curl -fsS "http://127.0.0.1:$http_port/")
 [[ "\$status" == *'"d6_runtime_mode":"PRE_CUTOVER"'* && "\$status" == *'"http_writes_blocked":true'* && "\$status" == *'"mqtt_ingestion_blocked":true'* ]] || { echo FINAL_CUTOVER_GATES=FAIL >&2; exit 1; }
-"$repo/infrastructure/d6/d6-db-vm-control.sh" inspect >/dev/null
+"$root/db-vm-control-wrapper" inspect >/dev/null
 echo DIRECT_WRITER_DENIED_FINAL_GATES=PASS
 echo FINAL_CUTOVER_GATES=PASS
 EOF
@@ -311,11 +466,37 @@ cat > "$root/post-verify-hook" <<EOF
 #!/bin/bash
 set -euo pipefail
 status=\$(curl -fsS "http://127.0.0.1:$http_port/")
-[[ "\$status" == *'"d6_runtime_mode":"POST_CUTOVER"'* && "\$status" == *'"http_writes_blocked":false'* && "\$status" == *'"mqtt_ingestion_blocked":false'* ]] || { echo POST_CUTOVER_MODE=FAIL \$status >&2; exit 1; }
+direct=\$(docker run --rm --network "$app_network" nginx:1.27-alpine sh -c 'wget -qO- http://backend:8080/' 2>/dev/null || true)
+[[ "\$direct" == *'"status":"online"'* && "\$status" == *'"d6_runtime_mode":"POST_CUTOVER"'* && "\$status" == *'"http_writes_blocked":false'* && "\$status" == *'"mqtt_ingestion_blocked":false'* ]] || { echo POST_CUTOVER_MODE=FAIL \$status >&2; exit 1; }
+echo DIRECT_BACKEND_HEALTH_GET=PASS
+echo PROXY_HEALTH_GET=PASS
 post=\$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$http_port/")
 [[ "\$post" != 503 ]] || { echo POST_CUTOVER_HTTP_ENABLE=FAIL >&2; exit 1; }
+for auth_expect in "login:400" "refresh:400" "logout:401"; do
+  auth_path=\${auth_expect%%:*}; expected=\${auth_expect##*:}
+  auth_status=\$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$http_port/api/v1/auth/\$auth_path")
+  [[ "\$auth_status" == "\$expected" ]] || { echo "POST_CUTOVER_AUTH_ROUTES=FAIL path=\$auth_path status=\$auth_status" >&2; exit 1; }
+done
+for b6_path in me shops; do
+  b6_status=\$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$http_port/api/v1/\$b6_path")
+  [[ "\$b6_status" == 401 ]] || { echo "POST_CUTOVER_B6_GET=FAIL path=\$b6_path status=\$b6_status" >&2; exit 1; }
+done
+b7_status=\$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$http_port/api/v1/shops/1/dashboard")
+[[ "\$b7_status" == 401 ]] || { echo "POST_CUTOVER_B7_GET=FAIL status=\$b7_status" >&2; exit 1; }
+echo POST_CUTOVER_AUTH_ROUTES=PASS
+echo POST_CUTOVER_B7_GET_ROUTES=PASS
+echo POST_CUTOVER_B6_GET_ROUTES=PASS
 before=\$(docker compose -p "$project" --env-file "$root/db.env" -f "$db_compose" exec -T application-db sh -c 'env PGPASSWORD="$db_admin_password" psql -U d6_db_admin -d power_iot -Atqc "SELECT count(*) FROM power_readings"')
-docker run --rm --network "$app_network" -v "$root/certs:/certs:ro" eclipse-mosquitto:2 mosquitto_pub -h mqtt -p 8883 --cafile /certs/ca.crt -u rehearsal-user -P rehearsal-pass -t device/upload/data -m '{"mac":"AABBCCDDEEFF","v":230,"c":1.2,"p":276,"kwh":1.25,"ts":1700000001}'
+docker run --rm --network "$app_network" \
+  -v "$repo/backend:/src/backend:ro" \
+  -v "$repo/infrastructure/d6/mqtt-publisher.go:/src/mqtt-publisher.go:ro" \
+  -v "$root/backend-secrets:/run/poweriot/secrets:ro" \
+  -v "$root/certs:/certs:ro" -w /src/backend golang:1.25.4 \
+  go run /src/mqtt-publisher.go --host mqtt --port 8883 --ca-file /certs/ca.crt \
+  --username-file /run/poweriot/secrets/mqtt-username \
+  --password-file /run/poweriot/secrets/mqtt-password \
+  --topic device/upload/data \
+  --message '{"mac":"AABBCCDDEEFF","v":230,"c":1.2,"p":276,"kwh":1.25,"ts":1700000001}'
 sleep 2
 after=\$(docker compose -p "$project" --env-file "$root/db.env" -f "$db_compose" exec -T application-db sh -c 'env PGPASSWORD="$db_admin_password" psql -U d6_db_admin -d power_iot -Atqc "SELECT count(*) FROM power_readings"')
 [[ "\$after" -gt "\$before" ]] || { echo POST_CUTOVER_MQTT_ENABLE=FAIL >&2; exit 1; }
@@ -340,6 +521,16 @@ echo 'APP_CONTAINERS_NOT_ON_DB_DOCKER_BRIDGE=YES'
 echo 'APP_VM_CONTROL=PASS'
 echo 'DB_VM_CONTROL_SEAM=PASS'
 
+cat > "$root/db-local-control-wrapper" <<EOF
+#!/bin/sh
+exec bash "$repo/infrastructure/d6/d6-db-local-control.sh" "\$@"
+EOF
+cat > "$root/db-vm-control-wrapper" <<EOF
+#!/bin/sh
+exec bash "$repo/infrastructure/d6/d6-db-vm-control.sh" "\$@"
+EOF
+chmod 0555 "$root/db-local-control-wrapper" "$root/db-vm-control-wrapper"
+
 export D6_OPERATOR_MODE=rehearsal D6_OPERATOR_TARGET=rehearsal
 export D6_OPERATOR_PROJECT="$project" D6_APP_COMPOSE_FILE="$app_compose"
 export D6_APP_ENV_FILE="$root/app.env"
@@ -347,9 +538,9 @@ export D6_APPLICATION_DATABASE_URL="postgres://poweriot_runtime@host.docker.inte
 export D6_MIGRATION_DATABASE_URL="postgres://d6_migrator@host.docker.internal:$app_db_port/power_iot?sslmode=disable"
 export D6_PROVIDER_DATABASE_URL="postgres://d1l@host.docker.internal:$provider_db_port/d1l_provider?sslmode=disable"
 export D6_MIGRATION_DATABASE_PASSWORD="$migration_password"
-export D6_APP_VM_CONTROL=docker D6_DB_VM_CONTROL="$repo/infrastructure/d6/d6-db-vm-control.sh" D6_DRAIN_COMMAND="$root/d6-drain-wrapper"
+export D6_APP_VM_CONTROL=docker D6_DB_VM_CONTROL="$root/db-vm-control-wrapper" D6_DRAIN_COMMAND="$root/d6-drain-wrapper"
 export D6_APP_VM_ROLE_IDENTITY_FILE="$root/app-role-identity"
-export D6_DB_CONTROL_TRANSPORT=local D6_DB_LOCAL_CONTROL_COMMAND="$repo/infrastructure/d6/d6-db-local-control.sh"
+export D6_DB_CONTROL_TRANSPORT=local D6_DB_LOCAL_CONTROL_COMMAND="$root/db-local-control-wrapper"
 export D6_DB_COMPOSE_FILE="$db_compose" D6_DB_ENV_FILE="$root/db.env" D6_DB_PROJECT="$project"
 export D6_DB_LOCAL_ROLE_IDENTITY_FILE="$root/db-role-identity" D6_DB_ADMIN_PASSWORD_FILE="$root/db-admin-password"
 export D6_RUNTIME_DB_PASSWORD_FILE="$root/db-role-passwords/poweriot_runtime" D6_MIGRATION_DB_PASSWORD_FILE="$root/db-role-passwords/d6_migrator"
@@ -363,17 +554,17 @@ export D6_READINESS_COMMAND="$root/readiness-hook" D6_CONTROLLED_DB_SMOKE_COMMAN
 export D6_MQTTS_SMOKE_COMMAND="$root/mqtt-smoke-hook" D6_RESTART_REENTRY_COMMAND="$root/reentry-hook"
 export D6_FINAL_GATES_COMMAND="$root/final-gates-hook" D6_POST_CUTOVER_VERIFY_COMMAND="$root/post-verify-hook"
 export D6_REHEARSAL=1
-if D6_APPLICATION_DATABASE_URL='postgres://poweriot@host.docker.internal:1/power_iot?sslmode=disable' "$repo/infrastructure/d6/d6-operator.sh" >/dev/null 2>&1; then
+if D6_APPLICATION_DATABASE_URL='postgres://poweriot@host.docker.internal:1/power_iot?sslmode=disable' bash "$repo/infrastructure/d6/d6-operator.sh" >/dev/null 2>&1; then
   echo 'wrong backend DSN role unexpectedly succeeded' >&2
   exit 1
 fi
 echo 'WRONG_BACKEND_DSN_ROLE_FAIL_CLOSED=PASS'
-if D6_MIGRATION_DATABASE_URL='postgres://poweriot@host.docker.internal:1/power_iot?sslmode=disable' "$repo/infrastructure/d6/d6-operator.sh" >/dev/null 2>&1; then
+if D6_MIGRATION_DATABASE_URL='postgres://poweriot@host.docker.internal:1/power_iot?sslmode=disable' bash "$repo/infrastructure/d6/d6-operator.sh" >/dev/null 2>&1; then
   echo 'wrong migration DSN role unexpectedly succeeded' >&2
   exit 1
 fi
 echo 'WRONG_MIGRATION_DSN_ROLE_FAIL_CLOSED=PASS'
-"$repo/infrastructure/d6/d6-operator.sh"
+bash "$repo/infrastructure/d6/d6-operator.sh"
 echo 'ACTUAL_D6_DRAIN_DISPOSABLE_RUN=PASS'
 echo 'STOPPED_CONTAINERS_FOUND=YES'
 echo 'STOPPED_STATE_VERIFIED=YES'

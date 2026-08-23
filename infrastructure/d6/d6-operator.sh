@@ -150,11 +150,25 @@ run_hook "$D6_CONTROLLED_DB_SMOKE_COMMAND"
 # Explicit bounded MQTTS smoke is a separate mode: only the approved telemetry
 # topic is admitted; general MQTT ingestion remains blocked.
 write_runtime_env PRE_CUTOVER 1 "$(grep '^POWERIOT_REVERSE_PROXY_CONFIG=' "$base_app_env" | cut -d= -f2-)"
-app up -d --force-recreate backend >/dev/null
+# The nginx upstream resolves backend at proxy startup. Rehearsal recreates
+# both services so the closed PRE_CUTOVER proxy follows the new backend IP;
+# production retains its existing operator ordering.
+if [ "$mode" = rehearsal ]; then
+  app up -d --force-recreate backend reverse-proxy >/dev/null
+else
+  app up -d --force-recreate backend >/dev/null
+fi
 echo 'BOUNDED_MQTTS_SMOKE_MODE=PASS'
 run_hook "$D6_MQTTS_SMOKE_COMMAND"
 write_runtime_env PRE_CUTOVER 0 "$(grep '^POWERIOT_REVERSE_PROXY_CONFIG=' "$base_app_env" | cut -d= -f2-)"
-app up -d --force-recreate backend >/dev/null
+# Leaving bounded smoke also replaces the backend. Rehearsal must restart the
+# static-DNS nginx proxy in the same transition; production ordering remains
+# unchanged and is owned by the production operator path.
+if [ "$mode" = rehearsal ]; then
+  app up -d --force-recreate backend reverse-proxy >/dev/null
+else
+  app up -d --force-recreate backend >/dev/null
+fi
 run_hook "$D6_RESTART_REENTRY_COMMAND"
 run_hook "$D6_FINAL_GATES_COMMAND"
 

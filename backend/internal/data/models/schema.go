@@ -49,14 +49,16 @@ type Shop struct {
 
 // User 使用者 (對應 basic.employee 概念)
 type User struct {
-	ID            uint   `gorm:"primaryKey"`
-	Account       string `gorm:"uniqueIndex;size:50;not null"`
-	PasswordHash  string `gorm:"not null"`
-	Name          string `gorm:"size:50;not null"`
-	Email         string `gorm:"size:100"`
-	Phone         string `gorm:"size:20"`
-	IsAdmin       bool   `gorm:"default:false"`
-	CurrentShopID *uint  `gorm:"index"`
+	ID           uint   `gorm:"primaryKey"`
+	Account      string `gorm:"uniqueIndex;size:50;not null"`
+	PasswordHash string `gorm:"not null"`
+	Name         string `gorm:"size:50;not null"`
+	Email        string `gorm:"size:100"`
+	Phone        string `gorm:"size:20"`
+	IsAdmin      bool   `gorm:"default:false"`
+	// AuthEnabled maps directly to users.auth_enabled and defaults closed.
+	AuthEnabled   bool  `gorm:"column:auth_enabled;not null;default:false"`
+	CurrentShopID *uint `gorm:"index"`
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 

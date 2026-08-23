@@ -20,7 +20,7 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | Admin Auth/JWT | 🕒 Planned |
 | Public Admin HTTP API | 🕒 Planned |
-| Flutter real Backend integration | ⚠️ Partial |
+| Flutter real Backend integration | ✅ Development/runtime/E2E verified |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
 | Production hardening | 🕒 Planned |
 
@@ -38,7 +38,7 @@ Physical Device / Device Simulator
       PostgreSQL + TimescaleDB
 
 Flutter App
-     ↓ planned/current HTTPS API boundary
+     ↓ current HTTP API boundary
   Go Backend
 ```
 
@@ -131,9 +131,18 @@ cd backend
 set -a
 . ../.env
 set +a
+APP_ENV=development \
+DEVSEED_ENABLE=true \
+DEVSEED_PASSWORD='<redacted/runtime input>' \
 MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt \
   go run ./cmd/devseed --device-mac AABBCCDDEEFF --device-name test-meter-01
 ```
+
+`DEVSEED_PASSWORD` must be supplied as a runtime secret. Do not place a real password, password hash, or token in tracked files.
+
+### Trusted proxy client-IP configuration
+
+The backend reads the optional `TRUSTED_PROXY_CIDRS` environment variable as a comma-separated list of exact trusted reverse-proxy CIDRs. When it is empty or unset, the server uses direct-peer-only semantics: `X-Forwarded-For` and `Forwarded` are ignored from untrusted peers. Reverse-proxy operators must explicitly set the exact CIDR(s) for their deployment; malformed or trust-all CIDRs fail startup closed. No production CIDR value is supplied by this repository or this change.
 
 ## Device Simulator
 
@@ -185,7 +194,7 @@ dart format --output=none --set-exit-if-changed .
 
 ## Mobile
 
-Flutter UI/scaffold 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。目前主要資料仍是 mock；真實 Backend、Auth/token、離線快取、BLE provisioning 與 QR flow 尚未完成。因此 Mobile 與 Backend 的 end-to-end integration 仍屬 partial。
+Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard，以及由 dashboard 資料驅動的 Device Management。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。這不代表 production deployment/readiness、physical hardware validation，或 I1-B daily/monthly energy/carbon aggregation 已完成。Dashboard 數值目前透過重新進入或手動 refresh 取得新資料，尚未實作 automatic polling；BLE provisioning、QR flow 與離線快取仍未完成。
 
 ## Firmware Boundary
 

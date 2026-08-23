@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:device_preview/device_preview.dart'; // 引入套件
 import 'package:power_iot_app/config/router.dart';
 import 'package:power_iot_app/config/theme.dart';
+import 'package:power_iot_app/features/auth/auth_controller.dart';
+import 'package:go_router/go_router.dart';
 
 void main() {
   runApp(
@@ -24,6 +26,30 @@ class PowerIoTApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    try {
+      // Preserve an embedding app's overrides (including fake auth clients).
+      ProviderScope.containerOf(context, listen: false);
+      return const _PowerIoTAppView();
+    } on StateError {
+      // The standalone widget test and embedders without a scope still get a
+      // complete app instead of a provider lookup failure.
+      return const ProviderScope(child: _PowerIoTAppView());
+    }
+  }
+}
+
+class _PowerIoTAppView extends ConsumerWidget {
+  const _PowerIoTAppView();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen(authControllerProvider, (previous, next) {
+      if (previous?.isAuthenticated == true && !next.isAuthenticated) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (context.mounted) context.go('/login');
+        });
+      }
+    });
     return MaterialApp.router(
       title: 'Power IoT System',
       debugShowCheckedModeBanner: false,
@@ -38,7 +64,7 @@ class PowerIoTApp extends StatelessWidget {
       theme: AppTheme.lightTheme,
 
       // 套用 GoRouter 路由配置
-      routerConfig: routerConfig,
+      routerConfig: ref.watch(routerProvider),
     );
   }
 }
