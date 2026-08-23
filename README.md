@@ -18,7 +18,8 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | Telemetry deduplication / ACK | ✅ Verified |
 | MeasurementPoint / DeviceAssignment | ✅ Implemented |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
-| Admin Auth/JWT | 🕒 Planned |
+| User authentication/session/JWT | ✅ Development implemented / verified |
+| Admin mutation authorization | 🕒 Planned |
 | Public Admin HTTP API | 🕒 Planned |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
@@ -204,7 +205,7 @@ ESP8266 / HLW8032 firmware 由獨立專案維護。本 repository 提供 system-
 
 目前適合 development/local system integration，不應直接視為 production deployment。正式環境仍需要：
 
-- Auth/API security boundary
+- production Auth/API security hardening
 - credential、MQTT ACL 與 certificate lifecycle
 - backup/restore 與 disaster recovery rehearsal
 - observability、capacity/load validation
