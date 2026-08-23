@@ -59,8 +59,9 @@ func TestAdminFirstDeviceLockBlocksTelemetryUntilCommit(t *testing.T) {
 	}
 	ingestor.afterDeviceLock = func() error { close(telemetryDeviceLocked); return nil }
 	telemetryDone := make(chan error, 1)
+	energyDelta := 0.001
 	go func() {
-		result, err := ingestor.Ingest(MqttPayload{MacAddress: fixture.first.MacAddress, Timestamp: start.Add(10 * time.Minute).Unix(), ProtocolVersion: 1, BootID: "admin-first", BootCounter: 11, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 1}, time.Now().UTC().Add(time.Minute))
+		result, err := ingestor.Ingest(MqttPayload{MacAddress: fixture.first.MacAddress, Timestamp: start.Add(10 * time.Minute).Unix(), ProtocolVersion: 1, BootID: "admin-first", BootCounter: 11, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 1, EnergyDeltaKwh: &energyDelta}, time.Now().UTC().Add(time.Minute))
 		if err != nil || result.Status != IngestStored {
 			telemetryDone <- fmt.Errorf("telemetry result=%+v err=%v", result, err)
 			return
@@ -154,8 +155,9 @@ func TestTelemetryFirstDeviceLockSerializesAdminTransition(t *testing.T) {
 	}
 	telemetryDone := make(chan error, 1)
 	future := time.Now().UTC().Add(time.Hour)
+	energyDelta := 0.001
 	go func() {
-		result, err := ingestor.Ingest(MqttPayload{MacAddress: fixture.first.MacAddress, Timestamp: future.Unix(), ProtocolVersion: 1, BootID: "lock-test", BootCounter: 9, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 1}, time.Now().UTC())
+		result, err := ingestor.Ingest(MqttPayload{MacAddress: fixture.first.MacAddress, Timestamp: future.Unix(), ProtocolVersion: 1, BootID: "lock-test", BootCounter: 9, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 1, EnergyDeltaKwh: &energyDelta}, time.Now().UTC())
 		if err != nil || result.Status != IngestStored {
 			telemetryDone <- fmt.Errorf("telemetry result=%+v err=%v", result, err)
 			return

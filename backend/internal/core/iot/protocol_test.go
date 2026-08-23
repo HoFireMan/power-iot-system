@@ -2,6 +2,7 @@ package iot
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,39 @@ func TestDecodeProtocolV1Telemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.ProtocolVersion != 1 || payload.BootCounter != 7 || payload.Sequence != 123 {
+	if payload.ProtocolVersion != 1 || payload.BootCounter != 7 || payload.Sequence != 123 || payload.EnergyDeltaKwh == nil || *payload.EnergyDeltaKwh != 0.00238 {
 		t.Fatalf("unexpected v1 payload: %+v", payload)
+	}
+}
+
+func TestDecodeProtocolV1AcceptsExplicitZeroEnergyDelta(t *testing.T) {
+	payload, err := DecodeTelemetry([]byte(`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":110,"kwh":12,"ts":1786021200,"protocol_version":1,"boot_counter":7,"seq":123,"energy_delta_kwh":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.EnergyDeltaKwh == nil || *payload.EnergyDeltaKwh != 0 {
+		t.Fatalf("explicit zero was not preserved: %+v", payload)
+	}
+}
+
+func TestDecodeProtocolV1RequiresExplicitNonNullEnergyDelta(t *testing.T) {
+	base := `{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":110,"kwh":12,"ts":1786021200,"protocol_version":1,"boot_counter":7,"seq":123}`
+	for _, input := range []string{
+		base,
+		strings.Replace(base, `,"protocol_version"`, `,"energy_delta_kwh":null,"protocol_version"`, 1),
+	} {
+		if _, err := DecodeTelemetry([]byte(input)); err == nil {
+			t.Fatalf("accepted missing/null v1 energy delta: %s", input)
+		}
+	}
+}
+
+func TestDecodeProtocolV1RejectsEnergyDeltaOutsideRange(t *testing.T) {
+	base := `{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":110,"kwh":12,"ts":1786021200,"protocol_version":1,"boot_counter":7,"seq":123,"energy_delta_kwh":%s}`
+	for _, value := range []string{"-0.001", "10000"} {
+		if _, err := DecodeTelemetry([]byte(fmt.Sprintf(base, value))); err == nil {
+			t.Errorf("accepted invalid v1 energy delta %s", value)
+		}
 	}
 }
 
@@ -32,6 +64,7 @@ func TestDecodeRejectsUnsafeNumbers(t *testing.T) {
 		`{"mac":"AABBCCDDEEFF","v":NaN,"c":1,"p":1,"kwh":1,"ts":1}`,
 		`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":1,"kwh":-1,"ts":1}`,
 		`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":1,"kwh":1,"ts":1,"protocol_version":1,"boot_counter":1,"seq":1,"rssi":-151}`,
+		`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":1,"kwh":1,"ts":1,"protocol_version":1,"boot_counter":1,"seq":1,"energy_delta_kwh":Infinity}`,
 	}
 	for _, input := range cases {
 		if _, err := DecodeTelemetry([]byte(input)); err == nil {
@@ -40,6 +73,19 @@ func TestDecodeRejectsUnsafeNumbers(t *testing.T) {
 	}
 	if _, err := DecodeTelemetry([]byte(`{"mac":"AABBCCDDEEFF","v":1e999,"c":1,"p":1,"kwh":1,"ts":1}`)); err == nil {
 		t.Error("accepted overflow number")
+	}
+}
+
+func TestDecodeRejectsUnknownAndTrailingJSON(t *testing.T) {
+	base := `{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":110,"kwh":12,"ts":1786021200}`
+	for _, input := range []string{
+		strings.Replace(base, `}`, `,"unexpected":true}`, 1),
+		base + ` {"another":true}`,
+		base + ` trailing`,
+	} {
+		if _, err := DecodeTelemetry([]byte(input)); err == nil {
+			t.Errorf("accepted non-strict telemetry JSON: %s", input)
+		}
 	}
 }
 

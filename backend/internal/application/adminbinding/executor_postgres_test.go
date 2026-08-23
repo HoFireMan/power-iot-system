@@ -548,7 +548,8 @@ func TestAdminTelemetrySharedDeviceSerializationAndBoundary(t *testing.T) {
 	// recorded_at through the current assignment. Admin must reject closing it.
 	future := time.Now().UTC().Add(time.Hour)
 	telemetry := iot.NewTelemetryIngestor(db)
-	payload := iot.MqttPayload{MacAddress: fixture.devices[0].MacAddress, Timestamp: future.Unix(), ProtocolVersion: 1, BootID: "test", BootCounter: 1, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 1}
+	energyDelta := 0.001
+	payload := iot.MqttPayload{MacAddress: fixture.devices[0].MacAddress, Timestamp: future.Unix(), ProtocolVersion: 1, BootID: "test", BootCounter: 1, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 1, EnergyDeltaKwh: &energyDelta}
 	stored, err := telemetry.Ingest(payload, time.Now().UTC())
 	if err != nil || stored.Status != iot.IngestStored {
 		t.Fatalf("telemetry-first ingest=%+v err=%v", stored, err)
@@ -565,7 +566,8 @@ func TestAdminTelemetrySharedDeviceSerializationAndBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	delayed := iot.MqttPayload{MacAddress: fixture.devices[1].MacAddress, Timestamp: relocated.EffectiveAt.Add(-time.Minute).Unix(), ProtocolVersion: 1, BootID: "test", BootCounter: 2, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 2}
+	delayedEnergyDelta := 0.001
+	delayed := iot.MqttPayload{MacAddress: fixture.devices[1].MacAddress, Timestamp: relocated.EffectiveAt.Add(-time.Minute).Unix(), ProtocolVersion: 1, BootID: "test", BootCounter: 2, Sequence: 1, Voltage: 110, Current: 1, Power: 110, KwhTotal: 2, EnergyDeltaKwh: &delayedEnergyDelta}
 	stored, err = telemetry.Ingest(delayed, time.Now().UTC().Add(time.Minute))
 	if err != nil || stored.Status != iot.IngestStored {
 		t.Fatalf("delayed telemetry=%+v err=%v", stored, err)

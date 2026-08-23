@@ -57,6 +57,9 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := validatePersistableTelemetry(data); err != nil {
+		return IngestResult{Status: IngestInvalid}, err
+	}
 	if i == nil || i.db == nil {
 		return IngestResult{Status: IngestFailed}, errors.New("database is not configured")
 	}
@@ -148,7 +151,7 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 		}
 
 		measurementPointID := assignment.MeasurementPointID
-		powerFactor, energyDelta := data.PowerFactor, data.EnergyDeltaKwh
+		powerFactor := data.PowerFactor
 		rssi, validSamples, invalidSamples := data.RSSI, data.ValidSamples, data.InvalidSamples
 		reading := domain.PowerReading{
 			Time:               recordedAt,
@@ -161,7 +164,7 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 			Power:              data.Power,
 			ActivePower:        data.Power,
 			KwhTotal:           data.KwhTotal,
-			EnergyDeltaKwh:     &energyDelta,
+			EnergyDeltaKwh:     data.EnergyDeltaKwh,
 			PowerFactor:        &powerFactor,
 			RSSI:               &rssi,
 			ProtocolVersion:    data.ProtocolVersion,
