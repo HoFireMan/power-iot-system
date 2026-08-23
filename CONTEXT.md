@@ -5,107 +5,166 @@ rules are in `AGENTS.md`; public/product documentation remains in `README.md`.
 
 ## Mainline State
 
-- Repository worktree: `/home/admin-195/code/power-iot-system-wt-security-reconciliation`
-- Current integration branch: `work/security-schema-reconciliation`
-- Last implementation checkpoint: `b454fd8de195687d81f9f95e3924fbedae4acd1f`
-- Current integration PR: `#6`
+Canonical repository:
 
-A3 status:
+`/home/admin-195/code/power-iot-system`
 
-- **A3-P1 — Final Enforcement Plan:** FROZEN
-- **A3-D1 — Writer/Startup Gates:** ACCEPTED
-- **A3-D2 — Lifecycle/Readiness Seams:** ACCEPTED
-- **A3-D3 — Dedicated Runner/Recovery:** ACCEPTED
-- **A3-D4 — Protected Continuous Orchestration:** COMPLETE / ACCEPTED
-- **A3-D5 — 000006 + Integration:** COMPLETE / ACCEPTED
-- **A3-D6 SPEC:** APPROVED / FROZEN
-- **A3-D6 PLAN:** APPROVED / FROZEN
-- **A3-D6 IMPLEMENTATION:** COMPLETE
-- **A3-D6 PRODUCTION-SHAPED REHEARSAL:** PASS
-- **A3-D6 PRE-PRODUCTION VALIDATION:** PASS
+Current accepted main HEAD before this closure:
 
-Migration `000006_d4_reconciliation`: **IMPLEMENTED / VERIFIED / ACCEPTED**.
+`459f0f3b121aefe7793d943e9609ac4570d144f2`
 
-Production boundary:
+I3:
 
-- `A3_D6_PRODUCTION_EXECUTION_AUTHORIZED = NO`
+**COMPLETE / ACCEPTED / MERGED TO MAIN**
+
+PR #7:
+
+**MERGED**
+
+PR #7 merge commit:
+
+`459f0f3b121aefe7793d943e9609ac4570d144f2`
+
+Current active feature:
+
+**POST-I3-F1 — Dashboard Auto Refresh**
+
+Active worktree:
+
+`/home/admin-195/code/power-iot-system-wt-dashboard-auto-refresh`
+
+Active branch:
+
+`work/post-i3-dashboard-auto-refresh`
+
+POST-I3-F1 status before this final closure:
+
+**COMPLETE / ACCEPTED**
+
+GIT INTEGRATION at the start of this closure:
+
+**IN PROGRESS**
+
+The authorized closure result is **POST-I3-F1 = COMPLETE / ACCEPTED / MERGED**
+when this feature commit is merged to `main`.
+
+Dashboard refresh contract:
+
+- **NORMAL PRODUCT DEFAULT = 300 seconds**
+- **DEVELOPMENT / E2E OVERRIDE = 10 seconds**
+- **10 seconds is test acceleration only; it is not the product default.**
+
+Actual production/device MQTT telemetry interval:
+
+**UNCONFIRMED**
+
+Do not claim that device telemetry is 300 seconds unless separately established.
+
+Backend current-power freshness remains:
+
+**120 seconds**
+
+Do not alter or reinterpret that contract here.
+
+## Accepted POST-I3-F1 Behavior
+
+- Dashboard automatic refresh is implemented.
+- Polling runs only while the app is resumed and the Dashboard route is visible.
+- Polling stops when the app is backgrounded or the Dashboard route is covered.
+- Dashboard requests do not overlap or backlog.
+- Transient background refresh failures preserve the last successful UI data.
+- Authentication, shop selection, and `null != zero` semantics are preserved.
+- No production deployment or production readiness claim is made.
+
+## Production Boundary
+
+- `PRODUCTION_EXECUTION_AUTHORIZED = NO`
 - `PRODUCTION_TCRFID01_MUTATED = NO`
 - `PRODUCTION_DB_MUTATED = NO`
-- `PRODUCTION_000006_EXECUTED = NO`
 - `PRODUCTION_CUTOVER = NOT_STARTED`
 
-GitHub integration:
+No production deployment is included in this feature closure.
 
-- **PR #6:** OPEN
-- **PR #6 MERGED:** NO
+## Current Agent / Development Policy
 
-Dependency: **D1 + D2 + D3 → D4 → D5 → D6** is complete through D6
-pre-production validation; production execution remains separately authorized.
+Power-IoT feature-development default:
 
-## D2 Delivery Summary (Historical Checkpoint)
+**PROFILE C — Single-Subagent Sequential**
 
-Accepted D2 checkpoint: `64bce24b72f2976e9333e9d853c0c4c78efd139b`
+Development style:
 
-D2 changed:
+**VERTICAL SLICE**
 
-- `backend/internal/data/reconciliation/readiness.go`
-- `backend/internal/data/reconciliation/readiness_test.go`
+Each normal product feature should be implemented end-to-end through the
+relevant layers, typically:
 
-D2 provides:
+domain / contract
+→ backend
+→ API
+→ Flutter frontend
+→ integration
+→ real E2E
 
-- explicit fail-closed lifecycle state handling;
-- protected A2 readiness/admission boundary;
-- v5 cutover readiness predicates;
-- v6 serving readiness predicates;
-- fresh-fact, semantic, and post-commit evidence checks; and
-- denial for dirty, ambiguous, bootstrap, future, missing, and unsupported states.
+Engineering method:
 
-At the historical D2 checkpoint, the following boundaries were preserved:
+**TDD**
 
-- D1 external admission/protected capability;
-- D3 metadata transition, lock, recovery, and UNKNOWN-COMMIT authority;
-- DML/backfill remained excluded; and
-- ownership/Authz redesign remained excluded.
+Design preference:
 
-At that checkpoint, later-phase work was D4 wiring/integration of these
-readiness seams into protected continuous orchestration, followed by D5 and
-D6 delivery under the frozen phase plan. Those later phases are now reflected
-in the current Mainline State above and are not unresolved D2 blockers.
+**DEEP MODULES**
 
-## D3 Status
+Frontend and backend should normally be implemented as one bounded feature
+slice rather than large frontend-only or backend-only batches.
 
-D3-V1 was later reopened by independent ground-truth audit. F003, F005, F007,
-and F013 were repaired, and D3 was re-accepted at
-`2d1bcf32c04af94e57817e5cf84e47a295feff08`.
+Profile A and D are **NOT** normal defaults.
 
-## Current Agent Tooling
+Use another profile only when:
 
-Global Skills:
+- the user explicitly requests it; or
+- a materially exceptional task requires it and that exception is made explicit.
 
-- `model-escalation`
-- `agent-orchestration`
-- `orchestration-profiles`
-- `task-report`
+Model/effort configuration should inherit project/global defaults and should not
+be redundantly repeated in prompts unless the user requests a specific override
+or the task materially requires escalation.
 
-Supported Profiles:
+## Historical A3/D2/D3 Checkpoints
 
-- **A — Fresh Bounded Multi-Agent**
-- **C — Single-Subagent Sequential**
-- **D — Persistent Role Lifecycle**
+The following historical delivery information is retained for traceability.
 
-Profile B is unsupported. Profile selection is user-owned.
+- A3-P1 final enforcement plan: **FROZEN**.
+- A3-D1 writer/startup gates: **ACCEPTED**.
+- A3-D2 lifecycle/readiness seams: **ACCEPTED**.
+- A3-D3 dedicated runner/recovery: **ACCEPTED** after independent ground-truth
+  audit repairs.
+- A3-D4 protected continuous orchestration: **COMPLETE / ACCEPTED**.
+- A3-D5 migration `000006` and integration: **COMPLETE / ACCEPTED**.
+- A3-D6 specification and plan: **APPROVED / FROZEN**.
+- A3-D6 implementation and production-shaped rehearsal: **COMPLETE / PASS**.
+- A3-D6 pre-production validation: **PASS**.
 
-Recent mainline execution:
+Historical accepted checkpoints:
 
-- A3-D3-R2 used Profile C.
-- A3-D2 used Profile C.
+- D2: `64bce24b72f2976e9333e9d853c0c4c78efd139b`
+- D3 re-acceptance: `2d1bcf32c04af94e57817e5cf84e47a295feff08`
 
-These historical selections are not a permanent Power-IoT default. Power-IoT
-currently has no permanent A/C/D default unless the user explicitly sets one
-later.
+D2 preserved the external admission boundary, D3 metadata transition/lock/
+recovery authority, and exclusion of DML/backfill and ownership/Authz redesign.
+Those historical phases are complete and are not unresolved blockers for
+POST-I3-F1.
 
-## Documentation Scope
+## GitHub Integration
 
-The current changes concern internal mainline progress and agent execution
-policy, not public product usage, installation, or product architecture.
-Therefore `README_UPDATE_REQUIRED = NO` for this synchronization.
+- PR #6 security reconciliation: historical phase, no longer the active phase.
+- PR #7 frontend/backend integration: **MERGED** as the I3 merge commit above.
+- POST-I3-F1 feature PR: created by this authorized closure and targeted at
+  `main`.
+
+## Documentation and Scope Boundary
+
+The dashboard polling contract is documented in `README.md`. This context file
+records internal mainline progress and agent execution policy; it does not
+expand the accepted feature or authorize production activity.
+
+Never read or stage:
+
+`infrastructure/firmware/certs/ota.key`

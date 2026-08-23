@@ -194,7 +194,7 @@ dart format --output=none --set-exit-if-changed .
 
 ## Mobile
 
-Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard，以及由 dashboard 資料驅動的 Device Management。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。這不代表 production deployment/readiness、physical hardware validation，或 I1-B daily/monthly energy/carbon aggregation 已完成。Dashboard 數值目前透過重新進入或手動 refresh 取得新資料，尚未實作 automatic polling；BLE provisioning、QR flow 與離線快取仍未完成。
+Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard，以及由 dashboard 資料驅動的 Device Management。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。這不代表 production deployment/readiness、physical hardware validation，或 I1-B daily/monthly energy/carbon aggregation 已完成。Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
 
 ## Firmware Boundary
 

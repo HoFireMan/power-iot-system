@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/admin_overview_screen.dart';
@@ -8,6 +9,7 @@ import 'package:power_iot_app/features/admin/presentation/screens/replace_device
 import 'package:power_iot_app/features/admin/presentation/screens/unbind_device_screen.dart';
 import 'package:power_iot_app/features/auth/auth_controller.dart';
 import 'package:power_iot_app/features/auth/screens/login_screen.dart';
+import 'package:power_iot_app/features/dashboard/dashboard_route_observer.dart';
 import 'package:power_iot_app/features/dashboard/dashboard_screen.dart';
 import 'package:power_iot_app/features/devices/presentation/screens/device_alert_screen.dart';
 import 'package:power_iot_app/features/devices/presentation/screens/device_list_screen.dart';
@@ -24,12 +26,11 @@ final routerProvider = Provider<GoRouter>((ref) {
 GoRouter createRouter(AuthController auth) => GoRouter(
       initialLocation: '/login',
       refreshListenable: auth,
+      observers: <NavigatorObserver>[dashboardRouteObserver],
       redirect: (context, state) => authRedirect(auth, state.uri.path),
       routes: [
         GoRoute(
-          path: '/login',
-          builder: (context, state) => const LoginScreen(),
-        ),
+            path: '/login', builder: (context, state) => const LoginScreen()),
         GoRoute(
           path: '/dashboard',
           builder: (context, state) => const DashboardScreen(),

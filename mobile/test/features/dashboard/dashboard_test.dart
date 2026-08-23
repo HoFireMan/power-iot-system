@@ -6,6 +6,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:power_iot_app/config/dashboard_poll_config.dart';
+import 'package:power_iot_app/features/dashboard/dashboard_route_observer.dart';
 import 'package:power_iot_app/core/network/authenticated_http_client.dart';
 import 'package:power_iot_app/core/network/remote_error.dart';
 import 'package:power_iot_app/features/auth/auth_controller.dart';
@@ -284,6 +286,285 @@ void main() {
     expect(find.text('最後連線未知'), findsNWidgets(2));
   });
 
+  test('poll config accepts only positive integer overrides', () {
+    expect(dashboardPollDuration().inSeconds, dashboardDefaultPollSeconds);
+    expect(dashboardPollDuration(rawSeconds: '7').inSeconds, 7);
+    expect(dashboardPollDuration(rawSeconds: '0').inSeconds,
+        dashboardDefaultPollSeconds);
+    expect(dashboardPollDuration(rawSeconds: '-2').inSeconds,
+        dashboardDefaultPollSeconds);
+  });
+
+  test('notifier fetches immediately and refreshes on a periodic tick',
+      () async {
+    final repository = _QueueRepository([
+      Future.value(_dashboard(power: 1)),
+      Future.value(_dashboard(power: 2)),
+    ]);
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    expect(repository.calls, 1);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    expect(timers.created.single.duration, const Duration(seconds: 3));
+    timers.created.single.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.calls, 2);
+    expect(notifier.state.data?.currentPowerW, 2);
+    notifier.dispose();
+  });
+
+  test('background success and error preserve the last successful data',
+      () async {
+    final repository = _CallbackRepository((call) async {
+      if (call == 3) throw StateError('offline');
+      return _dashboard(power: call.toDouble());
+    });
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    timers.created.single.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(notifier.state.data?.currentPowerW, 2);
+    timers.created.single.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(notifier.state.status, DashboardStatus.success);
+    expect(notifier.state.data?.currentPowerW, 2);
+    expect(notifier.state.error, isA<StateError>());
+    notifier.dispose();
+  });
+
+  test('periodic ticks do not overlap or backlog requests', () async {
+    final repository = _ControlledRepository();
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    expect(repository.pending, hasLength(1));
+    repository.completeNext(_dashboard(power: 1));
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    timers.created.single.fire();
+    timers.created.single.fire();
+    expect(repository.calls, 2);
+    repository.completeNext(_dashboard(power: 2));
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.calls, 2);
+    timers.created.single.fire();
+    expect(repository.calls, 3);
+    notifier.dispose();
+  });
+
+  test('route reveal while paused waits for resume before stale refresh',
+      () async {
+    var now = DateTime.utc(2026, 1, 1);
+    final repository = _QueueRepository([
+      Future.value(_dashboard(power: 1)),
+      Future.value(_dashboard(power: 2)),
+    ]);
+    final notifier = _notifier(
+      repository,
+      clock: () => now,
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.calls, 1);
+
+    notifier.setAppLifecycleState(AppLifecycleState.paused);
+    now = now.add(const Duration(seconds: 3));
+    notifier.setRouteVisible(true);
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.calls, 1);
+
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.calls, 2);
+    expect(notifier.state.data?.currentPowerW, 2);
+    notifier.dispose();
+  });
+
+  test('lifecycle and route visibility stop and safely resume polling',
+      () async {
+    final repository = _QueueRepository([
+      Future.value(_dashboard()),
+      Future.value(_dashboard(power: 2)),
+      Future.value(_dashboard(power: 3)),
+    ]);
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    final firstTimer = timers.created.single;
+    notifier.setAppLifecycleState(AppLifecycleState.paused);
+    firstTimer.fire();
+    expect(repository.calls, 1);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    notifier.setRouteVisible(false);
+    final secondTimer = timers.created.last;
+    secondTimer.fire();
+    expect(repository.calls, 1);
+    notifier.setRouteVisible(true);
+    timers.created.last.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.calls, 2);
+    notifier.dispose();
+  });
+
+  testWidgets(
+      'covered stale resumed dashboard does not fetch before route is hidden',
+      (tester) async {
+    var now = DateTime.utc(2026, 1, 1);
+    final repository = _QueueRepository([Future.value(_dashboard())]);
+    final timers = _ManualTimers();
+    final notifier = _notifier(
+      repository,
+      clock: () => now,
+      timerFactory: timers.create,
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          shopsRepositoryProvider.overrideWithValue(
+              _ShopsRepository(() async => const ShopsSnapshot(shops: [
+                    Shop(
+                      id: '7',
+                      code: 'S7',
+                      name: 'Remote Shop',
+                      address: null,
+                      phone: null,
+                      isHead: false,
+                    ),
+                  ], currentShopId: '7'))),
+          dashboardProvider('7').overrideWith((ref) => notifier),
+        ],
+        child: MaterialApp(
+          navigatorObservers: [dashboardRouteObserver],
+          home: const DashboardScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(timers.created, hasLength(1));
+    final dashboardContext = tester.element(find.byType(DashboardScreen));
+    now = now.add(const Duration(seconds: 3));
+
+    Navigator.of(dashboardContext).push(
+      MaterialPageRoute<void>(builder: (_) => const SizedBox()),
+    );
+    await tester.pumpAndSettle();
+    expect(repository.calls, 1);
+    expect(timers.created.single.isActive, isFalse);
+
+    Navigator.of(dashboardContext).pop();
+    await tester.pumpAndSettle();
+    expect(timers.created, hasLength(2));
+    expect(timers.created.last.isActive, isTrue);
+
+    await tester.pumpWidget(const SizedBox());
+    expect(timers.created.last.isActive, isFalse);
+  });
+
+  test('inactive, paused, detached, and hidden lifecycle states stop polling',
+      () async {
+    final repository = _QueueRepository([Future.value(_dashboard())]);
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    final timer = timers.created.single;
+
+    for (final lifecycleState in <AppLifecycleState>[
+      AppLifecycleState.inactive,
+      AppLifecycleState.paused,
+      AppLifecycleState.detached,
+      AppLifecycleState.hidden,
+    ]) {
+      notifier.setAppLifecycleState(lifecycleState);
+      expect(timer.isActive, isFalse);
+      timer.fire();
+      expect(repository.calls, 1);
+      notifier.setAppLifecycleState(AppLifecycleState.resumed);
+      notifier.setRouteVisible(false);
+      notifier.setRouteVisible(true);
+    }
+
+    notifier.dispose();
+  });
+
+  test('unauthorized polling cannot restart on later visibility changes',
+      () async {
+    final repository = _CallbackRepository((call) async {
+      if (call == 2) throw const UnauthorizedException();
+      return _dashboard();
+    });
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    final timer = timers.created.single;
+    timer.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(notifier.state.status, DashboardStatus.unauthorized);
+    expect(timers.created, hasLength(1));
+
+    notifier.setRouteVisible(false);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.paused);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    expect(timers.created, hasLength(1));
+    expect(timer.isActive, isFalse);
+    notifier.dispose();
+  });
+
+  test('shop notifier instances remain isolated and dispose safely', () async {
+    final firstRepository = _ControlledRepository();
+    final secondRepository = _ControlledRepository();
+    final first = _notifier(firstRepository, shopId: 'first');
+    final second = _notifier(secondRepository, shopId: 'second');
+    first.dispose();
+    firstRepository.completeNext(_dashboard(power: 1));
+    secondRepository.completeNext(_dashboard(power: 2));
+    await Future<void>.delayed(Duration.zero);
+    expect(second.state.data?.currentPowerW, 2);
+    expect(firstRepository.shopIds, ['first']);
+    expect(secondRepository.shopIds, ['second']);
+    second.dispose();
+  });
+
+  test('unauthorized background refresh stops polling', () async {
+    final repository = _CallbackRepository((call) async {
+      if (call == 2) throw const UnauthorizedException();
+      return _dashboard();
+    });
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    final timer = timers.created.single;
+    timer.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(notifier.state.status, DashboardStatus.unauthorized);
+    expect(timer.isActive, isFalse);
+    notifier.dispose();
+  });
+
+  test('timer is canceled when notifier is disposed', () async {
+    final repository = _QueueRepository([Future.value(_dashboard())]);
+    final timers = _ManualTimers();
+    final notifier = _notifier(repository, timerFactory: timers.create);
+    await Future<void>.delayed(Duration.zero);
+    notifier.setRouteVisible(true);
+    notifier.setAppLifecycleState(AppLifecycleState.resumed);
+    final timer = timers.created.single;
+    notifier.dispose();
+    expect(timer.isActive, isFalse);
+  });
+
   testWidgets(
       'dashboard does not fabricate a first shop when selection is absent',
       (tester) async {
@@ -334,4 +615,99 @@ class _ShopsRepository implements ShopsRepository {
 
   @override
   Future<ShopsSnapshot> fetchShops() => callback();
+}
+
+DashboardNotifier _notifier(
+  DashboardRepository repository, {
+  String shopId = '7',
+  DashboardClock? clock,
+  DashboardTimerFactory? timerFactory,
+}) {
+  final store = _Store();
+  final client = _client(_Adapter((_) async => _json(204, {})), store);
+  return DashboardNotifier(
+    repository,
+    client,
+    shopId,
+    pollInterval: const Duration(seconds: 3),
+    clock: clock,
+    timerFactory: timerFactory,
+  );
+}
+
+class _QueueRepository implements DashboardRepository {
+  _QueueRepository(this.responses);
+  final List<Future<Dashboard>> responses;
+  var calls = 0;
+
+  @override
+  Future<Dashboard> fetchDashboard(String shopId) {
+    calls++;
+    if (responses.isEmpty) return Future.value(_dashboard());
+    return responses.removeAt(0);
+  }
+}
+
+class _CallbackRepository implements DashboardRepository {
+  _CallbackRepository(this.callback);
+  final Future<Dashboard> Function(int call) callback;
+  var calls = 0;
+
+  @override
+  Future<Dashboard> fetchDashboard(String shopId) => callback(++calls);
+}
+
+class _ControlledRepository implements DashboardRepository {
+  final pending = <Completer<Dashboard>>[];
+  final shopIds = <String>[];
+  var calls = 0;
+
+  @override
+  Future<Dashboard> fetchDashboard(String shopId) {
+    calls++;
+    shopIds.add(shopId);
+    final completer = Completer<Dashboard>();
+    pending.add(completer);
+    return completer.future;
+  }
+
+  void completeNext(Dashboard dashboard) {
+    pending.removeAt(0).complete(dashboard);
+  }
+}
+
+class _ManualTimers {
+  final created = <_ManualTimer>[];
+
+  Timer create(Duration duration, void Function(Timer) callback) {
+    final timer = _ManualTimer(duration, callback);
+    created.add(timer);
+    return timer;
+  }
+}
+
+class _ManualTimer implements Timer {
+  _ManualTimer(this.duration, this.callback);
+
+  final Duration duration;
+  final void Function(Timer) callback;
+  var _active = true;
+  var _tick = 0;
+
+  void fire() {
+    if (!_active) return;
+    _tick++;
+    callback(this);
+  }
+
+  @override
+  bool get isActive => _active;
+
+  @override
+  int get tick => _tick;
+
+  @override
+  void cancel() {
+    _active = false;
+  }
 }
