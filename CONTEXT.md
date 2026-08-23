@@ -9,9 +9,20 @@ Canonical repository:
 
 `/home/admin-195/code/power-iot-system`
 
-Current accepted main HEAD:
+Live canonical Git HEAD is authoritative in Git and is intentionally not
+maintained as a hardcoded SHA in this document. Obtain it from the canonical
+repository with `git rev-parse main`.
+
+Last accepted product implementation merge/checkpoint:
 
 `05d9ccd7caaa8015943eea8dd9564e3942bef83f`
+
+Documentation/status reconciliation baseline before this task:
+
+`eb60b8288c1bc4ba69af9379db728f984a9febb2`
+
+A documentation-only merge may advance the live Git HEAD without changing the
+last accepted product implementation checkpoint above.
 
 I3:
 
