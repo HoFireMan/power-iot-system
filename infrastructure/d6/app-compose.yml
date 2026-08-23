@@ -35,6 +35,8 @@ services:
       MQTT_CA_FILE: /run/poweriot/secrets/mqtt-ca.crt
       MQTT_USERNAME_FILE: /run/poweriot/secrets/mqtt-username
       MQTT_PASSWORD_FILE: /run/poweriot/secrets/mqtt-password
+      JWT_ACTIVE_KID: ${JWT_ACTIVE_KID:?set host-managed JWT active key identifier}
+      JWT_ACTIVE_PRIVATE_KEY_FILE: ${JWT_ACTIVE_PRIVATE_KEY_FILE:?set container JWT active private key path}
       D6_SECRET_SOURCE: HOST_MANAGED_EXTERNALLY_INJECTED_RESTRICTED_SECRETS
     volumes:
       - ${POWERIOT_BACKEND_SECRET_DIR:?set restricted host secret directory}:/run/poweriot/secrets:ro

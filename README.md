@@ -131,9 +131,14 @@ cd backend
 set -a
 . ../.env
 set +a
+APP_ENV=development \
+DEVSEED_ENABLE=true \
+DEVSEED_PASSWORD='<redacted/runtime input>' \
 MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt \
   go run ./cmd/devseed --device-mac AABBCCDDEEFF --device-name test-meter-01
 ```
+
+`DEVSEED_PASSWORD` must be supplied as a runtime secret. Do not place a real password, password hash, or token in tracked files.
 
 ## Device Simulator
 

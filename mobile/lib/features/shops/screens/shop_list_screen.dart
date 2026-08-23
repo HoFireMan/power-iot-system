@@ -3,16 +3,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/config/theme.dart';
-import 'package:power_iot_app/features/shops/providers/shop_provider.dart';
+import 'package:power_iot_app/features/shops/domain/models/shop.dart' as remote;
+import 'package:power_iot_app/features/profile/presentation/providers/profile_provider.dart';
+import 'package:power_iot_app/features/shops/providers/remote_shop_provider.dart';
 
 class ShopListScreen extends ConsumerWidget {
   const ShopListScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final shopState = ref.watch(shopProvider);
-    final shops = shopState.availableShops;
-    final currentShopId = shopState.currentShop.id;
+    final shopState = ref.watch(shopsProvider);
+    final snapshot = shopState.data;
+    final shops = snapshot?.shops ?? const <remote.Shop>[];
+    // The server preference is authoritative. A temporary view choice remains
+    // separate and is never sent as an authorization signal.
+    final currentShopId = shopState.selectedShopId ?? snapshot?.currentShopId;
 
     return Scaffold(
       appBar: AppBar(
@@ -22,63 +27,94 @@ class ShopListScreen extends ConsumerWidget {
         foregroundColor: AppTheme.textPrimary,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
-          onPressed: () => context.go('/dashboard'), // 返回首頁比較直覺
+          onPressed: () => context.pop(),
         ),
       ),
       body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  const Icon(Icons.star_rounded,
-                      color: AppTheme.accentColor, size: 20),
-                  const SizedBox(width: 6),
-                  Text(
-                    "為目前檢視店家",
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey.shade600,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                itemCount: shops.length,
-                itemBuilder: (context, index) {
-                  final shop = shops[index];
-                  final isSelected = shop.id == currentShopId;
-                  return _buildShopCard(context, ref, shop, isSelected);
-                },
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.all(16),
-              alignment: Alignment.center,
-              child: Text(
-                shopState.isAdmin ? "管理員模式：顯示所有已註冊店家" : "使用者模式：僅顯示您已綁定的店家",
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
-              ),
-            ),
-          ],
-        ),
+        child: _buildBody(context, ref, shopState, shops, currentShopId),
       ),
-      // 這裡使用了統一的導航欄邏輯
+      // The selection above is intentionally view-only; dashboard data is not
+      // loaded or authorized by this screen.
       bottomNavigationBar: _buildBottomNav(context),
     );
   }
 
+  Widget _buildBody(
+    BuildContext context,
+    WidgetRef ref,
+    ShopsState shopState,
+    List<remote.Shop> shops,
+    String? currentShopId,
+  ) {
+    if (shopState.status == RemoteStatus.loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (shopState.status == RemoteStatus.unauthorized) {
+      return const Center(child: Text('登入已失效，請重新登入'));
+    }
+    if (shopState.status == RemoteStatus.error) {
+      return Center(
+        child: OutlinedButton(
+          onPressed: () => ref.read(shopsProvider.notifier).load(),
+          child: const Text('載入店家失敗，重試'),
+        ),
+      );
+    }
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              const Icon(Icons.star_rounded,
+                  color: AppTheme.accentColor, size: 20),
+              const SizedBox(width: 6),
+              Text(
+                '目前檢視店家（僅限已授權店家）',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: shops.isEmpty
+              ? const Center(child: Text('目前沒有可用店家'))
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  itemCount: shops.length,
+                  itemBuilder: (context, index) {
+                    final shop = shops[index];
+                    return _buildShopCard(
+                      context,
+                      ref,
+                      shop,
+                      shop.id == currentShopId,
+                    );
+                  },
+                ),
+        ),
+        Container(
+          padding: const EdgeInsets.all(16),
+          alignment: Alignment.center,
+          child: Text(
+            '僅顯示伺服器授權的店家',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildShopCard(
-      BuildContext context, WidgetRef ref, Shop shop, bool isSelected) {
+      BuildContext context, WidgetRef ref, remote.Shop shop, bool isSelected) {
     return GestureDetector(
       onTap: () {
-        ref.read(shopProvider.notifier).selectShop(shop.id);
+        ref.read(shopsProvider.notifier).selectShop(shop.id);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text("已切換至：${shop.name}"),
@@ -86,9 +122,6 @@ class ShopListScreen extends ConsumerWidget {
             backgroundColor: AppTheme.primaryColor,
           ),
         );
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (context.mounted) context.go('/dashboard');
-        });
       },
       child: Container(
         margin: const EdgeInsets.only(bottom: 16),
@@ -188,7 +221,7 @@ class ShopListScreen extends ConsumerWidget {
                             const SizedBox(width: 4),
                             Expanded(
                               child: Text(
-                                shop.address,
+                                shop.address ?? '未提供地址',
                                 style: TextStyle(
                                     fontSize: 13, color: Colors.grey.shade600),
                                 maxLines: 1,

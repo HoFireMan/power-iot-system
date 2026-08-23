@@ -1,75 +1,104 @@
-// #C:\Code\PowerWork\power-iot-system\mobile\lib\features\devices\screens\device_list_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/config/theme.dart';
+import 'package:power_iot_app/features/dashboard/domain/models/dashboard.dart';
+import 'package:power_iot_app/features/dashboard/presentation/providers/dashboard_provider.dart';
+import 'package:power_iot_app/features/profile/presentation/providers/profile_provider.dart';
+import 'package:power_iot_app/features/shops/providers/remote_shop_provider.dart';
 
-class DeviceListScreen extends StatelessWidget {
+/// Device Management renders the device projection already authorized by B7.
+/// It deliberately has no device-specific repository or local fixture source.
+class DeviceListScreen extends ConsumerWidget {
   const DeviceListScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final shopsState = ref.watch(shopsProvider);
+    final snapshot = shopsState.data;
+    final shopId = shopsState.selectedShopId ?? snapshot?.currentShopId;
+
+    Widget body;
+    if (shopsState.status == RemoteStatus.loading) {
+      body = const Center(child: CircularProgressIndicator());
+    } else if (shopsState.status == RemoteStatus.unauthorized) {
+      body = const _Message('登入狀態已失效，請重新登入');
+    } else if (shopsState.status == RemoteStatus.error) {
+      body = _RetryMessage(
+        message: '目前無法取得店家資料',
+        onRetry: () => ref.read(shopsProvider.notifier).load(),
+      );
+    } else if (shopId == null || shopId.trim().isEmpty) {
+      body = const _Message('尚未選擇店家');
+    } else {
+      final dashboardState = ref.watch(dashboardProvider(shopId));
+      body = _dashboardBody(context, dashboardState, shopId, ref);
+    }
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text("設備管理"),
+        title: const Text('設備管理'),
         centerTitle: true,
         backgroundColor: Colors.transparent,
         foregroundColor: AppTheme.textPrimary,
         elevation: 0,
       ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildAllDevicesCard(),
-              const SizedBox(height: 24),
-              _buildSectionTitle("已連線", Colors.green),
-              const SizedBox(height: 12),
-              _buildDeviceCard(
-                context,
-                name: "其他 4AAB 插座",
-                type: "plug",
-                isOnline: true,
-                deviceId: "dev_001",
-              ),
-              const SizedBox(height: 24),
-              _buildSectionTitle("連線中斷", AppTheme.errorColor),
-              const SizedBox(height: 12),
-              _buildDeviceCard(
-                context,
-                name: "冷氣 4682",
-                type: "ac",
-                isOnline: false,
-                deviceId: "dev_002",
-              ),
-              const SizedBox(height: 12),
-              _buildDeviceCard(
-                context,
-                name: "冷氣 610B",
-                type: "ac",
-                isOnline: false,
-                deviceId: "dev_003",
-              ),
-              const SizedBox(height: 12),
-              _buildDeviceCard(
-                context,
-                name: "冷氣 A946",
-                type: "ac",
-                isOnline: false,
-                deviceId: "dev_004",
-              ),
-            ],
-          ),
-        ),
-      ),
+      body: SafeArea(child: body),
       bottomNavigationBar: _buildBottomNav(context),
     );
   }
 
-  // --- UI 元件區 ---
+  Widget _dashboardBody(
+    BuildContext context,
+    DashboardState state,
+    String shopId,
+    WidgetRef ref,
+  ) {
+    switch (state.status) {
+      case DashboardStatus.loading:
+        return const Center(child: CircularProgressIndicator());
+      case DashboardStatus.unauthorized:
+        return const _Message('登入狀態已失效，請重新登入');
+      case DashboardStatus.notFound:
+        return const _Message('目前無法取得此店家的設備資料');
+      case DashboardStatus.error:
+        return _RetryMessage(
+          message: '目前無法取得設備資料',
+          onRetry: () => ref.read(dashboardProvider(shopId).notifier).load(),
+        );
+      case DashboardStatus.success:
+        final dashboard = state.data;
+        if (dashboard == null || dashboard.devices.isEmpty) {
+          return const _Message('目前沒有設備');
+        }
+        return _deviceList(context, dashboard.devices);
+    }
+  }
 
-  Widget _buildAllDevicesCard() {
+  Widget _deviceList(BuildContext context, List<DashboardDevice> devices) {
+    final online = devices.where((device) => device.isOnline).toList();
+    final offline = devices.where((device) => !device.isOnline).toList();
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+      children: [
+        _allDevicesCard(devices.length),
+        if (online.isNotEmpty) ...[
+          const SizedBox(height: 24),
+          _sectionTitle('已連線', Colors.green),
+          const SizedBox(height: 12),
+          ...online.map((device) => _deviceCard(context, device)),
+        ],
+        if (offline.isNotEmpty) ...[
+          const SizedBox(height: 24),
+          _sectionTitle('連線中斷', AppTheme.errorColor),
+          const SizedBox(height: 12),
+          ...offline.map((device) => _deviceCard(context, device)),
+        ],
+      ],
+    );
+  }
+
+  Widget _allDevicesCard(int count) {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -96,7 +125,7 @@ class DeviceListScreen extends StatelessWidget {
           ),
           const SizedBox(width: 16),
           const Text(
-            "所有電器",
+            '所有設備',
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.bold,
@@ -104,55 +133,44 @@ class DeviceListScreen extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          _buildSettingButton(() {}),
+          Text('$count', style: const TextStyle(color: AppTheme.textSecondary)),
         ],
       ),
     );
   }
 
-  Widget _buildSectionTitle(String title, Color color) {
+  Widget _sectionTitle(String title, Color color) {
     return Row(
       children: [
         Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-          ),
-        ),
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
         const SizedBox(width: 8),
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: AppTheme.textSecondary,
-          ),
-        ),
+        Text(title,
+            style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: AppTheme.textSecondary)),
       ],
     );
   }
 
-  Widget _buildDeviceCard(
-    BuildContext context, {
-    required String name,
-    required String type,
-    required bool isOnline,
-    required String deviceId,
-  }) {
+  Widget _deviceCard(BuildContext context, DashboardDevice device) {
+    final canOpenAlert = device.id.trim().isNotEmpty;
     return Container(
+      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: isOnline ? null : Border.all(color: Colors.grey.shade200),
+        border:
+            device.isOnline ? null : Border.all(color: Colors.grey.shade200),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
+              color: Colors.black.withValues(alpha: 0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 4)),
         ],
       ),
       child: Row(
@@ -160,77 +178,49 @@ class DeviceListScreen extends StatelessWidget {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: isOnline
+              color: device.isOnline
                   ? AppTheme.secondaryColor.withValues(alpha: 0.15)
                   : Colors.grey.shade100,
               shape: BoxShape.circle,
             ),
-            child: Icon(
-              _getIcon(type),
-              color: isOnline ? AppTheme.primaryColor : Colors.grey,
-              size: 24,
-            ),
+            child: Icon(Icons.power_rounded,
+                color: device.isOnline ? AppTheme.primaryColor : Colors.grey,
+                size: 24),
           ),
           const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text(device.name,
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: device.isOnline
+                            ? AppTheme.textPrimary
+                            : Colors.grey)),
+                const SizedBox(height: 4),
                 Text(
-                  name,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: isOnline ? AppTheme.textPrimary : Colors.grey,
-                  ),
+                  device.lastSeen == null
+                      ? '最後上線時間未知'
+                      : '最後上線：${device.lastSeen!.toLocal().toIso8601String()}',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
-                if (!isOnline)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 4),
-                    child: Text(
-                      "請檢查電源",
-                      style:
-                          TextStyle(fontSize: 12, color: AppTheme.errorColor),
-                    ),
-                  ),
               ],
             ),
           ),
-          _buildSettingButton(() {
-            context.push('/devices/$deviceId/alert');
-          }),
+          if (canOpenAlert)
+            IconButton(
+              tooltip: '設備詳情',
+              icon: const Icon(Icons.chevron_right_rounded),
+              onPressed: () => context
+                  .push('/devices/${Uri.encodeComponent(device.id)}/alert'),
+            ),
         ],
       ),
     );
   }
 
-  Widget _buildSettingButton(VoidCallback onTap) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(30),
-      child: const Padding(
-        padding: EdgeInsets.all(8.0),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.access_time_filled_rounded,
-                size: 16, color: AppTheme.textSecondary),
-            SizedBox(width: 4),
-            Text(
-              "提醒設定",
-              style: TextStyle(
-                fontSize: 12,
-                color: AppTheme.textSecondary,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // --- 關鍵修正：底部導航欄與 Dashboard 一致 ---
   Widget _buildBottomNav(BuildContext context) {
     return Container(
       margin: const EdgeInsets.only(left: 20, right: 20, bottom: 20),
@@ -240,95 +230,87 @@ class DeviceListScreen extends StatelessWidget {
         borderRadius: BorderRadius.circular(35),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.1),
-            blurRadius: 20,
-            offset: const Offset(0, 10),
-          ),
+              color: Colors.black.withValues(alpha: 0.1),
+              blurRadius: 20,
+              offset: const Offset(0, 10))
         ],
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
-          // 1. 首頁 (跳轉)
           _NavIcon(
               icon: Icons.home_rounded,
               isSelected: false,
-              label: "首頁",
+              label: '首頁',
               onTap: () => context.go('/dashboard')),
-
-          // 2. 設備 (當前頁 isSelected: true)
           _NavIcon(
               icon: Icons.electrical_services_rounded,
               isSelected: true,
-              label: "設備",
+              label: '設備',
               onTap: () {}),
-
-          // 3. 個人 (跳轉)
           _NavIcon(
               icon: Icons.person_rounded,
               isSelected: false,
-              label: "個人",
+              label: '個人',
               onTap: () => context.go('/profile')),
-
-          // 4. 店家 (跳轉) - 加入了這個跳轉逻辑
           _NavIcon(
               icon: Icons.store_rounded,
               isSelected: false,
-              label: "店家",
+              label: '店家',
               onTap: () => context.go('/shops')),
         ],
       ),
     );
   }
-
-  IconData _getIcon(String type) {
-    switch (type) {
-      case 'ac':
-        return Icons.ac_unit_rounded;
-      case 'plug':
-        return Icons.power_rounded;
-      default:
-        return Icons.lightbulb_rounded;
-    }
-  }
 }
 
-// 支援文字標籤的 Icon 元件
-class _NavIcon extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
+class _Message extends StatelessWidget {
+  const _Message(this.text);
+  final String text;
+  @override
+  Widget build(BuildContext context) => Center(child: Text(text));
+}
 
+class _RetryMessage extends StatelessWidget {
+  const _RetryMessage({required this.message, required this.onRetry});
+  final String message;
+  final VoidCallback onRetry;
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(message),
+          const SizedBox(height: 12),
+          OutlinedButton(onPressed: onRetry, child: const Text('重試')),
+        ]),
+      );
+}
+
+class _NavIcon extends StatelessWidget {
   const _NavIcon(
       {required this.icon,
       required this.label,
       required this.isSelected,
       required this.onTap});
-
+  final IconData icon;
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
   @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            icon,
-            color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
-            size: 26,
-          ),
+  Widget build(BuildContext context) => GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(icon,
+              color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
+              size: 26),
           const SizedBox(height: 4),
           Text(label,
               style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                color:
-                    isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
-              )),
-        ],
-      ),
-    );
-  }
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: isSelected
+                      ? AppTheme.primaryColor
+                      : Colors.grey.shade400)),
+        ]),
+      );
 }
