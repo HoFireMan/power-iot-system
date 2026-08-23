@@ -1,24 +1,105 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:power_iot_app/features/dashboard/dashboard_route_observer.dart';
 import 'package:power_iot_app/config/theme.dart';
 import 'package:power_iot_app/features/dashboard/domain/models/dashboard.dart';
 import 'package:power_iot_app/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:power_iot_app/features/shops/providers/remote_shop_provider.dart';
 import 'package:power_iot_app/features/profile/presentation/providers/profile_provider.dart';
 
-class DashboardScreen extends ConsumerWidget {
+class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends ConsumerState<DashboardScreen>
+    with WidgetsBindingObserver, RouteAware {
+  ModalRoute<dynamic>? _route;
+  DashboardNotifier? _notifier;
+  var _routeVisible = true;
+  var _lifecycleState =
+      WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != null && route != _route) {
+      if (_route != null) dashboardRouteObserver.unsubscribe(this);
+      _route = route;
+      dashboardRouteObserver.subscribe(this, route);
+      // A new route starts visible. Do not reset this on every dependency
+      // change: RouteAware.didPushNext must keep covered dashboards stopped.
+      _routeVisible = true;
+    }
+  }
+
+  void _syncNotifier() {
+    final notifier = _notifier;
+    if (notifier == null) return;
+    notifier.setRouteVisible(_routeVisible);
+    notifier.setAppLifecycleState(_lifecycleState);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleState = state;
+    _syncNotifier();
+  }
+
+  @override
+  void didPush() {
+    _routeVisible = true;
+    _syncNotifier();
+  }
+
+  @override
+  void didPopNext() {
+    _routeVisible = true;
+    _syncNotifier();
+  }
+
+  @override
+  void didPushNext() {
+    _routeVisible = false;
+    _syncNotifier();
+  }
+
+  @override
+  void didPop() {
+    _routeVisible = false;
+    _syncNotifier();
+  }
+
+  @override
+  void dispose() {
+    _routeVisible = false;
+    _syncNotifier();
+    if (_route != null) dashboardRouteObserver.unsubscribe(this);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final shopsState = ref.watch(shopsProvider);
     final snapshot = shopsState.data;
     final shopId = shopsState.selectedShopId ?? snapshot?.currentShopId;
 
     if (shopsState.status == RemoteStatus.loading) {
       return _scaffold(
-          context, const Center(child: CircularProgressIndicator()));
+        context,
+        const Center(child: CircularProgressIndicator()),
+      );
     }
     if (shopsState.status == RemoteStatus.unauthorized) {
       return _scaffold(context, const _Message('登入狀態已失效'));
@@ -27,9 +108,17 @@ class DashboardScreen extends ConsumerWidget {
       return _scaffold(context, const _Message('目前無法取得店家資料'));
     }
     if (shopId == null || shopId.trim().isEmpty) {
+      _notifier?.setRouteVisible(false);
+      _notifier = null;
       return _scaffold(context, const _Message('尚未選擇店家'));
     }
 
+    final notifier = ref.read(dashboardProvider(shopId).notifier);
+    if (!identical(_notifier, notifier)) {
+      _notifier?.setRouteVisible(false);
+      _notifier = notifier;
+    }
+    _syncNotifier();
     final dashboardState = ref.watch(dashboardProvider(shopId));
     return _scaffold(
       context,
@@ -80,8 +169,10 @@ class DashboardScreen extends ConsumerWidget {
 }
 
 class _DashboardContent extends StatelessWidget {
-  const _DashboardContent(
-      {required this.dashboard, required this.onSwitchShop});
+  const _DashboardContent({
+    required this.dashboard,
+    required this.onSwitchShop,
+  });
 
   final Dashboard dashboard;
   final VoidCallback onSwitchShop;
@@ -187,8 +278,10 @@ class _PowerCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('即時功率',
-              style: TextStyle(color: Colors.white70, fontSize: 16)),
+          const Text(
+            '即時功率',
+            style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
           const SizedBox(height: 12),
           Text(
             value,
@@ -356,10 +449,11 @@ class _BottomNav extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           _NavIcon(
-              icon: Icons.home_rounded,
-              isSelected: true,
-              label: '首頁',
-              onTap: () {}),
+            icon: Icons.home_rounded,
+            isSelected: true,
+            label: '首頁',
+            onTap: () {},
+          ),
           _NavIcon(
             icon: Icons.electrical_services_rounded,
             isSelected: false,
