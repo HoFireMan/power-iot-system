@@ -9,9 +9,9 @@ Canonical repository:
 
 `/home/admin-195/code/power-iot-system`
 
-Current accepted main HEAD before this closure:
+Current accepted main HEAD:
 
-`459f0f3b121aefe7793d943e9609ac4570d144f2`
+`05d9ccd7caaa8015943eea8dd9564e3942bef83f`
 
 I3:
 
@@ -25,28 +25,37 @@ PR #7 merge commit:
 
 `459f0f3b121aefe7793d943e9609ac4570d144f2`
 
-Current active feature:
+Last completed feature:
 
 **POST-I3-F1 — Dashboard Auto Refresh**
 
-Active worktree:
+Last feature worktree:
 
 `/home/admin-195/code/power-iot-system-wt-dashboard-auto-refresh`
 
-Active branch:
+Last feature branch:
 
 `work/post-i3-dashboard-auto-refresh`
 
-POST-I3-F1 status before this final closure:
+POST-I3-F1 status:
 
-**COMPLETE / ACCEPTED**
+**COMPLETE / ACCEPTED / MERGED TO MAIN**
 
-GIT INTEGRATION at the start of this closure:
+PR #8:
 
-**IN PROGRESS**
+**MERGED**
 
-The authorized closure result is **POST-I3-F1 = COMPLETE / ACCEPTED / MERGED**
-when this feature commit is merged to `main`.
+PR #8 merge commit:
+
+`05d9ccd7caaa8015943eea8dd9564e3942bef83f`
+
+GIT INTEGRATION:
+
+**COMPLETE**
+
+Next active feature:
+
+**NONE / NOT YET SELECTED**
 
 Dashboard refresh contract:
 
@@ -83,7 +92,7 @@ Do not alter or reinterpret that contract here.
 - `PRODUCTION_DB_MUTATED = NO`
 - `PRODUCTION_CUTOVER = NOT_STARTED`
 
-No production deployment is included in this feature closure.
+No production deployment is included in this completed feature.
 
 ## Current Agent / Development Policy
 
@@ -156,8 +165,8 @@ POST-I3-F1.
 
 - PR #6 security reconciliation: historical phase, no longer the active phase.
 - PR #7 frontend/backend integration: **MERGED** as the I3 merge commit above.
-- POST-I3-F1 feature PR: created by this authorized closure and targeted at
-  `main`.
+- PR #8 dashboard auto refresh: **MERGED** to `main` with merge commit
+  `05d9ccd7caaa8015943eea8dd9564e3942bef83f`.
 
 ## Documentation and Scope Boundary
 
