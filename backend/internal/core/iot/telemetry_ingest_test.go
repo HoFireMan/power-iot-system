@@ -3,6 +3,7 @@ package iot
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -102,10 +103,11 @@ func addAssignment(t *testing.T, db *gorm.DB, deviceID uint, pointID uuid.UUID, 
 }
 
 func testPayload(mac string, timestamp int64, boot, sequence int64) MqttPayload {
+	energyDelta := 0.002
 	return MqttPayload{
 		MacAddress: mac, Voltage: 110, Current: 1.2, Power: 132, KwhTotal: 12.3,
 		Timestamp: timestamp, ProtocolVersion: 1, BootID: "boot-1", BootCounter: boot,
-		Sequence: sequence, PowerFactor: 0.98, EnergyDeltaKwh: 0.002, RSSI: -60,
+		Sequence: sequence, PowerFactor: 0.98, EnergyDeltaKwh: &energyDelta, RSSI: -60,
 		ValidSamples: 10, InvalidSamples: 1, FirmwareVersion: "test",
 	}
 }
@@ -193,6 +195,70 @@ func TestTelemetryIngestStoresHistoricalAssignmentAndTimestamps(t *testing.T) {
 		t.Fatalf("protocol fields were not persisted: %+v", reading)
 	}
 }
+
+func TestTelemetryIngestRejectsInvalidProtocolV1EnergyDeltaBeforeTransaction(t *testing.T) {
+	db := openTelemetryIntegrationDB(t)
+	fixture := newTelemetryFixture(t, db)
+	recorded := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	addAssignment(t, db, fixture.first.ID, fixture.point.ID, recorded.Add(-time.Hour), nil)
+	before := fixture.first
+	cases := []struct {
+		name  string
+		delta *float64
+	}{
+		{name: "missing", delta: nil},
+		{name: "negative", delta: float64Pointer(-0.001)},
+		{name: "infinite", delta: float64Pointer(math.Inf(1))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := testPayload(fixture.first.MacAddress, recorded.Unix(), 20, int64(len(tc.name)))
+			payload.EnergyDeltaKwh = tc.delta
+			result, err := NewTelemetryIngestor(db).Ingest(payload, recorded.Add(time.Minute))
+			if err == nil || result.Status != IngestInvalid {
+				t.Fatalf("want invalid ingest, result=%+v err=%v", result, err)
+			}
+			var keys, readings int64
+			if err := db.Model(&domain.TelemetryIngestKey{}).Where("device_id = ?", fixture.first.ID).Count(&keys).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Model(&domain.PowerReading{}).Where("device_id = ?", fixture.first.ID).Count(&readings).Error; err != nil {
+				t.Fatal(err)
+			}
+			var after domain.Device
+			if err := db.First(&after, fixture.first.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if keys != 0 || readings != 0 || after.IsOnline != before.IsOnline || after.LastSeen != nil {
+				t.Fatalf("invalid telemetry mutated persistence: keys=%d readings=%d before=%+v after=%+v", keys, readings, before, after)
+			}
+		})
+	}
+}
+
+func TestTelemetryIngestStoresExplicitZeroEnergyDelta(t *testing.T) {
+	db := openTelemetryIntegrationDB(t)
+	fixture := newTelemetryFixture(t, db)
+	recorded := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	addAssignment(t, db, fixture.first.ID, fixture.point.ID, recorded.Add(-time.Hour), nil)
+	zero := float64(0)
+	payload := testPayload(fixture.first.MacAddress, recorded.Unix(), 21, 1)
+	payload.EnergyDeltaKwh = &zero
+
+	result, err := NewTelemetryIngestor(db).Ingest(payload, recorded.Add(time.Minute))
+	if err != nil || result.Status != IngestStored {
+		t.Fatalf("want stored explicit zero, result=%+v err=%v", result, err)
+	}
+	var reading domain.PowerReading
+	if err := db.Where("device_id = ?", fixture.first.ID).First(&reading).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reading.EnergyDeltaKwh == nil || *reading.EnergyDeltaKwh != 0 {
+		t.Fatalf("explicit zero was not persisted: %+v", reading.EnergyDeltaKwh)
+	}
+}
+
+func float64Pointer(value float64) *float64 { return &value }
 
 func TestTelemetryIngestUsesHalfOpenAssignmentsForReplacementAndRelocation(t *testing.T) {
 	db := openTelemetryIntegrationDB(t)

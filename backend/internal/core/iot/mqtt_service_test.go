@@ -74,9 +74,32 @@ func TestQueueFullDropsWithoutUnboundedGoroutine(t *testing.T) {
 func TestTransactionFailureDoesNotPublishTerminalAck(t *testing.T) {
 	publisher := &testPublisher{}
 	service := &MqttService{db: nil, ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
-	service.processTelemetry([]byte(`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_id":"boot","boot_counter":7,"seq":123}`))
+	service.processTelemetry([]byte(`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_id":"boot","boot_counter":7,"seq":123,"energy_delta_kwh":0}`))
 	if publisher.count() != 0 {
 		t.Fatal("published terminal ACK after transaction setup failure")
+	}
+}
+
+func TestInvalidV1EnergyDeltaPublishesOnlyDiagnosticRejection(t *testing.T) {
+	for _, raw := range []string{
+		`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_counter":7,"seq":123}`,
+		`{"mac":"AABBCCDDEEFF","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_counter":7,"seq":123,"energy_delta_kwh":null}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			publisher := &testPublisher{}
+			service := &MqttService{db: nil, ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
+			service.processTelemetry([]byte(raw))
+			if publisher.count() != 1 {
+				t.Fatalf("want one diagnostic rejection, got %d", publisher.count())
+			}
+			var ack TelemetryAck
+			if err := json.Unmarshal(publisher.last().payload.([]byte), &ack); err != nil {
+				t.Fatal(err)
+			}
+			if ack.Status != string(IngestInvalid) {
+				t.Fatalf("invalid telemetry received unexpected ACK: %+v", ack)
+			}
+		})
 	}
 }
 
@@ -121,7 +144,7 @@ func TestPostgresLegacyTelemetryWriteCompatibility(t *testing.T) {
 	}()
 	publisher := &testPublisher{}
 	service := &MqttService{db: db, ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
-	payload := []byte(`{"mac":"a1:b2:c3:d4:e5:f6","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_id":"boot","boot_counter":7,"seq":123}`)
+	payload := []byte(`{"mac":"a1:b2:c3:d4:e5:f6","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_id":"boot","boot_counter":7,"seq":123,"energy_delta_kwh":0}`)
 	service.processTelemetry(payload)
 	service.processTelemetry(payload)
 	if publisher.count() != 2 {
@@ -150,7 +173,7 @@ func TestUnknownDeviceDoesNotReturnTerminalStatus(t *testing.T) {
 	}
 	publisher := &testPublisher{}
 	service := &MqttService{db: db, ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
-	service.processTelemetry([]byte(`{"mac":"FFEEDDCCBBAA","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_id":"boot","boot_counter":7,"seq":123}`))
+	service.processTelemetry([]byte(`{"mac":"FFEEDDCCBBAA","v":110,"c":1,"p":100,"kwh":1,"ts":1786021200,"protocol_version":1,"boot_id":"boot","boot_counter":7,"seq":123,"energy_delta_kwh":0}`))
 	if publisher.count() != 1 {
 		t.Fatal("unknown device should produce one diagnostic rejection")
 	}

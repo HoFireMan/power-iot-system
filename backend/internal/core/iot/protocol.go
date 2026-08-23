@@ -20,8 +20,8 @@ const (
 var macPattern = regexp.MustCompile(`^[0-9A-F]{12}$`)
 
 // MqttPayload supports both the original six-field payload and Device Protocol v1.
-// Pointer-free numeric fields intentionally preserve the old Go API; protocol-v1
-// presence is checked from the raw object so zero is not confused with omission.
+// EnergyDeltaKwh is a pointer so Protocol v1 can distinguish an explicit zero
+// from an omitted or null wire value.
 type MqttPayload struct {
 	MacAddress string  `json:"mac"`
 	Voltage    float64 `json:"v"`
@@ -30,19 +30,19 @@ type MqttPayload struct {
 	KwhTotal   float64 `json:"kwh"`
 	Timestamp  int64   `json:"ts"`
 
-	ProtocolVersion int     `json:"protocol_version,omitempty"`
-	BootID          string  `json:"boot_id,omitempty"`
-	BootCounter     int64   `json:"boot_counter,omitempty"`
-	Sequence        int64   `json:"seq,omitempty"`
-	Seq             int64   `json:"-"` // compatibility alias for callers using the wire name
-	PowerFactor     float64 `json:"pf,omitempty"`
-	PF              float64 `json:"-"` // compatibility alias
-	EnergyDeltaKwh  float64 `json:"energy_delta_kwh,omitempty"`
-	RSSI            int     `json:"rssi,omitempty"`
-	ValidSamples    int     `json:"valid_samples,omitempty"`
-	InvalidSamples  int     `json:"invalid_samples,omitempty"`
-	FirmwareVersion string  `json:"fw,omitempty"`
-	FW              string  `json:"-"` // compatibility alias
+	ProtocolVersion int      `json:"protocol_version,omitempty"`
+	BootID          string   `json:"boot_id,omitempty"`
+	BootCounter     int64    `json:"boot_counter,omitempty"`
+	Sequence        int64    `json:"seq,omitempty"`
+	Seq             int64    `json:"-"` // compatibility alias for callers using the wire name
+	PowerFactor     float64  `json:"pf,omitempty"`
+	PF              float64  `json:"-"` // compatibility alias
+	EnergyDeltaKwh  *float64 `json:"energy_delta_kwh,omitempty"`
+	RSSI            int      `json:"rssi,omitempty"`
+	ValidSamples    int      `json:"valid_samples,omitempty"`
+	InvalidSamples  int      `json:"invalid_samples,omitempty"`
+	FirmwareVersion string   `json:"fw,omitempty"`
+	FW              string   `json:"-"` // compatibility alias
 }
 
 // DecodeTelemetry strictly decodes a payload and validates all values that can
@@ -101,9 +101,11 @@ func validateTelemetry(p MqttPayload, fields map[string]json.RawMessage) error {
 		if p.BootCounter < 0 || p.Sequence < 0 {
 			return errors.New("protocol v1 identity is invalid")
 		}
-		if !finiteRange("pf", p.PowerFactor, -1, 1) || !finiteRange("energy_delta_kwh", p.EnergyDeltaKwh, 0, 9999.999999) ||
-			p.RSSI < -150 || p.RSSI > 0 || p.ValidSamples < 0 || p.InvalidSamples < 0 {
+		if !finiteRange("pf", p.PowerFactor, -1, 1) || p.RSSI < -150 || p.RSSI > 0 || p.ValidSamples < 0 || p.InvalidSamples < 0 {
 			return errors.New("protocol v1 diagnostics are outside the safe range")
+		}
+		if err := validateEnergyDelta(p.EnergyDeltaKwh); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -112,6 +114,20 @@ func validateTelemetry(p MqttPayload, fields map[string]json.RawMessage) error {
 func has(fields map[string]json.RawMessage, name string) bool {
 	_, ok := fields[name]
 	return ok
+}
+
+func validateEnergyDelta(value *float64) error {
+	if value == nil || !finiteRange("energy_delta_kwh", *value, 0, 9999.999999) {
+		return errors.New("protocol v1 requires a finite energy_delta_kwh between 0 and 9999.999999")
+	}
+	return nil
+}
+
+func validatePersistableTelemetry(p MqttPayload) error {
+	if p.ProtocolVersion != 1 {
+		return nil
+	}
+	return validateEnergyDelta(p.EnergyDeltaKwh)
 }
 
 func finiteRange(name string, value, min, max float64) bool {

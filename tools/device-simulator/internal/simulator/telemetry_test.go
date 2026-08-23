@@ -29,6 +29,24 @@ func TestGeneratorProducesProtocolV1Telemetry(t *testing.T) {
 	}
 }
 
+func TestGeneratorEmitsExplicitZeroEnergyDelta(t *testing.T) {
+	generator, err := NewGenerator(DefaultMAC, "test-fw", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry := generator.Next(time.Unix(1786021200, 0), 0)
+	if telemetry.ProtocolVersion != 1 || telemetry.EnergyDeltaKwh != 0 {
+		t.Fatalf("unexpected zero-delta telemetry: %+v", telemetry)
+	}
+	body, err := json.Marshal(telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(body), `"energy_delta_kwh":0`) {
+		t.Fatalf("zero energy delta was omitted: %s", body)
+	}
+}
+
 func TestGeneratorSequenceAndKwhIncrease(t *testing.T) {
 	generator, err := NewGenerator(DefaultMAC, "test-fw", 1, 0)
 	if err != nil {
