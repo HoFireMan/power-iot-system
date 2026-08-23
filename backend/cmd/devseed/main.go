@@ -117,10 +117,6 @@ func seedDevelopmentIdentity(ctx context.Context, db *gorm.DB, password string) 
 	if strings.TrimSpace(password) == "" {
 		return 0, errors.New("development seed password is required")
 	}
-	passwordHash, err := security.HashPassword([]byte(password))
-	if err != nil {
-		return 0, errors.New("development seed password could not be hashed")
-	}
 	if db == nil {
 		return 0, errors.New("development seed database is required")
 	}
@@ -128,6 +124,7 @@ func seedDevelopmentIdentity(ctx context.Context, db *gorm.DB, password string) 
 		ctx = context.Background()
 	}
 	var shop domain.Shop
+	var err error
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
 			return err
@@ -160,6 +157,10 @@ func seedDevelopmentIdentity(ctx context.Context, db *gorm.DB, password string) 
 		var user domain.User
 		result = tx.Where("account = ?", devSeedAccount).First(&user)
 		if result.Error == gorm.ErrRecordNotFound {
+			passwordHash, hashErr := security.HashPassword([]byte(password))
+			if hashErr != nil {
+				return errors.New("development seed password could not be hashed")
+			}
 			currentShopID := shop.ID
 			user = domain.User{
 				Account: devSeedAccount, PasswordHash: passwordHash, Name: devSeedUserName,
@@ -173,6 +174,10 @@ func seedDevelopmentIdentity(ctx context.Context, db *gorm.DB, password string) 
 		} else {
 			if user.Name != devSeedUserName || !user.AuthEnabled || user.IsAdmin || user.CurrentShopID == nil || *user.CurrentShopID != shop.ID {
 				return errors.New("development seed account is already in use")
+			}
+			valid, verifyErr := security.VerifyPassword([]byte(password), user.PasswordHash)
+			if verifyErr != nil || !valid {
+				return errors.New("development seed fixture password mismatch")
 			}
 		}
 
@@ -320,10 +325,6 @@ func validateExistingDeviceFixture(tx *gorm.DB, device domain.Device, targetShop
 		}
 		var assignedShop domain.Shop
 		if err := tx.First(&assignedShop, assignedPoint.ShopID).Error; err != nil || assignedShop.ClientID == 0 || !assignedShop.IsActive {
-			return errors.New("development device has an invalid active assignment authority")
-		}
-		var assignedClient domain.Client
-		if err := tx.First(&assignedClient, assignedShop.ClientID).Error; err != nil {
 			return errors.New("development device has an invalid active assignment authority")
 		}
 		return errors.New("development device is already assigned to another measurement point")

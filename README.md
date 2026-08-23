@@ -140,6 +140,10 @@ MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt \
 
 `DEVSEED_PASSWORD` must be supplied as a runtime secret. Do not place a real password, password hash, or token in tracked files.
 
+### Trusted proxy client-IP configuration
+
+The backend reads the optional `TRUSTED_PROXY_CIDRS` environment variable as a comma-separated list of exact trusted reverse-proxy CIDRs. When it is empty or unset, the server uses direct-peer-only semantics: `X-Forwarded-For` and `Forwarded` are ignored from untrusted peers. Reverse-proxy operators must explicitly set the exact CIDR(s) for their deployment; malformed or trust-all CIDRs fail startup closed. No production CIDR value is supplied by this repository or this change.
+
 ## Device Simulator
 
 Simulator source 位於 `tools/device-simulator/`，用於在沒有實體設備時產生 telemetry 並等待 application ACK。支援的主要模式包括 `once`、`continuous`、`duplicate`、`invalid`、`offline-replay` 與 `reconnect`。

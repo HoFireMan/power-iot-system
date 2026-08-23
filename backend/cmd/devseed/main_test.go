@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -79,6 +81,32 @@ func TestDevseedIdentityIsIdempotent(t *testing.T) {
 	var user domain.User
 	if err := db.Where("account = ?", devSeedAccount).First(&user).Error; err != nil {
 		t.Fatal(err)
+	}
+	originalPasswordHash := user.PasswordHash
+	wrongPassword := password + "-wrong"
+	var capturedLogs bytes.Buffer
+	previousLogWriter := log.Writer()
+	log.SetOutput(&capturedLogs)
+	mismatchErr := func() error {
+		_, err := seedDevelopmentIdentity(context.Background(), db, wrongPassword)
+		return err
+	}()
+	log.SetOutput(previousLogWriter)
+	if mismatchErr == nil {
+		t.Fatal("seed identity accepted a different password")
+	}
+	if strings.Contains(mismatchErr.Error(), wrongPassword) || strings.Contains(mismatchErr.Error(), originalPasswordHash) {
+		t.Fatalf("password mismatch error leaked a secret: %v", mismatchErr)
+	}
+	if strings.Contains(capturedLogs.String(), wrongPassword) || strings.Contains(capturedLogs.String(), originalPasswordHash) {
+		t.Fatalf("password mismatch logs leaked a secret: %s", capturedLogs.String())
+	}
+	var unchangedUser domain.User
+	if err := db.Where("account = ?", devSeedAccount).First(&unchangedUser).Error; err != nil {
+		t.Fatal(err)
+	}
+	if unchangedUser.PasswordHash != originalPasswordHash {
+		t.Fatal("password mismatch rewrote the persisted password hash")
 	}
 	if !user.AuthEnabled || user.CurrentShopID == nil || *user.CurrentShopID != shopID {
 		t.Fatalf("seed user metadata is incomplete: auth_enabled=%t current_shop_id_set=%t", user.AuthEnabled, user.CurrentShopID != nil)

@@ -28,6 +28,12 @@ import (
 )
 
 func main() {
+	// Parse the trusted-proxy policy before database connection or any other
+	// bootstrap side effect. Invalid operator configuration fails closed.
+	trustedProxyConfig, err := security.LoadTrustedProxyConfigFromEnv()
+	if err != nil {
+		log.Fatal("trusted proxy configuration failed")
+	}
 	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if databaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
@@ -119,7 +125,6 @@ func main() {
 	})
 	// Server order is request ID -> trusted client context -> D6 write gate ->
 	// Gin route middleware/authentication/handlers.
-	trustedProxyConfig := security.TrustedProxyConfig{}
 	handler := httpadapter.ClientIPHTTPMiddleware(trustedProxyConfig, writeGate.Middleware(r))
 	server := &http.Server{Addr: httpAddr, Handler: httpadapter.RequestIDHTTPMiddleware(handler)}
 	shutdownSignal, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
