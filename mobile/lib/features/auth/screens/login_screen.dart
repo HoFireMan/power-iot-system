@@ -19,6 +19,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   void dispose() {
     _accountController.dispose();
+    // Clear before disposal so an in-flight terminal outcome cannot attempt to
+    // clear a controller after this screen has been removed.
+    _passwordController.clear();
     _passwordController.dispose();
     super.dispose();
   }
@@ -29,25 +32,29 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _error = null;
       _submitting = true;
     });
+    var loginSucceeded = false;
     try {
       await ref.read(authControllerProvider).login(
             account: _accountController.text,
             password: _passwordController.text,
           );
-      if (!mounted) return;
-      _passwordController.clear();
-      context.go('/dashboard');
+      loginSucceeded = true;
     } on AuthFailure catch (failure) {
-      if (!mounted) return;
-      setState(() {
-        _error = failure.isInvalidCredentials ? '帳號或密碼錯誤' : '登入失敗，請稍後再試';
-      });
+      if (mounted) {
+        setState(() {
+          _error = failure.isInvalidCredentials ? '帳號或密碼錯誤' : '登入失敗，請稍後再試';
+        });
+      }
     } finally {
       // Passwords must not survive any terminal outcome, including malformed
       // responses and transport failures. Never log or expose the value.
-      _passwordController.clear();
-      if (mounted) setState(() => _submitting = false);
+      // Cleanup runs before navigation, which may dispose this screen.
+      if (mounted) {
+        _passwordController.clear();
+        setState(() => _submitting = false);
+      }
     }
+    if (loginSucceeded && mounted) context.go('/dashboard');
   }
 
   @override
