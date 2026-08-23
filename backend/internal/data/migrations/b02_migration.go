@@ -1,0 +1,130 @@
+package migrations
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"io/fs"
+)
+
+// RunB02Migration is the protected post-V6 schema transition. It deliberately
+// does not use the generic golang-migrate Up/Down route.
+func RunB02Migration(ctx context.Context, databaseURL string, admission ExternalWriterAdmission) (report ProtectedMigrationReport, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := RequireExternalWriterAdmission(admission); err != nil {
+		return report, err
+	}
+	inspection, err := InspectProtectedMigration(ctx, databaseURL, D5MigrationSpec(admission))
+	if err != nil {
+		return report, err
+	}
+	if inspection.State == ProtectedStateCleanB02 {
+		report.State = ProtectedStateCleanB02
+		report.PostCommitState = ProtectedStateCleanB02
+		report.Outcome = ProtectedAlreadyComplete
+		return report, nil
+	}
+	if inspection.State != ProtectedStateCleanV6 {
+		return report, fmt.Errorf("B-02 requires clean V6 state, got %s", inspection.State)
+	}
+
+	fence, err := OpenExclusiveWriterFence(ctx, databaseURL)
+	if err != nil {
+		return report, err
+	}
+	defer func() {
+		if closeErr := fence.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	capability, err := fence.Capability()
+	if err != nil {
+		return report, err
+	}
+	if err := RequireProtectedWork(capability); err != nil {
+		return report, err
+	}
+	report.BackendPID = fence.BackendPID()
+
+	metadataTable, err := configuredMetadataTable(ctx, databaseURL, fence.Conn())
+	if err != nil {
+		return report, err
+	}
+	mark, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	result, err := mark.ExecContext(ctx, "UPDATE "+metadataTable+" SET dirty=true WHERE version=6 AND dirty=false")
+	if err != nil {
+		_ = mark.Rollback()
+		return report, err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		_ = mark.Rollback()
+		return report, fmt.Errorf("B-02 dirty marker expected one V6 row, affected %d", count)
+	}
+	if err := mark.Commit(); err != nil {
+		return report, fmt.Errorf("B-02 dirty marker commit: %w", err)
+	}
+
+	body, err := fs.ReadFile(Files, "sql/000007_b02_coverage_foundation.up.sql")
+	if err != nil {
+		return report, err
+	}
+	apply, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	if _, err := apply.ExecContext(ctx, string(body)); err != nil {
+		_ = apply.Rollback()
+		return report, fmt.Errorf("B-02 body: %w", err)
+	}
+	if err := apply.Commit(); err != nil {
+		return report, fmt.Errorf("B-02 body commit outcome unknown: %w", err)
+	}
+
+	final, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	result, err = final.ExecContext(ctx, "UPDATE "+metadataTable+" SET version=7, dirty=false WHERE version=6 AND dirty=true")
+	if err != nil {
+		_ = final.Rollback()
+		return report, err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		_ = final.Rollback()
+		return report, fmt.Errorf("B-02 final marker expected one dirty V6 row, affected %d", count)
+	}
+	if err := final.Commit(); err != nil {
+		return report, fmt.Errorf("B-02 final marker commit outcome unknown: %w", err)
+	}
+	if err := verifyB02Catalog(ctx, fence.Conn()); err != nil {
+		return report, err
+	}
+	report.State = ProtectedStateCleanV6
+	report.PostCommitState = ProtectedStateCleanB02
+	report.PostCommitCatalog = ProtectedCatalogExactV6
+	report.Outcome = ProtectedCommittedAndVerified
+	report.Committed = true
+	report.PostCommitVerified = true
+	return report, nil
+}
+
+func configuredMetadataTable(ctx context.Context, databaseURL string, conn *sql.Conn) (string, error) {
+	parsed, err := parsePostgresDatabaseURL(databaseURL)
+	if err != nil {
+		return "", err
+	}
+	var schema string
+	if err := conn.QueryRowContext(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
+		return "", err
+	}
+	metadataSchema, metadataTable, err := migrationMetadataIdentifiers(parsed.config, schema)
+	if err != nil {
+		return "", err
+	}
+	return quotedMigrationTable(metadataSchema, metadataTable), nil
+}

@@ -20,13 +20,15 @@ import (
 type ProtectedMigrationState string
 
 const (
-	ProtectedStateCleanV5      ProtectedMigrationState = "CLEAN_V5"
-	ProtectedStateDirtyV5      ProtectedMigrationState = "DIRTY_V5"
-	ProtectedStateTransitionV6 ProtectedMigrationState = "TRANSITION_DIRTY_V6"
-	ProtectedStateCleanV6      ProtectedMigrationState = "CLEAN_V6"
-	ProtectedStateBootstrap    ProtectedMigrationState = "SUPPORTED_BOOTSTRAP"
-	ProtectedStateAmbiguous    ProtectedMigrationState = "AMBIGUOUS"
-	ProtectedStateFuture       ProtectedMigrationState = "UNSUPPORTED_FUTURE"
+	ProtectedStateCleanV5       ProtectedMigrationState = "CLEAN_V5"
+	ProtectedStateDirtyV5       ProtectedMigrationState = "DIRTY_V5"
+	ProtectedStateTransitionV6  ProtectedMigrationState = "TRANSITION_DIRTY_V6"
+	ProtectedStateCleanV6       ProtectedMigrationState = "CLEAN_V6"
+	ProtectedStateTransitionB02 ProtectedMigrationState = "TRANSITION_DIRTY_B02"
+	ProtectedStateCleanB02      ProtectedMigrationState = "CLEAN_B02"
+	ProtectedStateBootstrap     ProtectedMigrationState = "SUPPORTED_BOOTSTRAP"
+	ProtectedStateAmbiguous     ProtectedMigrationState = "AMBIGUOUS"
+	ProtectedStateFuture        ProtectedMigrationState = "UNSUPPORTED_FUTURE"
 )
 
 type ProtectedCatalogState string
@@ -219,9 +221,9 @@ func InspectProtectedMigration(ctx context.Context, databaseURL string, spec Pro
 	}
 	report = fillProtectedReport(report, inspection)
 	switch inspection.State {
-	case ProtectedStateCleanV5, ProtectedStateCleanV6:
+	case ProtectedStateCleanV5, ProtectedStateCleanV6, ProtectedStateCleanB02:
 		return report, nil
-	case ProtectedStateDirtyV5, ProtectedStateTransitionV6:
+	case ProtectedStateDirtyV5, ProtectedStateTransitionV6, ProtectedStateTransitionB02:
 		return report, protectedError(&report, ProtectedNotCommitted, ProtectedPhaseInspection, ErrProtectedMigrationRecoveryRequired)
 	default:
 		return report, protectedError(&report, ProtectedNotCommitted, ProtectedPhaseInspection, ErrProtectedMigrationState)
@@ -678,6 +680,11 @@ func inspectProtectedOn(ctx context.Context, q ProtectedMigrationQueryer, config
 				catalog = ProtectedCatalogPartial
 			}
 		}
+		if catalog == ProtectedCatalogExactV6 && metadata.Version == 7 {
+			if err := verifyB02Catalog(ctx, q); err != nil {
+				catalog = ProtectedCatalogPartial
+			}
+		}
 	}
 	if catalog == ProtectedCatalogExactV5 && spec.V5SemanticVerifier != nil {
 		if err := spec.V5SemanticVerifier(ctx, q); err != nil {
@@ -686,6 +693,103 @@ func inspectProtectedOn(ctx context.Context, q ProtectedMigrationQueryer, config
 	}
 	state := classifyProtectedState(metadata, catalog)
 	return protectedInspection{Metadata: metadata, Catalog: catalog, State: state}, nil
+}
+
+func verifyB02Catalog(ctx context.Context, q ProtectedMigrationQueryer) error {
+	columns := []struct {
+		table, name, dataType, nullable string
+		defaultFragment                 string
+	}{
+		{"power_readings", "coverage_version", "bigint", "YES", ""},
+		{"power_readings", "interval_start", "timestamp with time zone", "YES", ""},
+		{"power_readings", "interval_end", "timestamp with time zone", "YES", ""},
+		{"telemetry_ingest_keys", "canonical_coverage_digest", "bytea", "YES", ""},
+		{"telemetry_ingest_keys", "conflict_detected", "boolean", "NO", "false"},
+	}
+	for _, column := range columns {
+		var dataType, nullable string
+		var columnDefault sql.NullString
+		if err := q.QueryRowContext(ctx, `
+SELECT data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2`, column.table, column.name).Scan(&dataType, &nullable, &columnDefault); err != nil {
+			return fmt.Errorf("B-02 column %s.%s: %w", column.table, column.name, err)
+		}
+		if dataType != column.dataType || nullable != column.nullable {
+			return fmt.Errorf("B-02 column %s.%s has type/nullability %s/%s, want %s/%s", column.table, column.name, dataType, nullable, column.dataType, column.nullable)
+		}
+		if column.defaultFragment != "" && (!columnDefault.Valid || !strings.Contains(normalizeCatalogSQL(columnDefault.String), column.defaultFragment)) {
+			return fmt.Errorf("B-02 column %s.%s has unexpected default %q", column.table, column.name, columnDefault.String)
+		}
+	}
+
+	coverageCheck, err := b02ConstraintDefinition(ctx, q, "power_readings", "power_readings_coverage_profile_check")
+	if err != nil {
+		return err
+	}
+	for _, fragment := range []string{
+		"coverage_versionisnull",
+		"coverage_version=1",
+		"protocol_version=1",
+		"measurement_point_idisnotnull",
+		"interval_startisnotnull",
+		"interval_endisnotnull",
+		"interval_start<interval_end",
+		"recorded_at=interval_start",
+		"energy_delta_kwhisnotnull",
+		"boot_counterisnotnull",
+		"sequenceisnotnull",
+	} {
+		if !strings.Contains(coverageCheck, fragment) {
+			return fmt.Errorf("B-02 coverage check is missing semantic fragment %q", fragment)
+		}
+	}
+	digestCheck, err := b02ConstraintDefinition(ctx, q, "telemetry_ingest_keys", "telemetry_ingest_keys_coverage_digest_length")
+	if err != nil {
+		return err
+	}
+	for _, fragment := range []string{"canonical_coverage_digestisnull", "octet_length(canonical_coverage_digest)=32"} {
+		if !strings.Contains(digestCheck, fragment) {
+			return fmt.Errorf("B-02 digest check is missing semantic fragment %q", fragment)
+		}
+	}
+
+	var unique bool
+	var indexDefinition string
+	if err := q.QueryRowContext(ctx, `
+SELECT i.indisunique, pg_get_indexdef(i.indexrelid)
+FROM pg_index AS i
+JOIN pg_class AS index_class ON index_class.oid=i.indexrelid
+JOIN pg_namespace AS index_namespace ON index_namespace.oid=index_class.relnamespace
+WHERE index_namespace.nspname=current_schema()
+  AND index_class.relname='idx_power_readings_coverage_mp_interval_start'`).Scan(&unique, &indexDefinition); err != nil {
+		return fmt.Errorf("B-02 coverage index: %w", err)
+	}
+	if unique {
+		return errors.New("B-02 coverage index must not be unique")
+	}
+	indexSQL := normalizeCatalogSQL(indexDefinition)
+	if !strings.Contains(indexSQL, "(measurement_point_id,interval_start)") || !strings.Contains(indexSQL, "where(coverage_version=1)") {
+		return fmt.Errorf("B-02 coverage index has unexpected definition %q", indexDefinition)
+	}
+	return nil
+}
+
+func b02ConstraintDefinition(ctx context.Context, q ProtectedMigrationQueryer, table, constraint string) (string, error) {
+	var definition string
+	if err := q.QueryRowContext(ctx, `
+SELECT pg_get_constraintdef(c.oid)
+FROM pg_constraint AS c
+JOIN pg_class AS t ON t.oid=c.conrelid
+JOIN pg_namespace AS n ON n.oid=t.relnamespace
+WHERE n.nspname=current_schema() AND t.relname=$1 AND c.conname=$2`, table, constraint).Scan(&definition); err != nil {
+		return "", fmt.Errorf("B-02 constraint %s.%s: %w", table, constraint, err)
+	}
+	return normalizeCatalogSQL(definition), nil
+}
+
+func normalizeCatalogSQL(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(value)), "")
 }
 
 func classifyProtectedState(metadata MigrationMetadataSnapshot, catalog ProtectedCatalogState) ProtectedMigrationState {
@@ -712,6 +816,13 @@ func classifyProtectedState(metadata MigrationMetadataSnapshot, catalog Protecte
 		}
 		if catalog == ProtectedCatalogExactV6 {
 			return ProtectedStateCleanV6
+		}
+	case 7:
+		if metadata.Dirty {
+			return ProtectedStateTransitionB02
+		}
+		if catalog == ProtectedCatalogExactV6 {
+			return ProtectedStateCleanB02
 		}
 	default:
 		if metadata.Version > 6 {

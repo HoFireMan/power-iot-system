@@ -367,7 +367,9 @@ func (s *MqttService) telemetryIngest(data MqttPayload, receivedAt time.Time) (I
 
 func (s *MqttService) publishIngestResult(mac string, data MqttPayload, result IngestResult) {
 	switch result.Status {
-	case IngestStored, IngestDuplicate, IngestUnknownDevice, IngestUnknownAssignment:
+	case IngestStored, IngestDuplicate, IngestUnknownDevice, IngestUnknownAssignment, IngestConflict:
+		// Unknown and conflict statuses are diagnostic/non-terminal. The
+		// simulator queue only deletes on stored or duplicate.
 		s.publishAck(mac, TelemetryAck{BootCounter: data.BootCounter, Sequence: data.Sequence, Status: string(result.Status)})
 	}
 }

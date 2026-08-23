@@ -13,6 +13,7 @@ type RuntimeAdmissionDisposition string
 
 const (
 	RuntimeServeV6                  RuntimeAdmissionDisposition = "SERVE_CLEAN_V6"
+	RuntimeServeB02                 RuntimeAdmissionDisposition = "SERVE_CLEAN_B02"
 	RuntimeProtectedMigrationNeeded RuntimeAdmissionDisposition = "PROTECTED_MIGRATION_REQUIRED"
 )
 
@@ -32,13 +33,15 @@ type RuntimeAdmissionReport struct {
 }
 
 // ClassifyRuntimeAdmission is the pure closed-world startup matrix. The
-// backend may serve only an exact clean V6 observation. Clean V5 is an
+// backend may serve only an exact clean V6 or B-02 observation. Clean V5 is an
 // explicit handoff to the protected operator entry; every other state fails
 // closed.
 func ClassifyRuntimeAdmission(state ProtectedMigrationState) (RuntimeAdmissionDisposition, error) {
 	switch state {
 	case ProtectedStateCleanV6:
 		return RuntimeServeV6, nil
+	case ProtectedStateCleanB02:
+		return RuntimeServeB02, nil
 	case ProtectedStateCleanV5:
 		return RuntimeProtectedMigrationNeeded, ErrRuntimeProtectedMigrationRequired
 	default:
@@ -73,7 +76,7 @@ func BootstrapAndAdmit(ctx context.Context, databaseURL string) (RuntimeAdmissio
 			return RuntimeAdmissionReport{Version: version, Dirty: true}, fmt.Errorf("%w: bootstrap left dirty metadata version=%d", ErrRuntimeAdmissionRefused, version)
 		}
 	}
-	if version > protectedSchemaVersion+1 {
+	if version > protectedSchemaVersion+2 {
 		return RuntimeAdmissionReport{Version: version}, fmt.Errorf("%w: future metadata version=%d", ErrRuntimeAdmissionRefused, version)
 	}
 

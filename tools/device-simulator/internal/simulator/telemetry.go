@@ -1,13 +1,54 @@
 package simulator
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 )
 
-const DefaultMAC = "AABBCCDDEEFF"
+const (
+	DefaultMAC             = "AABBCCDDEEFF"
+	MinCoverageInterval    = time.Second
+	ErrInvalidCoverageData = "invalid coverage interval"
+)
+
+var errInvalidCoverageData = errors.New(ErrInvalidCoverageData)
+var ErrCoverageClockUnsynchronized = errors.New("coverage profile requires synchronized clock")
+
+// CoverageIntervalEnd applies the Asia/Taipei midnight boundary and fails
+// closed when the resulting interval cannot represent the required minimum.
+func CoverageIntervalEnd(start time.Time, requested time.Duration) (time.Time, error) {
+	return CoverageIntervalEndWithLoader(start, requested, time.LoadLocation)
+}
+
+// CoverageIntervalEndWithLoader is the deterministic seam used by tests to
+// prove timezone-load failures cannot fall back to a straddling interval.
+func CoverageIntervalEndWithLoader(start time.Time, requested time.Duration, loadLocation func(string) (*time.Location, error)) (time.Time, error) {
+	if requested <= 0 {
+		return time.Time{}, errInvalidCoverageData
+	}
+	end := start.Add(requested)
+	loc, err := loadLocation("Asia/Taipei")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load coverage timezone: %w", err)
+	}
+	local := start.In(loc)
+	nextMidnight := time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, loc)
+	minimumTailStart := nextMidnight.Add(-MinCoverageInterval)
+	if end.Before(nextMidnight) && end.After(minimumTailStart) {
+		// Pull the preceding variable-cadence interval back so the next
+		// adjacent interval can exactly cover the final one-second tail.
+		end = minimumTailStart
+	} else if !end.Before(nextMidnight) {
+		end = nextMidnight
+	}
+	if end.Sub(start) < MinCoverageInterval {
+		return time.Time{}, errInvalidCoverageData
+	}
+	return end, nil
+}
 
 // TelemetryIdentity is the simulator's replay and ACK matching identity.
 // It mirrors the protocol's boot_counter + sequence pair.
@@ -31,6 +72,9 @@ type Telemetry struct {
 	Sequence        int64   `json:"seq"`
 	PowerFactor     float64 `json:"pf"`
 	EnergyDeltaKwh  float64 `json:"energy_delta_kwh"`
+	CoverageVersion *int64  `json:"coverage_version,omitempty"`
+	IntervalStartTS *int64  `json:"interval_start_ts,omitempty"`
+	IntervalEndTS   *int64  `json:"interval_end_ts,omitempty"`
 	RSSI            int     `json:"rssi"`
 	ValidSamples    int     `json:"valid_samples"`
 	InvalidSamples  int     `json:"invalid_samples"`
@@ -90,6 +134,53 @@ func (g *Generator) Next(now time.Time, interval time.Duration) Telemetry {
 		EnergyDeltaKwh: delta, RSSI: -55, ValidSamples: 60, InvalidSamples: 0,
 		FirmwareVersion: g.FirmwareVersion,
 	}
+}
+
+// NextCoverage emits an explicit logical interval and computes energy from
+// the actual interval duration. Invalid/non-representable intervals fail
+// closed as an empty telemetry value; callers that need the reason should use
+// NextCoverageChecked.
+func (g *Generator) NextCoverage(start, end time.Time) Telemetry {
+	telemetry, err := g.NextCoverageChecked(start, end)
+	if err != nil {
+		return Telemetry{}
+	}
+	return telemetry
+}
+
+// NextCoverageChecked validates the minimum duration and Unix-second
+// representability before advancing the generator. This prevents a
+// boundary-shortened interval from emitting ts == interval_end.
+func (g *Generator) NextCoverageChecked(start, end time.Time) (Telemetry, error) {
+	return g.NextCoverageCheckedWithClock(start, end, true)
+}
+
+// NextCoverageCheckedWithClock is the simulator's unsynchronized-clock seam:
+// coverage evidence is fail-closed until the producer's clock is synchronized.
+func (g *Generator) NextCoverageCheckedWithClock(start, end time.Time, clockSynchronized bool) (Telemetry, error) {
+	if !clockSynchronized {
+		return Telemetry{}, ErrCoverageClockUnsynchronized
+	}
+	if !end.After(start) || end.Sub(start) < MinCoverageInterval {
+		return Telemetry{}, errInvalidCoverageData
+	}
+	interval := end.Sub(start)
+	timestamp := start.Unix()
+	if time.Unix(timestamp, 0).Before(start) {
+		timestamp++
+	}
+	selected := time.Unix(timestamp, 0)
+	if selected.Before(start) || !selected.Before(end) {
+		return Telemetry{}, errInvalidCoverageData
+	}
+	telemetry := g.Next(start, interval)
+	telemetry.Timestamp = timestamp
+	version := int64(1)
+	startMs, endMs := start.UnixMilli(), end.UnixMilli()
+	telemetry.CoverageVersion = &version
+	telemetry.IntervalStartTS = &startMs
+	telemetry.IntervalEndTS = &endMs
+	return telemetry, nil
 }
 
 func (t Telemetry) IsPhysicallyConsistent() bool {

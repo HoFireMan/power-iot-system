@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"power-iot-backend/internal/core/coverage"
 )
 
 const (
@@ -30,19 +32,46 @@ type MqttPayload struct {
 	KwhTotal   float64 `json:"kwh"`
 	Timestamp  int64   `json:"ts"`
 
-	ProtocolVersion int      `json:"protocol_version,omitempty"`
-	BootID          string   `json:"boot_id,omitempty"`
-	BootCounter     int64    `json:"boot_counter,omitempty"`
-	Sequence        int64    `json:"seq,omitempty"`
-	Seq             int64    `json:"-"` // compatibility alias for callers using the wire name
-	PowerFactor     float64  `json:"pf,omitempty"`
-	PF              float64  `json:"-"` // compatibility alias
-	EnergyDeltaKwh  *float64 `json:"energy_delta_kwh,omitempty"`
-	RSSI            int      `json:"rssi,omitempty"`
-	ValidSamples    int      `json:"valid_samples,omitempty"`
-	InvalidSamples  int      `json:"invalid_samples,omitempty"`
-	FirmwareVersion string   `json:"fw,omitempty"`
-	FW              string   `json:"-"` // compatibility alias
+	ProtocolVersion int                    `json:"protocol_version,omitempty"`
+	BootID          string                 `json:"boot_id,omitempty"`
+	BootCounter     int64                  `json:"boot_counter,omitempty"`
+	Sequence        int64                  `json:"seq,omitempty"`
+	Seq             int64                  `json:"-"` // compatibility alias for callers using the wire name
+	PowerFactor     float64                `json:"pf,omitempty"`
+	PF              float64                `json:"-"` // compatibility alias
+	EnergyDeltaKwh  *float64               `json:"energy_delta_kwh,omitempty"`
+	CoverageVersion coverage.OptionalInt64 `json:"coverage_version,omitempty"`
+	IntervalStartTS coverage.OptionalInt64 `json:"interval_start_ts,omitempty"`
+	IntervalEndTS   coverage.OptionalInt64 `json:"interval_end_ts,omitempty"`
+	RSSI            int                    `json:"rssi,omitempty"`
+	ValidSamples    int                    `json:"valid_samples,omitempty"`
+	InvalidSamples  int                    `json:"invalid_samples,omitempty"`
+	FirmwareVersion string                 `json:"fw,omitempty"`
+	FW              string                 `json:"-"` // compatibility alias
+}
+
+// MarshalJSON omits absent presence-aware fields while preserving explicit
+// null when a caller constructs one deliberately.
+func (p MqttPayload) MarshalJSON() ([]byte, error) {
+	type plain MqttPayload
+	data, err := json.Marshal(plain(p))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if !p.CoverageVersion.Present {
+		delete(fields, "coverage_version")
+	}
+	if !p.IntervalStartTS.Present {
+		delete(fields, "interval_start_ts")
+	}
+	if !p.IntervalEndTS.Present {
+		delete(fields, "interval_end_ts")
+	}
+	return json.Marshal(fields)
 }
 
 // DecodeTelemetry strictly decodes a payload and validates all values that can
@@ -94,6 +123,9 @@ func validateTelemetry(p MqttPayload, fields map[string]json.RawMessage) error {
 	if p.ProtocolVersion != 0 && p.ProtocolVersion != 1 {
 		return fmt.Errorf("unsupported protocol_version %d", p.ProtocolVersion)
 	}
+	if p.ProtocolVersion != 1 && (has(fields, "coverage_version") || has(fields, "interval_start_ts") || has(fields, "interval_end_ts")) {
+		return errors.New("coverage profile requires protocol v1")
+	}
 	if p.ProtocolVersion == 1 {
 		if !has(fields, "boot_counter") || !has(fields, "seq") || string(fields["boot_counter"]) == "null" || string(fields["seq"]) == "null" {
 			return errors.New("protocol v1 requires boot_counter and seq")
@@ -107,6 +139,36 @@ func validateTelemetry(p MqttPayload, fields map[string]json.RawMessage) error {
 		if err := validateEnergyDelta(p.EnergyDeltaKwh); err != nil {
 			return err
 		}
+		if err := validateCoverageFields(p, fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCoverageFields(p MqttPayload, fields map[string]json.RawMessage) error {
+	if !p.CoverageVersion.Present {
+		if has(fields, "interval_start_ts") || has(fields, "interval_end_ts") {
+			return errors.New("coverage interval requires coverage_version")
+		}
+		return nil
+	}
+	if p.CoverageVersion.IsNull || p.CoverageVersion.Value != coverage.ProfileVersion {
+		return fmt.Errorf("unsupported coverage_version")
+	}
+	if !p.IntervalStartTS.Present || !p.IntervalEndTS.Present {
+		return errors.New("coverage profile requires interval_start_ts and interval_end_ts")
+	}
+	if p.IntervalStartTS.IsNull || p.IntervalEndTS.IsNull {
+		return errors.New("coverage interval fields cannot be null")
+	}
+	interval := coverage.Interval{
+		StartMilliseconds: p.IntervalStartTS.Value,
+		EndMilliseconds:   p.IntervalEndTS.Value,
+		TimestampSeconds:  p.Timestamp,
+	}
+	if err := interval.Validate(math.MaxInt64); err != nil {
+		return err
 	}
 	return nil
 }
@@ -127,7 +189,16 @@ func validatePersistableTelemetry(p MqttPayload) error {
 	if p.ProtocolVersion != 1 {
 		return nil
 	}
-	return validateEnergyDelta(p.EnergyDeltaKwh)
+	if err := validateEnergyDelta(p.EnergyDeltaKwh); err != nil {
+		return err
+	}
+	if !p.CoverageVersion.Present && (p.IntervalStartTS.Present || p.IntervalEndTS.Present) {
+		return errors.New("coverage interval requires coverage_version")
+	}
+	if p.CoverageVersion.Present && (p.CoverageVersion.IsNull || p.CoverageVersion.Value != coverage.ProfileVersion || !p.IntervalStartTS.Valid() || !p.IntervalEndTS.Valid()) {
+		return errors.New("invalid coverage profile")
+	}
+	return nil
 }
 
 func finiteRange(name string, value, min, max float64) bool {

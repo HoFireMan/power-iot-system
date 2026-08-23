@@ -3,6 +3,7 @@ package iot
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"math"
 	"os"
 	"sort"
@@ -30,6 +31,13 @@ func openTelemetryIntegrationDB(t *testing.T) *gorm.DB {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fs.ReadFile(migrations.Files, "sql/000007_b02_coverage_foundation.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(body)).Error; err != nil {
 		t.Fatal(err)
 	}
 	return db

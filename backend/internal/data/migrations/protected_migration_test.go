@@ -27,7 +27,8 @@ func TestClassifyProtectedStateMatrix(t *testing.T) {
 		{"clean v6", clean(6, false), ProtectedCatalogExactV6, ProtectedStateCleanV6},
 		{"clean v5 mismatch", clean(5, false), ProtectedCatalogPartial, ProtectedStateAmbiguous},
 		{"duplicate metadata", MigrationMetadataSnapshot{Exists: true, RowCount: 2, HasVersion: true, Version: 5}, ProtectedCatalogExactV5, ProtectedStateAmbiguous},
-		{"future", clean(7, false), ProtectedCatalogExactV6, ProtectedStateFuture},
+		{"clean B-02", clean(7, false), ProtectedCatalogExactV6, ProtectedStateCleanB02},
+		{"dirty B-02", clean(7, true), ProtectedCatalogExactV6, ProtectedStateTransitionB02},
 		{"bootstrap", MigrationMetadataSnapshot{CatalogEmpty: true}, ProtectedCatalogEmpty, ProtectedStateBootstrap},
 		{"missing metadata mixed catalog", MigrationMetadataSnapshot{}, ProtectedCatalogPartial, ProtectedStateAmbiguous},
 	}

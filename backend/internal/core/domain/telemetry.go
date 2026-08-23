@@ -44,11 +44,14 @@ type PowerReading struct {
 	ProtocolVersion       int      `gorm:"default:0"`
 	BootID                string   `gorm:"size:80"`
 	BootCounter           *int64
-	Sequence              *int64 `gorm:"column:sequence"`
-	ValidSamples          *int   `gorm:"column:valid_samples"`
-	InvalidSamples        *int   `gorm:"column:invalid_samples"`
-	FirmwareVersion       string `gorm:"column:firmware_version;size:80"`
-	LegacyFirmwareVersion string `gorm:"column:fw;size:80"`
+	Sequence              *int64     `gorm:"column:sequence"`
+	ValidSamples          *int       `gorm:"column:valid_samples"`
+	InvalidSamples        *int       `gorm:"column:invalid_samples"`
+	FirmwareVersion       string     `gorm:"column:firmware_version;size:80"`
+	LegacyFirmwareVersion string     `gorm:"column:fw;size:80"`
+	CoverageVersion       *int64     `gorm:"column:coverage_version"`
+	IntervalStart         *time.Time `gorm:"column:interval_start"`
+	IntervalEnd           *time.Time `gorm:"column:interval_end"`
 }
 
 // BeforeCreate keeps legacy writers compatible while the runtime ingest path
@@ -96,12 +99,14 @@ type DeviceAssignment struct {
 
 // TelemetryIngestKey is the ordinary PostgreSQL idempotency boundary.
 type TelemetryIngestKey struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey"`
-	DeviceID    uint      `gorm:"not null"`
-	BootCounter int64     `gorm:"not null"`
-	Sequence    int64     `gorm:"column:sequence;not null"`
-	CreatedAt   time.Time
-	ReceivedAt  time.Time
+	ID                      uuid.UUID `gorm:"type:uuid;primaryKey"`
+	DeviceID                uint      `gorm:"not null"`
+	BootCounter             int64     `gorm:"not null"`
+	Sequence                int64     `gorm:"column:sequence;not null"`
+	CreatedAt               time.Time
+	ReceivedAt              time.Time
+	CanonicalCoverageDigest []byte `gorm:"column:canonical_coverage_digest;type:bytea"`
+	ConflictDetected        bool   `gorm:"column:conflict_detected;not null;default:false"`
 }
 
 // DailyUsage is a derived daily aggregate.

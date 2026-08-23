@@ -13,6 +13,25 @@ import (
 	"power-iot-backend/internal/data/migrations"
 )
 
+func TestRuntimeAdmissionAcceptsOnlyCleanSupportedSchemas(t *testing.T) {
+	tests := []struct {
+		name         string
+		disposition  migrations.RuntimeAdmissionDisposition
+		wantAccepted bool
+	}{
+		{name: "clean v6 pre-b02", disposition: migrations.RuntimeServeV6, wantAccepted: false},
+		{name: "clean b02", disposition: migrations.RuntimeServeB02, wantAccepted: true},
+		{name: "protected migration required", disposition: migrations.RuntimeProtectedMigrationNeeded, wantAccepted: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runtimeAdmissionAccepted(tt.disposition); got != tt.wantAccepted {
+				t.Fatalf("runtimeAdmissionAccepted(%q)=%t, want %t", tt.disposition, got, tt.wantAccepted)
+			}
+		})
+	}
+}
+
 func TestInitDataParticipatesInSharedWriterFence(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
