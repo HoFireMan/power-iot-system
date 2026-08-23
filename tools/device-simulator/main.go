@@ -37,7 +37,9 @@ type config struct {
 	MAC             string
 	FirmwareVersion string
 	Interval        time.Duration
-	BootCounter     int64
+	CoverageProfile   bool
+	ClockSynchronized bool
+	BootCounter        int64
 	StartSequence   int64
 	ReplayCount     int
 	QueueCapacity   int
@@ -77,6 +79,7 @@ type deviceSimulator struct {
 
 	config               config
 	generator            simulator.Generator
+	coverageNextStart    *time.Time
 	mu                   sync.Mutex
 	pending              map[ackKey][]chan simulator.Ack
 	readyEvents          chan struct{}
@@ -206,7 +209,10 @@ func startConfiguredDevices(ctx context.Context, base config, rawMACs []string, 
 	}
 	if base.Mode == "offline-replay" {
 		for _, device := range process.devices {
-			device.prepareOfflineQueue()
+			if err := device.prepareOfflineQueue(); err != nil {
+				process.shutdown()
+				return nil, fmt.Errorf("prepare offline coverage queue for %s: %w", device.generator.MAC, err)
+			}
 		}
 		if base.OfflineWait > 0 {
 			log.Printf("OFFLINE_BUFFER waiting=%s before MQTTS connect", base.OfflineWait)
@@ -423,8 +429,10 @@ func parseConfig() (config, []string, error) {
 	flag.Var(&rawMACs, "device-mac", "device MAC (repeatable)")
 	flag.StringVar(&cfg.FirmwareVersion, "firmware-version", envOr("FIRMWARE_VERSION", "simulator-1.0.0"), "firmware version reported in telemetry")
 	flag.DurationVar(&cfg.Interval, "publish-interval", durationEnv("PUBLISH_INTERVAL", 5*time.Second), "telemetry interval")
+	flag.BoolVar(&cfg.CoverageProfile, "coverage-profile", boolEnv("COVERAGE_PROFILE", false), "emit coverage_version=1 intervals")
+	flag.BoolVar(&cfg.ClockSynchronized, "clock-synchronized", boolEnv("CLOCK_SYNCHRONIZED", true), "allow coverage evidence only after clock synchronization")
 	flag.Int64Var(&cfg.BootCounter, "boot-counter", int64Env("BOOT_COUNTER", 1), "simulated boot counter")
-	flag.Int64Var(&cfg.StartSequence, "start-seq", int64Env("START_SEQ", 1), "first simulated sequence number")
+	flag.Int64Var(&cfg.StartSequence, "start-seq", int64Env("START_SEQ", 0), "first simulated sequence number")
 	flag.IntVar(&cfg.ReplayCount, "replay-count", intEnv("REPLAY_COUNT", 5), "offline-replay queue length")
 	flag.IntVar(&cfg.QueueCapacity, "queue-capacity", intEnv("QUEUE_CAPACITY", defaultQueueCapacity), "bounded in-memory telemetry queue capacity")
 	flag.DurationVar(&cfg.AckTimeout, "ack-timeout", durationEnv("ACK_TIMEOUT", 10*time.Second), "time to wait for an application ACK")
@@ -466,6 +474,9 @@ func parseConfig() (config, []string, error) {
 	}
 	if cfg.BootCounter < 0 || cfg.StartSequence < 0 || cfg.ReplayCount <= 0 || cfg.QueueCapacity <= 0 || cfg.OfflineWait < 0 {
 		return config{}, nil, fmt.Errorf("boot counter, sequence, replay count, queue capacity, and offline wait are invalid")
+	}
+	if cfg.CoverageProfile && cfg.StartSequence != 0 {
+		return config{}, nil, errors.New("coverage profile requires start sequence 0")
 	}
 	if cfg.Mode == "offline-replay" && cfg.ReplayCount > cfg.QueueCapacity {
 		return config{}, nil, fmt.Errorf("offline replay count %d exceeds queue capacity %d", cfg.ReplayCount, cfg.QueueCapacity)
@@ -935,14 +946,21 @@ func (s *deviceSimulator) run(ctx context.Context) error {
 }
 
 func (s *deviceSimulator) runOnce(ctx context.Context) error {
-	telemetry := s.nextTelemetry(time.Now())
+	telemetry, err := s.nextTelemetryChecked(time.Now())
+	if err != nil {
+		return err
+	}
 	return s.publishAndWait(ctx, telemetry)
 }
 
 func (s *deviceSimulator) runContinuous(ctx context.Context) error {
 	ticker := time.NewTicker(s.config.Interval)
 	defer ticker.Stop()
-	if err := s.publishAndWait(ctx, s.nextTelemetry(time.Now())); err != nil && !errors.Is(err, context.Canceled) {
+	telemetry, err := s.nextTelemetryChecked(time.Now())
+	if err != nil {
+		return err
+	}
+	if err := s.publishAndWait(ctx, telemetry); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("continuous ACK error: %v", err)
 	}
 	for {
@@ -950,7 +968,11 @@ func (s *deviceSimulator) runContinuous(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case now := <-ticker.C:
-			if err := s.publishAndWait(ctx, s.nextTelemetry(now)); err != nil && !errors.Is(err, context.Canceled) {
+			telemetry, err := s.nextTelemetryChecked(now)
+			if err != nil {
+				return err
+			}
+			if err := s.publishAndWait(ctx, telemetry); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("continuous ACK error: %v", err)
 			}
 		}
@@ -958,7 +980,10 @@ func (s *deviceSimulator) runContinuous(ctx context.Context) error {
 }
 
 func (s *deviceSimulator) runDuplicate(ctx context.Context) error {
-	telemetry := s.nextTelemetry(time.Now())
+	telemetry, err := s.nextTelemetryChecked(time.Now())
+	if err != nil {
+		return err
+	}
 	if err := s.publishAndWait(ctx, telemetry); err != nil {
 		return err
 	}
@@ -975,7 +1000,10 @@ func (s *deviceSimulator) runDuplicate(ctx context.Context) error {
 }
 
 func (s *deviceSimulator) runInvalid(ctx context.Context) error {
-	telemetry := s.nextTelemetry(time.Now())
+	telemetry, err := s.nextTelemetryChecked(time.Now())
+	if err != nil {
+		return err
+	}
 	telemetry.PowerFactor = 1.5 // outside the backend's safe v1 range
 	if err := s.publishAndWait(ctx, telemetry); err != nil {
 		var rejected *ackWaitError
@@ -1036,12 +1064,18 @@ func (s *deviceSimulator) replayPendingLocked(ctx context.Context, queue *simula
 }
 
 func (s *deviceSimulator) runOfflineReplay(ctx context.Context) error {
-	s.prepareOfflineQueue()
+	if err := s.prepareOfflineQueue(); err != nil {
+		return err
+	}
 	return s.replayPending(ctx)
 }
 
 func (s *deviceSimulator) runReconnect(ctx context.Context) error {
-	if err := s.publishAndDisconnectBeforeACK(ctx, s.nextTelemetry(time.Now())); err != nil {
+	telemetry, err := s.nextTelemetryChecked(time.Now())
+	if err != nil {
+		return err
+	}
+	if err := s.publishAndDisconnectBeforeACK(ctx, telemetry); err != nil {
 		// The deliberate session loss occurs after the broker accepted the
 		// publish but before ACK authorization. The queue item therefore remains
 		// pending and reconnect mode can prove exact replay behavior.
@@ -1078,49 +1112,100 @@ func (s *deviceSimulator) runReconnect(ctx context.Context) error {
 	if err := s.replayPending(ctx); err != nil {
 		return err
 	}
-	return s.publishAndWait(ctx, s.nextTelemetry(time.Now()))
+	telemetry, err = s.nextTelemetryChecked(time.Now())
+	if err != nil {
+		return err
+	}
+	return s.publishAndWait(ctx, telemetry)
 }
 
-func (s *deviceSimulator) prepareOfflineQueue() {
+func (s *deviceSimulator) prepareOfflineQueue() error {
 	if s.offlineQueue != nil {
-		return
+		return nil
 	}
 	if s.config.ReplayCount <= 0 {
-		return
+		return nil
 	}
 	queue, err := s.telemetryQueue()
 	if err != nil {
 		log.Printf("LOCAL_QUEUE unavailable: %v", err)
-		return
+		return err
 	}
 	base := time.Now()
 	if s.config.RecordedAt != nil {
 		base = *s.config.RecordedAt
 	}
 	telemetryQueue := make([]simulator.Telemetry, 0, s.config.ReplayCount)
+	logicalStart := base
 	for i := 0; i < s.config.ReplayCount; i++ {
-		telemetry := s.generator.Next(base.Add(time.Duration(i)*s.config.Interval), s.config.Interval)
+		start := logicalStart
+		var telemetry simulator.Telemetry
+		if s.config.CoverageProfile {
+			end, endErr := simulator.CoverageIntervalEnd(start, s.config.Interval)
+			if endErr != nil {
+				return endErr
+			}
+			telemetry, telemetryErr := s.generator.NextCoverageCheckedWithClock(start, end, s.config.ClockSynchronized)
+			if telemetryErr != nil {
+				return telemetryErr
+			}
+			logicalStart = end
+			telemetryQueue = append(telemetryQueue, telemetry)
+			body, marshalErr := json.Marshal(telemetry)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if enqueueErr := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: body}); enqueueErr != nil {
+				return enqueueErr
+			}
+			continue
+		} else {
+			telemetry = s.generator.Next(start, s.config.Interval)
+		}
 		body, marshalErr := json.Marshal(telemetry)
 		if marshalErr != nil {
-			log.Printf("LOCAL_QUEUE encode failed: %v", marshalErr)
-			return
+			return marshalErr
 		}
 		if enqueueErr := queue.Enqueue(context.Background(), simulator.QueuedTelemetry{Telemetry: telemetry, Payload: body}); enqueueErr != nil {
-			log.Printf("LOCAL_QUEUE enqueue failed: %v", enqueueErr)
-			return
+			return enqueueErr
 		}
 		telemetryQueue = append(telemetryQueue, telemetry)
+		logicalStart = base.Add(time.Duration(i+1) * s.config.Interval)
 	}
 	s.offlineQueue = telemetryQueue
 	log.Printf("LOCAL_QUEUE created=%d while disconnected", len(telemetryQueue))
+	return nil
 }
 
 func (s *deviceSimulator) nextTelemetry(now time.Time) simulator.Telemetry {
-	if s.config.RecordedAt != nil {
-		offset := s.generator.Sequence - s.config.StartSequence
-		now = s.config.RecordedAt.Add(time.Duration(offset) * s.config.Interval)
+	telemetry, _ := s.nextTelemetryChecked(now)
+	return telemetry
+}
+
+func (s *deviceSimulator) nextTelemetryChecked(now time.Time) (simulator.Telemetry, error) {
+	if !s.config.CoverageProfile {
+		if s.config.RecordedAt != nil {
+			offset := s.generator.Sequence - s.config.StartSequence
+			now = s.config.RecordedAt.Add(time.Duration(offset) * s.config.Interval)
+		}
+		return s.generator.Next(now, s.config.Interval), nil
 	}
-	return s.generator.Next(now, s.config.Interval)
+	start := now
+	if s.coverageNextStart != nil {
+		start = *s.coverageNextStart
+	} else if s.config.RecordedAt != nil {
+		start = *s.config.RecordedAt
+	}
+	end, err := simulator.CoverageIntervalEnd(start, s.config.Interval)
+	if err != nil {
+		return simulator.Telemetry{}, err
+	}
+	telemetry, err := s.generator.NextCoverageCheckedWithClock(start, end, s.config.ClockSynchronized)
+	if err != nil {
+		return simulator.Telemetry{}, err
+	}
+	s.coverageNextStart = &end
+	return telemetry, nil
 }
 
 func (s *deviceSimulator) drainReadyEvents() {

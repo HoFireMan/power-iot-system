@@ -1,6 +1,8 @@
 package iot
 
 import (
+	"database/sql"
+	"io/fs"
 	"os"
 	"testing"
 
@@ -10,6 +12,23 @@ import (
 
 func TestMain(m *testing.M) {
 	os.Exit(testsupport.Run(m,
-		testsupport.Spec{Environment: "TEST_DATABASE_URL", SourceEnvironment: "TEST_DATABASE_URL", Migrate: migrations.Up},
+		testsupport.Spec{Environment: "TEST_DATABASE_URL", SourceEnvironment: "TEST_DATABASE_URL", Migrate: migrateB02TestSchema},
 	))
+}
+
+func migrateB02TestSchema(databaseURL string) error {
+	if err := migrations.Up(databaseURL); err != nil {
+		return err
+	}
+	body, err := fs.ReadFile(migrations.Files, "sql/000007_b02_coverage_foundation.up.sql")
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec(string(body))
+	return err
 }

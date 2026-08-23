@@ -66,7 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("schema admission refused: disposition=%s state=%s: %v", admission.Disposition, admission.State, err)
 	}
-	if admission.Disposition != migrations.RuntimeServeV6 {
+	if !runtimeAdmissionAccepted(admission.Disposition) {
 		log.Fatalf("schema admission refused: disposition=%s state=%s", admission.Disposition, admission.State)
 	}
 	// The bootstrap is an idempotent, single-key system seed under the shared
@@ -147,6 +147,10 @@ func main() {
 	if err := server.Shutdown(shutdownContext); err != nil {
 		log.Printf("HTTP shutdown failed: %v", err)
 	}
+}
+
+func runtimeAdmissionAccepted(disposition migrations.RuntimeAdmissionDisposition) bool {
+	return disposition == migrations.RuntimeServeB02
 }
 
 func envOr(key, fallback string) string {

@@ -2,19 +2,22 @@ package iot
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"power-iot-backend/internal/core/coverage"
 	"power-iot-backend/internal/core/domain"
 	"power-iot-backend/internal/data/migrations"
 )
 
-// IngestResultStatus is the semantic outcome of a telemetry transaction.
 type IngestResultStatus string
 
 const (
@@ -22,33 +25,33 @@ const (
 	IngestDuplicate         IngestResultStatus = "duplicate"
 	IngestUnknownDevice     IngestResultStatus = "unknown_device"
 	IngestUnknownAssignment IngestResultStatus = "unknown_assignment"
+	IngestConflict          IngestResultStatus = "conflict"
 	IngestInvalid           IngestResultStatus = "invalid"
 	IngestFailed            IngestResultStatus = "failed"
 )
 
-// IngestResult is deliberately independent of GORM, SQL, and TimescaleDB.
-type IngestResult struct {
-	Status IngestResultStatus
-}
+type IngestResult struct{ Status IngestResultStatus }
 
-// TelemetryIngestor owns the transactional identity, attribution, and
-// persistence semantics for Protocol v1 telemetry. MQTT transport only needs
-// to provide a validated payload and the original broker ingress time.
+var errCoverageAssignmentRollback = errors.New("coverage assignment missing; rollback")
+
 type TelemetryIngestor struct {
-	db               *gorm.DB
-	afterKeyClaim    func() error
-	beforeDeviceLock func(*gorm.DB) error
-	afterDeviceLock  func() error
+	db                  *gorm.DB
+	afterKeyClaim       func() error
+	beforeDeviceLock    func(*gorm.DB) error
+	afterDeviceLock     func() error
+	coverageMaxInterval func(*gorm.DB) (int64, error)
 }
 
-func NewTelemetryIngestor(db *gorm.DB) *TelemetryIngestor {
-	return &TelemetryIngestor{db: db}
+func NewTelemetryIngestor(db *gorm.DB) *TelemetryIngestor { return &TelemetryIngestor{db: db} }
+
+// SetCoverageMaxIntervalProvider is a test/configuration seam. A nil provider
+// reads the required millisecond value from system_configs.
+func (i *TelemetryIngestor) SetCoverageMaxIntervalProvider(provider func(*gorm.DB) (int64, error)) {
+	if i != nil {
+		i.coverageMaxInterval = provider
+	}
 }
 
-// Ingest resolves historical attribution and atomically claims the protocol
-// identity, writes the reading, updates device communication state, and runs
-// existing transactional alert work. Terminal ACK mapping remains outside this
-// method and therefore outside the database transaction callback.
 func (i *TelemetryIngestor) Ingest(data MqttPayload, receivedAt time.Time) (IngestResult, error) {
 	return i.IngestContext(context.Background(), data, receivedAt)
 }
@@ -73,12 +76,14 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 	} else {
 		receivedAt = receivedAt.UTC()
 	}
+	isCoverage := data.CoverageVersion.Present
 	recordedAt := telemetryTimeAt(data.Timestamp, receivedAt)
+	if isCoverage {
+		recordedAt = time.UnixMilli(data.IntervalStartTS.Value).UTC()
+	}
 	result := IngestResult{Status: IngestFailed}
 
 	err = i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// The shared fence is the first application/database operation. Device
-		// serialization and every identity/assignment query follow admission.
 		if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
 			return err
 		}
@@ -88,9 +93,6 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 				return err
 			}
 		}
-		// Device is the shared serialization row. It must be locked before any
-		// assignment-dependent historical lookup; recordedAt remains the
-		// ingress-captured payload time while this transaction may wait.
 		if err := findDeviceForUpdate(tx, data.MacAddress, &device); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				result.Status = IngestUnknownDevice
@@ -104,33 +106,37 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 			}
 		}
 
-		var assignment domain.DeviceAssignment
-		assignmentQuery := tx.Where(
-			"device_id = ? AND valid_from <= ? AND (valid_to IS NULL OR ? < valid_to)",
-			device.ID, recordedAt, recordedAt,
-		).Order("valid_from DESC").First(&assignment)
-		if errors.Is(assignmentQuery.Error, gorm.ErrRecordNotFound) {
-			result.Status = IngestUnknownAssignment
-			return nil
-		}
-		if assignmentQuery.Error != nil {
-			return assignmentQuery.Error
+		var digest []byte
+		if isCoverage {
+			maxInterval, err := i.loadCoverageMaxInterval(tx)
+			if err != nil {
+				return err
+			}
+			interval := coverage.Interval{
+				StartMilliseconds: data.IntervalStartTS.Value,
+				EndMilliseconds:   data.IntervalEndTS.Value,
+				TimestampSeconds:  data.Timestamp,
+			}
+			if err := interval.Validate(maxInterval); err != nil {
+				result.Status = IngestInvalid
+				return err
+			}
+			hash := coverage.Digest(coverage.DigestInput{
+				DeviceID: uint64(device.ID), ProfileVersion: data.CoverageVersion.Value,
+				BootCounter: data.BootCounter, Sequence: data.Sequence,
+				IntervalStartMs: data.IntervalStartTS.Value, IntervalEndMs: data.IntervalEndTS.Value,
+				RecordedAt: recordedAt, EnergyDeltaKwh: energyDeltaValue(data.EnergyDeltaKwh),
+			})
+			digest = append([]byte(nil), hash[:]...)
 		}
 
-		bootCounter, sequence := data.BootCounter, data.Sequence
 		key := domain.TelemetryIngestKey{
-			ID:          uuid.New(),
-			DeviceID:    device.ID,
-			BootCounter: bootCounter,
-			Sequence:    sequence,
-			ReceivedAt:  receivedAt,
+			ID: uuid.New(), DeviceID: device.ID, BootCounter: data.BootCounter,
+			Sequence: data.Sequence, ReceivedAt: receivedAt,
+			CanonicalCoverageDigest: digest,
 		}
 		keyInsert := tx.Clauses(clause.OnConflict{
-			Columns: []clause.Column{
-				{Name: "device_id"},
-				{Name: "boot_counter"},
-				{Name: "sequence"},
-			},
+			Columns:   []clause.Column{{Name: "device_id"}, {Name: "boot_counter"}, {Name: "sequence"}},
 			DoNothing: true,
 		}).Create(&key)
 		if keyInsert.Error != nil {
@@ -138,15 +144,75 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 		}
 
 		if keyInsert.RowsAffected == 0 {
+			var existing domain.TelemetryIngestKey
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("device_id = ? AND boot_counter = ? AND sequence = ?", device.ID, data.BootCounter, data.Sequence).
+				First(&existing).Error; err != nil {
+				return err
+			}
+			if !isCoverage {
+				if err := markDeviceSeen(tx, device.ID, receivedAt); err != nil {
+					return err
+				}
+				result.Status = IngestDuplicate
+				return nil
+			}
+			if !existing.ConflictDetected && len(existing.CanonicalCoverageDigest) == len(digest) && subtle.ConstantTimeCompare(existing.CanonicalCoverageDigest, digest) == 1 {
+				if err := markDeviceSeen(tx, device.ID, receivedAt); err != nil {
+					return err
+				}
+				result.Status = IngestDuplicate
+				return nil
+			}
+			if !existing.ConflictDetected {
+				if err := tx.Model(&domain.TelemetryIngestKey{}).Where("id = ?", existing.ID).Update("conflict_detected", true).Error; err != nil {
+					return err
+				}
+			}
 			if err := markDeviceSeen(tx, device.ID, receivedAt); err != nil {
 				return err
 			}
-			result.Status = IngestDuplicate
+			result.Status = IngestConflict
 			return nil
 		}
+
 		if i.afterKeyClaim != nil {
 			if err := i.afterKeyClaim(); err != nil {
 				return err
+			}
+		}
+
+		var assignment domain.DeviceAssignment
+		if isCoverage {
+			start := recordedAt
+			end := time.UnixMilli(data.IntervalEndTS.Value).UTC()
+			var assignments []domain.DeviceAssignment
+			query := tx.Where(
+				"device_id = ? AND valid_from <= ? AND (valid_to IS NULL OR ? <= valid_to)",
+				device.ID, start, end,
+			).Limit(2).Find(&assignments)
+			if query.Error != nil {
+				return query.Error
+			}
+			if len(assignments) == 0 {
+				result.Status = IngestUnknownAssignment
+				return errCoverageAssignmentRollback
+			}
+			if len(assignments) != 1 {
+				return errors.New("coverage assignment is ambiguous")
+			}
+			assignment = assignments[0]
+		} else {
+			query := tx.Where(
+				"device_id = ? AND valid_from <= ? AND (valid_to IS NULL OR ? < valid_to)",
+				device.ID, recordedAt, recordedAt,
+			).Order("valid_from DESC").First(&assignment)
+			if errors.Is(query.Error, gorm.ErrRecordNotFound) {
+				result.Status = IngestUnknownAssignment
+				return errCoverageAssignmentRollback
+			}
+			if query.Error != nil {
+				return query.Error
 			}
 		}
 
@@ -154,26 +220,21 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 		powerFactor := data.PowerFactor
 		rssi, validSamples, invalidSamples := data.RSSI, data.ValidSamples, data.InvalidSamples
 		reading := domain.PowerReading{
-			Time:               recordedAt,
-			RecordedAt:         recordedAt,
-			ReceivedAt:         receivedAt,
-			MeasurementPointID: &measurementPointID,
-			DeviceID:           device.ID,
-			Voltage:            data.Voltage,
-			Current:            data.Current,
-			Power:              data.Power,
-			ActivePower:        data.Power,
-			KwhTotal:           data.KwhTotal,
-			EnergyDeltaKwh:     data.EnergyDeltaKwh,
-			PowerFactor:        &powerFactor,
-			RSSI:               &rssi,
-			ProtocolVersion:    data.ProtocolVersion,
-			BootID:             data.BootID,
-			BootCounter:        &bootCounter,
-			Sequence:           &sequence,
-			ValidSamples:       &validSamples,
-			InvalidSamples:     &invalidSamples,
-			FirmwareVersion:    data.FirmwareVersion,
+			Time: recordedAt, RecordedAt: recordedAt, ReceivedAt: receivedAt,
+			MeasurementPointID: &measurementPointID, DeviceID: device.ID,
+			Voltage: data.Voltage, Current: data.Current, Power: data.Power,
+			ActivePower: data.Power, KwhTotal: data.KwhTotal, EnergyDeltaKwh: data.EnergyDeltaKwh,
+			PowerFactor: &powerFactor, RSSI: &rssi, ProtocolVersion: data.ProtocolVersion,
+			BootID: data.BootID, BootCounter: &data.BootCounter, Sequence: &data.Sequence,
+			ValidSamples: &validSamples, InvalidSamples: &invalidSamples, FirmwareVersion: data.FirmwareVersion,
+		}
+		if isCoverage {
+			version := data.CoverageVersion.Value
+			start := recordedAt
+			end := time.UnixMilli(data.IntervalEndTS.Value).UTC()
+			reading.CoverageVersion = &version
+			reading.IntervalStart = &start
+			reading.IntervalEnd = &end
 		}
 		if err := tx.Create(&reading).Error; err != nil {
 			return err
@@ -181,16 +242,45 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 		if err := markDeviceSeen(tx, device.ID, receivedAt); err != nil {
 			return err
 		}
-		if err := checkTelemetryAlerts(tx, device, data, recordedAt); err != nil {
+		alertAt := recordedAt
+		if isCoverage {
+			alertAt = time.Unix(data.Timestamp, 0).UTC()
+		}
+		if err := checkTelemetryAlerts(tx, device, data, alertAt); err != nil {
 			return err
 		}
 		result.Status = IngestStored
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errCoverageAssignmentRollback) {
+			return result, nil
+		}
 		return IngestResult{Status: IngestFailed}, err
 	}
 	return result, nil
+}
+
+func energyDeltaValue(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func (i *TelemetryIngestor) loadCoverageMaxInterval(tx *gorm.DB) (int64, error) {
+	if i.coverageMaxInterval != nil {
+		return i.coverageMaxInterval(tx)
+	}
+	var raw string
+	if err := tx.Raw("SELECT value FROM system_configs WHERE key = ? FOR SHARE", "coverage.max_interval_ms").Row().Scan(&raw); err != nil {
+		return 0, fmt.Errorf("coverage max interval configuration unavailable: %w", err)
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value < coverage.MinIntervalMilliseconds {
+		return 0, errors.New("coverage max interval configuration is invalid")
+	}
+	return value, nil
 }
 
 func findDeviceForUpdate(tx *gorm.DB, mac string, device *domain.Device) error {
@@ -209,15 +299,12 @@ func markDeviceSeen(tx *gorm.DB, deviceID uint, receivedAt time.Time) error {
 		Update("last_seen", receivedAt).Error
 }
 
-func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, recordedAt time.Time) error {
+func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, eventTime time.Time) error {
 	settings := device.AlertSettings
-	if settings.ID == 0 || !settings.IsEnabled {
+	if settings.ID == 0 || !settings.IsEnabled || settings.NonUsageStartTime == "" || settings.NonUsageEndTime == "" {
 		return nil
 	}
-	if settings.NonUsageStartTime == "" || settings.NonUsageEndTime == "" {
-		return nil
-	}
-	currentHM := recordedAt.Format("15:04")
+	currentHM := eventTime.Format("15:04")
 	inRange := false
 	if settings.NonUsageStartTime > settings.NonUsageEndTime {
 		inRange = currentHM >= settings.NonUsageStartTime || currentHM <= settings.NonUsageEndTime
@@ -228,14 +315,10 @@ func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, r
 		return nil
 	}
 	alert := domain.AlertLog{
-		DeviceID:  device.ID,
-		Type:      "CURFEW_USAGE",
-		Message:   fmt.Sprintf("非營業時間異常運轉 (偵測功率: %.2f W)", data.Power),
-		Voltage:   data.Voltage,
-		Current:   data.Current,
-		Power:     data.Power,
-		CreatedAt: recordedAt,
-		IsRead:    false,
+		DeviceID: device.ID, Type: "CURFEW_USAGE",
+		Message: fmt.Sprintf("非營業時間異常運轉 (偵測功率: %.2f W)", data.Power),
+		Voltage: data.Voltage, Current: data.Current, Power: data.Power,
+		CreatedAt: eventTime, IsRead: false,
 	}
 	return tx.Create(&alert).Error
 }
