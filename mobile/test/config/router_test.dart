@@ -37,6 +37,7 @@ void main() {
       '/profile',
       '/devices',
       '/devices/device-1/alert',
+      '/shops/7/measurement-points/00000000-0000-4000-8000-000000000001',
       '/shops',
       '/admin/mock',
       '/admin/mock/bind-device',

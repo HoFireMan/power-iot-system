@@ -80,11 +80,20 @@ class DashboardDto {
 
   static DashboardDevice _device(Object? value) {
     final map = _map(value, 'device');
-    _exactKeys(map, const {'id', 'name', 'isOnline', 'lastSeen'}, 'device');
+    _exactKeys(
+        map,
+        const {
+          'measurementPointRef',
+          'name',
+          'isOnline',
+          'lastSeen',
+        },
+        'device');
     final online = map['isOnline'];
     if (online is! bool) throw const FormatException('Invalid device.isOnline');
     return DashboardDevice(
-      id: _requiredString(map['id'], 'device.id'),
+      measurementPointRef: _requiredString(
+          map['measurementPointRef'], 'device.measurementPointRef'),
       name: _requiredString(map['name'], 'device.name'),
       isOnline: online,
       lastSeen: _nullableDate(map['lastSeen'], 'device.lastSeen'),

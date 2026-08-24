@@ -19,6 +19,7 @@ import (
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
 	applicationme "power-iot-backend/internal/application/me"
+	applicationmeasurementpointdetail "power-iot-backend/internal/application/measurementpointdetail"
 	applicationshops "power-iot-backend/internal/application/shops"
 	"power-iot-backend/internal/core/domain"
 	"power-iot-backend/internal/core/iot"
@@ -115,6 +116,7 @@ func main() {
 	httpadapter.RegisterMeRoute(r, authenticator, applicationme.NewGormQueryRunner(db))
 	httpadapter.RegisterShopsRoute(r, authenticator, applicationshops.NewGormQueryRunner(db))
 	httpadapter.RegisterDashboardRoute(r, authenticator, applicationdashboard.NewGormQueryRunner(db))
+	httpadapter.RegisterMeasurementPointDetailRoute(r, authenticator, applicationmeasurementpointdetail.NewGormQueryRunner(db))
 	r.GET("/", func(c *gin.Context) {
 		mqttReady := mqttService.Ready()
 		status := "degraded"

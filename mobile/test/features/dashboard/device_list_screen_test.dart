@@ -100,12 +100,12 @@ void main() {
       tester,
       _dashboard(const [
         DashboardDevice(
-            id: 'remote-online',
+            measurementPointRef: '00000000-0000-4000-8000-000000000001',
             name: 'Remote online',
             isOnline: true,
             lastSeen: null),
         DashboardDevice(
-            id: 'remote-offline',
+            measurementPointRef: '00000000-0000-4000-8000-000000000002',
             name: 'Remote offline',
             isOnline: false,
             lastSeen: null),

@@ -33,10 +33,13 @@ type Shop struct {
 // Device is the current assignment/device projection. Status fields come
 // directly from devices and are independent of telemetry freshness.
 type Device struct {
-	ID       string
-	Name     string
-	IsOnline bool
-	LastSeen *time.Time
+	// ID is retained internally for projection uniqueness; it is not a public
+	// navigation identity. MeasurementPointRef is the stable page locator.
+	ID                  string
+	MeasurementPointRef string
+	Name                string
+	IsOnline            bool
+	LastSeen            *time.Time
 }
 
 // Dashboard is the application result. Energy and carbon fields remain nil;
@@ -94,7 +97,7 @@ func (s *Service) GetDashboard(ctx context.Context, userID, shopID uint) (Dashbo
 			value := row.LastSeen.UTC()
 			lastSeen = &value
 		}
-		devices = append(devices, Device{ID: id, Name: row.Name, IsOnline: row.IsOnline, LastSeen: lastSeen})
+		devices = append(devices, Device{ID: id, MeasurementPointRef: row.MeasurementPointID.String(), Name: row.Name, IsOnline: row.IsOnline, LastSeen: lastSeen})
 	}
 	return Dashboard{
 		Shop:          Shop{ID: strconv.FormatUint(uint64(projection.Shop.ID), 10), Code: projection.Shop.Code, Name: projection.Shop.Name},

@@ -15,6 +15,7 @@ import 'package:power_iot_app/features/devices/presentation/screens/device_alert
 import 'package:power_iot_app/features/devices/presentation/screens/device_list_screen.dart';
 import 'package:power_iot_app/features/profile/screens/profile_screen.dart';
 import 'package:power_iot_app/features/shops/screens/shop_list_screen.dart';
+import 'package:power_iot_app/features/measurement_point_detail/presentation/screens/measurement_point_detail_screen.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final auth = ref.watch(authControllerProvider);
@@ -38,6 +39,13 @@ GoRouter createRouter(AuthController auth) => GoRouter(
         GoRoute(
           path: '/devices',
           builder: (context, state) => const DeviceListScreen(),
+        ),
+        GoRoute(
+          path: '/shops/:shopId/measurement-points/:measurementPointRef',
+          builder: (context, state) => MeasurementPointDetailScreen(
+            shopId: state.pathParameters['shopId']!,
+            measurementPointRef: state.pathParameters['measurementPointRef']!,
+          ),
         ),
         GoRoute(
           path: '/devices/:id/alert',
@@ -102,5 +110,7 @@ bool _isProtectedLocation(String location) =>
     location == '/profile' ||
     location == '/devices' ||
     location.startsWith('/devices/') ||
+    location.startsWith('/shops/') &&
+        location.contains('/measurement-points/') ||
     location == '/shops' ||
     location.startsWith('/admin/mock');
