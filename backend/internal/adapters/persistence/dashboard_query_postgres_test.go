@@ -12,7 +12,7 @@ import (
 )
 
 func TestDashboardProjectionUsesAuthorizationAssignmentAndDeviceStatusAuthority(t *testing.T) {
-	db := authDB(t)
+	db := openPersistenceDB(t)
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 	macPrefix := suffix[:8]
 	clientCode := "b7a-" + suffix
@@ -65,7 +65,7 @@ func TestDashboardProjectionUsesAuthorizationAssignmentAndDeviceStatusAuthority(
 	insertDashboardPowerReading(t, db, negativeDevice, &otherPointID, now.Add(-time.Minute), 99)
 
 	repository := NewDashboardQueryRepository(db)
-	projection, err := repository.FindDashboard(context.Background(), relatedUser, activeShop, now)
+	projection, err := repository.FindDashboard(context.Background(), relatedUser, activeShop, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestDashboardProjectionUsesAuthorizationAssignmentAndDeviceStatusAuthority(
 		"admin":       {user: adminUser, shop: activeShop},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := repository.FindDashboard(context.Background(), candidate.user, candidate.shop, now); err != ErrDashboardNotFound {
+			if _, err := repository.FindDashboard(context.Background(), candidate.user, candidate.shop, func() time.Time { return now }); err != ErrDashboardNotFound {
 				t.Fatalf("err=%v, want ErrDashboardNotFound", err)
 			}
 		})
@@ -149,6 +149,7 @@ func newDashboardPowerFixture(t *testing.T, db *gorm.DB, deviceCount int) dashbo
 	t.Cleanup(func() {
 		if len(fixture.deviceIDs) > 0 {
 			db.Exec("DELETE FROM power_readings WHERE device_id IN ?", fixture.deviceIDs)
+			db.Exec("DELETE FROM telemetry_ingest_keys WHERE device_id IN ?", fixture.deviceIDs)
 			db.Exec("DELETE FROM device_assignments WHERE device_id IN ?", fixture.deviceIDs)
 		}
 		db.Exec("DELETE FROM user_shop_relations WHERE user_id = ?", userID)
@@ -174,7 +175,7 @@ func insertDashboardPowerReading(t *testing.T, db *gorm.DB, deviceID uint, point
 }
 
 func TestDashboardCurrentPowerAcceptanceMatrix(t *testing.T) {
-	db := authDB(t)
+	db := openPersistenceDB(t)
 	tests := []struct {
 		name        string
 		deviceCount int
@@ -273,7 +274,7 @@ func TestDashboardCurrentPowerAcceptanceMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newDashboardPowerFixture(t, db, tc.deviceCount)
 			tc.write(&fixture)
-			projection, err := NewDashboardQueryRepository(db).FindDashboard(context.Background(), fixture.userID, fixture.shopID, fixture.now)
+			projection, err := NewDashboardQueryRepository(db).FindDashboard(context.Background(), fixture.userID, fixture.shopID, func() time.Time { return fixture.now })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -291,7 +292,7 @@ func TestDashboardCurrentPowerAcceptanceMatrix(t *testing.T) {
 }
 
 func TestDashboardCurrentPowerIsolatedAcrossAssignmentHistory(t *testing.T) {
-	db := authDB(t)
+	db := openPersistenceDB(t)
 	fixture := newDashboardPowerFixture(t, db, 1)
 	deviceID := fixture.deviceIDs[0]
 	currentPoint := fixture.pointIDs[0]
@@ -316,7 +317,7 @@ func TestDashboardCurrentPowerIsolatedAcrossAssignmentHistory(t *testing.T) {
 		db.Exec("DELETE FROM shops WHERE id = ?", otherShop)
 		db.Exec("DELETE FROM clients WHERE id = ?", otherClient)
 	})
-	projection, err := NewDashboardQueryRepository(db).FindDashboard(context.Background(), fixture.userID, fixture.shopID, fixture.now)
+	projection, err := NewDashboardQueryRepository(db).FindDashboard(context.Background(), fixture.userID, fixture.shopID, func() time.Time { return fixture.now })
 	if err != nil {
 		t.Fatal(err)
 	}

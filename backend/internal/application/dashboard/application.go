@@ -1,6 +1,6 @@
 // Package dashboard contains the read-only application capability for the
-// shop dashboard. B7-B supplies authoritative current power; aggregate values
-// remain deferred.
+// shop dashboard. Current power and best-effort observed energy are supplied
+// by the authoritative persistence projection.
 package dashboard
 
 import (
@@ -42,8 +42,8 @@ type Device struct {
 	LastSeen            *time.Time
 }
 
-// Dashboard is the application result. Energy and carbon fields remain nil;
-// current power is supplied by the authoritative B7-B projection.
+// Dashboard is the application result. Current power and shop energy are
+// supplied by authoritative persistence projections; carbon remains deferred.
 type Dashboard struct {
 	Shop          Shop
 	Devices       []Device
@@ -56,7 +56,7 @@ type Dashboard struct {
 }
 
 type Query interface {
-	FindDashboard(context.Context, uint, uint, time.Time) (persistence.DashboardProjection, error)
+	FindDashboard(context.Context, uint, uint, func() time.Time) (persistence.DashboardProjection, error)
 }
 
 type Service struct {
@@ -75,8 +75,7 @@ func (s *Service) GetDashboard(ctx context.Context, userID, shopID uint) (Dashbo
 	if s == nil || s.query == nil || userID == 0 || shopID == 0 {
 		return Dashboard{}, persistence.ErrDashboardNotFound
 	}
-	snapshotNow := s.now().UTC()
-	projection, err := s.query.FindDashboard(ctx, userID, shopID, snapshotNow)
+	projection, err := s.query.FindDashboard(ctx, userID, shopID, s.now)
 	if err != nil {
 		if errors.Is(err, persistence.ErrDashboardNotFound) {
 			return Dashboard{}, ErrShopNotFound
@@ -99,10 +98,16 @@ func (s *Service) GetDashboard(ctx context.Context, userID, shopID uint) (Dashbo
 		}
 		devices = append(devices, Device{ID: id, MeasurementPointRef: row.MeasurementPointID.String(), Name: row.Name, IsOnline: row.IsOnline, LastSeen: lastSeen})
 	}
+	snapshotNow := projection.Snapshot.UTC()
+	if snapshotNow.IsZero() {
+		snapshotNow = s.now().UTC()
+	}
 	return Dashboard{
 		Shop:          Shop{ID: strconv.FormatUint(uint64(projection.Shop.ID), 10), Code: projection.Shop.Code, Name: projection.Shop.Name},
 		Devices:       devices,
 		CurrentPowerW: projection.CurrentPowerW,
+		DailyKwh:      projection.DailyKwh,
+		MonthlyKwh:    projection.MonthlyKwh,
 		GeneratedAt:   snapshotNow,
 	}, nil
 }

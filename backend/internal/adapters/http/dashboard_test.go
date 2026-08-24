@@ -47,12 +47,14 @@ func dashboardRouter(auth AccessTokenAuthenticator, query DashboardQuery) *gin.E
 	return router
 }
 
-func TestDashboardResponseHasExactB7AShapeAndNullDeferredValues(t *testing.T) {
+func TestDashboardResponseHasExactB7AShapeEnergyAndNullCarbon(t *testing.T) {
 	snapshot := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	lastSeen := snapshot.Add(-time.Minute)
+	daily, monthly := 0.0, 12.5
 	query := &dashboardQueryStub{result: applicationdashboard.Dashboard{
 		Shop:    applicationdashboard.Shop{ID: "7", Code: "S7", Name: "Shop 7"},
 		Devices: []applicationdashboard.Device{{ID: "9", Name: "Meter", IsOnline: true, LastSeen: &lastSeen}}, GeneratedAt: snapshot,
+		DailyKwh: &daily, MonthlyKwh: &monthly,
 	}}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/shops/7/dashboard", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -69,7 +71,10 @@ func TestDashboardResponseHasExactB7AShapeAndNullDeferredValues(t *testing.T) {
 	if len(payload) != 8 {
 		t.Fatalf("top-level fields=%v", payload)
 	}
-	for _, field := range []string{"currentPowerW", "dailyKwh", "monthlyKwh", "dailyKg", "monthlyKg"} {
+	if payload["currentPowerW"] != nil || payload["dailyKwh"] != float64(0) || payload["monthlyKwh"] != float64(12.5) {
+		t.Fatalf("power/energy payload=%v", payload)
+	}
+	for _, field := range []string{"dailyKg", "monthlyKg"} {
 		if value, exists := payload[field]; !exists || value != nil {
 			t.Fatalf("%s=%v exists=%t", field, value, exists)
 		}
