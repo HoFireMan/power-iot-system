@@ -39,10 +39,21 @@ func New(query Query, now func() time.Time) *Service {
 }
 
 func (s *Service) Get(ctx context.Context, pointID uuid.UUID) (Result, error) {
-	if s == nil || s.query == nil || pointID == uuid.Nil {
+	if s == nil {
 		return Result{}, persistence.ErrDashboardNotFound
 	}
-	projection, err := s.query.FindMeasurementPointEnergy(ctx, pointID, s.now)
+	return s.GetAt(ctx, pointID, s.now)
+}
+
+// GetAt evaluates the energy windows using the supplied application snapshot.
+// The persistence query still establishes its PostgreSQL MVCC snapshot before
+// invoking now, preserving the B-02 snapshot ordering while allowing a
+// composed detail response to share one request instant.
+func (s *Service) GetAt(ctx context.Context, pointID uuid.UUID, now func() time.Time) (Result, error) {
+	if s == nil || s.query == nil || pointID == uuid.Nil || now == nil {
+		return Result{}, persistence.ErrDashboardNotFound
+	}
+	projection, err := s.query.FindMeasurementPointEnergy(ctx, pointID, now)
 	if err != nil {
 		return Result{}, err
 	}

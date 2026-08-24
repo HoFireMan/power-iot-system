@@ -13,6 +13,7 @@ import (
 
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
+	applicationmeasurementpointdetail "power-iot-backend/internal/application/measurementpointdetail"
 	"power-iot-backend/internal/security"
 
 	"github.com/gin-gonic/gin"
@@ -107,6 +108,8 @@ func MapPublicError(err error, requestID string) PublicErrorMapping {
 		code, message, status = "UNAUTHORIZED", "unauthorized", http.StatusUnauthorized
 	case errors.Is(err, applicationdashboard.ErrShopNotFound):
 		code, message, status = "SHOP_NOT_FOUND", "shop not found", http.StatusNotFound
+	case errors.Is(err, applicationmeasurementpointdetail.ErrMeasurementPointNotFound):
+		code, message, status = "MEASUREMENT_POINT_NOT_FOUND", "measurement point not found", http.StatusNotFound
 	}
 	return PublicErrorMapping{Status: status, Error: security.NewPublicError(code, message, requestID)}
 }

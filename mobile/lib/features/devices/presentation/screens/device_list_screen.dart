@@ -71,11 +71,12 @@ class DeviceListScreen extends ConsumerWidget {
         if (dashboard == null || dashboard.devices.isEmpty) {
           return const _Message('目前沒有設備');
         }
-        return _deviceList(context, dashboard.devices);
+        return _deviceList(context, shopId, dashboard.devices);
     }
   }
 
-  Widget _deviceList(BuildContext context, List<DashboardDevice> devices) {
+  Widget _deviceList(
+      BuildContext context, String shopId, List<DashboardDevice> devices) {
     final online = devices.where((device) => device.isOnline).toList();
     final offline = devices.where((device) => !device.isOnline).toList();
     return ListView(
@@ -86,13 +87,13 @@ class DeviceListScreen extends ConsumerWidget {
           const SizedBox(height: 24),
           _sectionTitle('已連線', Colors.green),
           const SizedBox(height: 12),
-          ...online.map((device) => _deviceCard(context, device)),
+          ...online.map((device) => _deviceCard(context, shopId, device)),
         ],
         if (offline.isNotEmpty) ...[
           const SizedBox(height: 24),
           _sectionTitle('連線中斷', AppTheme.errorColor),
           const SizedBox(height: 12),
-          ...offline.map((device) => _deviceCard(context, device)),
+          ...offline.map((device) => _deviceCard(context, shopId, device)),
         ],
       ],
     );
@@ -156,67 +157,70 @@ class DeviceListScreen extends ConsumerWidget {
     );
   }
 
-  Widget _deviceCard(BuildContext context, DashboardDevice device) {
-    final canOpenAlert = device.id.trim().isNotEmpty;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border:
-            device.isOnline ? null : Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(
-              color: Colors.black.withValues(alpha: 0.05),
-              blurRadius: 10,
-              offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: device.isOnline
-                  ? AppTheme.secondaryColor.withValues(alpha: 0.15)
-                  : Colors.grey.shade100,
-              shape: BoxShape.circle,
+  Widget _deviceCard(
+      BuildContext context, String shopId, DashboardDevice device) {
+    final canOpenDetail = device.measurementPointRef.trim().isNotEmpty;
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: canOpenDetail
+          ? () => context.push(
+                '/shops/${Uri.encodeComponent(shopId)}/measurement-points/${Uri.encodeComponent(device.measurementPointRef)}',
+              )
+          : null,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border:
+              device.isOnline ? null : Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 10,
+                offset: const Offset(0, 4)),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: device.isOnline
+                    ? AppTheme.secondaryColor.withValues(alpha: 0.15)
+                    : Colors.grey.shade100,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.power_rounded,
+                  color: device.isOnline ? AppTheme.primaryColor : Colors.grey,
+                  size: 24),
             ),
-            child: Icon(Icons.power_rounded,
-                color: device.isOnline ? AppTheme.primaryColor : Colors.grey,
-                size: 24),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(device.name,
-                    style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: device.isOnline
-                            ? AppTheme.textPrimary
-                            : Colors.grey)),
-                const SizedBox(height: 4),
-                Text(
-                  device.lastSeen == null
-                      ? '最後上線時間未知'
-                      : '最後上線：${device.lastSeen!.toLocal().toIso8601String()}',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-              ],
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(device.name,
+                      style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: device.isOnline
+                              ? AppTheme.textPrimary
+                              : Colors.grey)),
+                  const SizedBox(height: 4),
+                  Text(
+                    device.lastSeen == null
+                        ? '最後上線時間未知'
+                        : '最後上線：${device.lastSeen!.toLocal().toIso8601String()}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ],
+              ),
             ),
-          ),
-          if (canOpenAlert)
-            IconButton(
-              tooltip: '設備詳情',
-              icon: const Icon(Icons.chevron_right_rounded),
-              onPressed: () => context
-                  .push('/devices/${Uri.encodeComponent(device.id)}/alert'),
-            ),
-        ],
+            if (canOpenDetail) const Icon(Icons.chevron_right_rounded),
+          ],
+        ),
       ),
     );
   }

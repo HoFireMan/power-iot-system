@@ -242,7 +242,7 @@ class _DashboardContent extends StatelessWidget {
           if (dashboard.devices.isEmpty)
             const _Message('目前沒有設備')
           else
-            _DeviceGrid(devices: dashboard.devices),
+            _DeviceGrid(shopId: dashboard.shop.id, devices: dashboard.devices),
         ],
       ),
     );
@@ -303,8 +303,9 @@ class _PowerCard extends StatelessWidget {
 }
 
 class _DeviceGrid extends StatelessWidget {
-  const _DeviceGrid({required this.devices});
+  const _DeviceGrid({required this.shopId, required this.devices});
 
+  final String shopId;
   final List<DashboardDevice> devices;
 
   @override
@@ -319,86 +320,96 @@ class _DeviceGrid extends StatelessWidget {
         childAspectRatio: 1.05,
       ),
       itemCount: devices.length,
-      itemBuilder: (context, index) => _DeviceCard(device: devices[index]),
+      itemBuilder: (context, index) =>
+          _DeviceCard(shopId: shopId, device: devices[index]),
     );
   }
 }
 
 class _DeviceCard extends StatelessWidget {
-  const _DeviceCard({required this.device});
+  const _DeviceCard({required this.shopId, required this.device});
 
+  final String shopId;
   final DashboardDevice device;
 
   @override
   Widget build(BuildContext context) {
     final online = device.isOnline;
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: online ? null : Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Icon(
-                Icons.electrical_services_rounded,
-                color: online ? AppTheme.primaryColor : Colors.grey,
-                size: 26,
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: device.measurementPointRef.isEmpty
+          ? null
+          : () => context.push(
+                '/shops/${Uri.encodeComponent(shopId)}/measurement-points/${Uri.encodeComponent(device.measurementPointRef)}',
               ),
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: online ? Colors.green : Colors.red,
-                  shape: BoxShape.circle,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: online ? null : Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Icon(
+                  Icons.electrical_services_rounded,
+                  color: online ? AppTheme.primaryColor : Colors.grey,
+                  size: 26,
                 ),
-              ),
-            ],
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                device.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                  color: online ? Colors.black87 : Colors.grey,
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: online ? Colors.green : Colors.red,
+                    shape: BoxShape.circle,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                online ? '運轉中' : '已離線',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: online ? AppTheme.secondaryColor : Colors.grey,
+              ],
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  device.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: online ? Colors.black87 : Colors.grey,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                device.lastSeen == null
-                    ? '最後連線未知'
-                    : '最後連線 ${_formatDate(device.lastSeen!)}',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
-              ),
-            ],
-          ),
-        ],
+                const SizedBox(height: 4),
+                Text(
+                  online ? '運轉中' : '已離線',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: online ? AppTheme.secondaryColor : Colors.grey,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  device.lastSeen == null
+                      ? '最後連線未知'
+                      : '最後連線 ${_formatDate(device.lastSeen!)}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -19,10 +20,11 @@ type DashboardShopProjection struct {
 }
 
 type DashboardDeviceProjection struct {
-	ID       uint
-	Name     string
-	IsOnline bool
-	LastSeen *time.Time
+	ID                 uint // internal backend identity; never serialized by HTTP
+	MeasurementPointID uuid.UUID
+	Name               string
+	IsOnline           bool
+	LastSeen           *time.Time
 }
 
 type DashboardProjection struct {
@@ -55,14 +57,15 @@ func (r *DashboardQueryRepository) FindDashboard(ctx context.Context, userID, sh
 	snapshotNow = snapshotNow.UTC()
 	freshSince := snapshotNow.Add(-120 * time.Second)
 	var rows []struct {
-		ShopID       uint
-		ShopCode     string
-		ShopName     string
-		DeviceID     sql.NullInt64
-		DeviceName   sql.NullString
-		DeviceOnline sql.NullBool
-		DeviceSeen   sql.NullTime
-		CurrentPower sql.NullString
+		ShopID             uint
+		ShopCode           string
+		ShopName           string
+		DeviceID           sql.NullInt64
+		MeasurementPointID uuid.NullUUID
+		DeviceName         sql.NullString
+		DeviceOnline       sql.NullBool
+		DeviceSeen         sql.NullTime
+		CurrentPower       sql.NullString
 	}
 	query := `
 WITH authorized_shop AS (
@@ -117,6 +120,7 @@ SELECT authorized_shop.id AS shop_id,
        authorized_shop.code AS shop_code,
        authorized_shop.name AS shop_name,
        device.id AS device_id,
+       current_assignment.measurement_point_id AS measurement_point_id,
        device.name AS device_name,
        device.is_online AS device_online,
        device.last_seen AS device_seen,
@@ -162,10 +166,10 @@ ORDER BY device.id ASC`
 		if !row.DeviceID.Valid {
 			continue
 		}
-		if row.DeviceID.Int64 <= 0 || uint64(uint(row.DeviceID.Int64)) != uint64(row.DeviceID.Int64) {
+		if row.DeviceID.Int64 <= 0 || uint64(uint(row.DeviceID.Int64)) != uint64(row.DeviceID.Int64) || !row.MeasurementPointID.Valid || row.MeasurementPointID.UUID == uuid.Nil {
 			return DashboardProjection{}, ErrDashboardNotFound
 		}
-		device := DashboardDeviceProjection{ID: uint(row.DeviceID.Int64), Name: row.DeviceName.String, IsOnline: row.DeviceOnline.Bool}
+		device := DashboardDeviceProjection{ID: uint(row.DeviceID.Int64), MeasurementPointID: row.MeasurementPointID.UUID, Name: row.DeviceName.String, IsOnline: row.DeviceOnline.Bool}
 		if row.DeviceSeen.Valid {
 			seen := row.DeviceSeen.Time
 			device.LastSeen = &seen

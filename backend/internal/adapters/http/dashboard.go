@@ -41,7 +41,7 @@ func NewDashboardHandler(config DashboardHandlerConfig) gin.HandlerFunc {
 		}
 		devices := make([]dashboardDeviceResponse, 0, len(result.Devices))
 		for _, device := range result.Devices {
-			devices = append(devices, dashboardDeviceResponse{ID: device.ID, Name: device.Name, IsOnline: device.IsOnline, LastSeen: device.LastSeen})
+			devices = append(devices, dashboardDeviceResponse{MeasurementPointRef: device.MeasurementPointRef, Name: device.Name, IsOnline: device.IsOnline, LastSeen: device.LastSeen})
 		}
 		c.JSON(http.StatusOK, dashboardResponse{
 			Shop:    dashboardShopResponse{ID: result.Shop.ID, Code: result.Shop.Code, Name: result.Shop.Name},
@@ -59,10 +59,10 @@ type dashboardShopResponse struct {
 }
 
 type dashboardDeviceResponse struct {
-	ID       string     `json:"id"`
-	Name     string     `json:"name"`
-	IsOnline bool       `json:"isOnline"`
-	LastSeen *time.Time `json:"lastSeen"`
+	MeasurementPointRef string     `json:"measurementPointRef"`
+	Name                string     `json:"name"`
+	IsOnline            bool       `json:"isOnline"`
+	LastSeen            *time.Time `json:"lastSeen"`
 }
 
 type dashboardResponse struct {

@@ -78,13 +78,13 @@ Map<String, Object?> _payload({Object? currentPowerW = 0}) => {
       'monthlyKg': null,
       'devices': [
         {
-          'id': '1',
+          'measurementPointRef': '00000000-0000-4000-8000-000000000001',
           'name': 'Online meter',
           'isOnline': true,
           'lastSeen': null,
         },
         {
-          'id': '2',
+          'measurementPointRef': '00000000-0000-4000-8000-000000000002',
           'name': 'Offline meter',
           'isOnline': false,
           'lastSeen': '2026-01-02T02:04:05Z',
@@ -102,13 +102,13 @@ Dashboard _dashboard({double? power = 0}) => Dashboard(
       monthlyKg: null,
       devices: const [
         DashboardDevice(
-          id: '1',
+          measurementPointRef: '00000000-0000-4000-8000-000000000001',
           name: 'Online meter',
           isOnline: true,
           lastSeen: null,
         ),
         DashboardDevice(
-          id: '2',
+          measurementPointRef: '00000000-0000-4000-8000-000000000002',
           name: 'Offline meter',
           isOnline: false,
           lastSeen: null,
@@ -132,6 +132,19 @@ void main() {
 
   test('B7 DTO rejects unknown fields instead of fabricating a shape', () {
     final payload = _payload()..['unexpected'] = 1;
+    expect(() => DashboardDto.fromJson(payload), throwsFormatException);
+  });
+
+  test('B7 DTO rejects backend device IDs without an MP locator', () {
+    final payload = _payload();
+    payload['devices'] = [
+      {
+        'id': '1',
+        'name': 'Online meter',
+        'isOnline': true,
+        'lastSeen': null,
+      },
+    ];
     expect(() => DashboardDto.fromJson(payload), throwsFormatException);
   });
 

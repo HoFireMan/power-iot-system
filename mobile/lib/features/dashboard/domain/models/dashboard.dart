@@ -35,13 +35,14 @@ class DashboardShop {
 
 class DashboardDevice {
   const DashboardDevice({
-    required this.id,
+    required this.measurementPointRef,
     required this.name,
     required this.isOnline,
     required this.lastSeen,
   });
 
-  final String id;
+  /// Opaque public resource locator for the shared Measurement Point detail.
+  final String measurementPointRef;
   final String name;
   final bool isOnline;
   final DateTime? lastSeen;
