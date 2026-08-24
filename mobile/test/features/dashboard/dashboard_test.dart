@@ -68,12 +68,12 @@ AuthenticatedHttpClient _client(_Adapter adapter, _Store store) {
   );
 }
 
-Map<String, Object?> _payload({Object? currentPowerW = 0}) => {
+Map<String, Object?> _payload({Object? currentPowerW = 0, Object? dailyKwh, Object? monthlyKwh}) => {
       'shop': {'id': '7', 'code': 'S7', 'name': 'Remote Shop'},
       'generatedAt': '2026-01-02T03:04:05Z',
       'currentPowerW': currentPowerW,
-      'dailyKwh': null,
-      'monthlyKwh': null,
+      'dailyKwh': dailyKwh,
+      'monthlyKwh': monthlyKwh,
       'dailyKg': null,
       'monthlyKg': null,
       'devices': [
@@ -92,12 +92,12 @@ Map<String, Object?> _payload({Object? currentPowerW = 0}) => {
       ],
     };
 
-Dashboard _dashboard({double? power = 0}) => Dashboard(
+Dashboard _dashboard({double? power = 0, double? dailyKwh, double? monthlyKwh}) => Dashboard(
       shop: const DashboardShop(id: '7', code: 'S7', name: 'Remote Shop'),
       generatedAt: DateTime.utc(2026, 1, 2),
       currentPowerW: power,
-      dailyKwh: null,
-      monthlyKwh: null,
+      dailyKwh: dailyKwh,
+      monthlyKwh: monthlyKwh,
       dailyKg: null,
       monthlyKg: null,
       devices: const [
@@ -128,6 +128,16 @@ void main() {
     expect(dashboard.devices[0].lastSeen, isNull);
     expect(dashboard.devices[1].isOnline, isFalse);
     expect(dashboard.devices[1].lastSeen, DateTime.utc(2026, 1, 2, 2, 4, 5));
+  });
+
+  test('B7 DTO preserves zero and positive energy values', () {
+    final dashboard = DashboardDto.fromJson(
+      _payload(dailyKwh: 0, monthlyKwh: 12.5),
+    ).toModel();
+
+    expect(dashboard.dailyKwh, 0);
+    expect(dashboard.dailyKwh, isNotNull);
+    expect(dashboard.monthlyKwh, 12.5);
   });
 
   test('B7 DTO rejects unknown fields instead of fabricating a shape', () {
@@ -264,7 +274,7 @@ void main() {
     missing.dispose();
   });
 
-  testWidgets('dashboard renders remote zero/null values and no aggregates',
+  testWidgets('dashboard renders current power and null energy values',
       (tester) async {
     final store = _Store();
     final client = _client(_Adapter((_) async => _json(500, {})), store);
@@ -292,11 +302,52 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('0 W'), findsOneWidget);
-    expect(find.text('本日用電量'), findsNothing);
+    expect(find.text('本日用電量'), findsOneWidget);
+    expect(find.text('本月用電量'), findsOneWidget);
+    expect(find.text('無資料'), findsNWidgets(2));
     expect(find.text('0.14'), findsNothing);
     expect(find.text('運轉中'), findsOneWidget);
     expect(find.text('已離線'), findsOneWidget);
     expect(find.text('最後連線未知'), findsNWidgets(2));
+  });
+
+  testWidgets('dashboard renders energy values without client aggregation',
+      (tester) async {
+    final client = _client(_Adapter((_) async => _json(500, {})), _Store());
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authClientProvider.overrideWithValue(client),
+          shopsRepositoryProvider.overrideWithValue(
+              _ShopsRepository(() async => const ShopsSnapshot(shops: [
+                    Shop(
+                      id: '7',
+                      code: 'S7',
+                      name: 'Remote Shop',
+                      address: null,
+                      phone: null,
+                      isHead: false,
+                    ),
+                  ], currentShopId: '7'))),
+          dashboardRepositoryProvider.overrideWithValue(
+            _FunctionRepository(() async => _dashboard(
+                  power: 12,
+                  dailyKwh: 1,
+                  monthlyKwh: 2.5,
+                )),
+          ),
+        ],
+        child: const MaterialApp(home: DashboardScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('本日用電量'), findsOneWidget);
+    expect(find.text('本月用電量'), findsOneWidget);
+    expect(find.text('1 kWh'), findsOneWidget);
+    expect(find.text('2.50 kWh'), findsOneWidget);
+    expect(find.text('3.50 kWh'), findsNothing);
+    expect(find.text('12 W'), findsOneWidget);
   });
 
   test('poll config accepts only positive integer overrides', () {

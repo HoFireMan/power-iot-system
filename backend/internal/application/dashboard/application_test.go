@@ -14,8 +14,9 @@ type dashboardQueryStub struct {
 	now        time.Time
 }
 
-func (s *dashboardQueryStub) FindDashboard(_ context.Context, _, _ uint, now time.Time) (persistence.DashboardProjection, error) {
-	s.now = now
+func (s *dashboardQueryStub) FindDashboard(_ context.Context, _, _ uint, now func() time.Time) (persistence.DashboardProjection, error) {
+	s.now = now()
+	s.projection.Snapshot = s.now
 	return s.projection, s.err
 }
 
@@ -26,6 +27,8 @@ func TestServiceUsesOneSnapshotForGeneratedAtAndAssignments(t *testing.T) {
 		Shop:          persistence.DashboardShopProjection{ID: 12, Code: "S12", Name: "Shop"},
 		Devices:       []persistence.DashboardDeviceProjection{{ID: 5, Name: "Device", IsOnline: true}},
 		CurrentPowerW: &power,
+		DailyKwh:      floatPtr(4.5),
+		MonthlyKwh:    floatPtr(18),
 	}}
 	result, err := New(query, func() time.Time { return now }).GetDashboard(context.Background(), 8, 12)
 	if err != nil {
@@ -40,8 +43,11 @@ func TestServiceUsesOneSnapshotForGeneratedAtAndAssignments(t *testing.T) {
 	if result.CurrentPowerW == nil || *result.CurrentPowerW != power {
 		t.Fatalf("current power=%v, want %v", result.CurrentPowerW, power)
 	}
-	if result.DailyKwh != nil || result.MonthlyKwh != nil || result.DailyKg != nil || result.MonthlyKg != nil {
-		t.Fatal("deferred aggregate values must remain nil")
+	if result.DailyKwh == nil || *result.DailyKwh != 4.5 || result.MonthlyKwh == nil || *result.MonthlyKwh != 18 {
+		t.Fatalf("energy daily/monthly=%v/%v", result.DailyKwh, result.MonthlyKwh)
+	}
+	if result.DailyKg != nil || result.MonthlyKg != nil {
+		t.Fatal("carbon values must remain nil")
 	}
 }
 
@@ -65,6 +71,8 @@ func TestServiceFailsClosedOnDuplicateDeviceProjection(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func floatPtr(value float64) *float64 { return &value }
 
 func TestServiceMapsUnauthorizedDashboardToShopNotFound(t *testing.T) {
 	query := &dashboardQueryStub{err: persistence.ErrDashboardNotFound}

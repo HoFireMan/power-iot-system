@@ -233,6 +233,11 @@ class _DashboardContent extends StatelessWidget {
           ),
           const SizedBox(height: 24),
           _PowerCard(powerW: dashboard.currentPowerW),
+          const SizedBox(height: 16),
+          _EnergySummary(
+            dailyKwh: dashboard.dailyKwh,
+            monthlyKwh: dashboard.monthlyKwh,
+          ),
           const SizedBox(height: 24),
           const Text(
             '設備狀態',
@@ -295,6 +300,73 @@ class _PowerCard extends StatelessWidget {
           Text(
             powerW == null ? '目前沒有可用的量測資料' : '來自伺服器的即時量測',
             style: const TextStyle(color: Colors.white70),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EnergySummary extends StatelessWidget {
+  const _EnergySummary({required this.dailyKwh, required this.monthlyKwh});
+
+  final double? dailyKwh;
+  final double? monthlyKwh;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: _EnergyCard(label: '本日用電量', kwh: dailyKwh),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _EnergyCard(label: '本月用電量', kwh: monthlyKwh),
+        ),
+      ],
+    );
+  }
+}
+
+class _EnergyCard extends StatelessWidget {
+  const _EnergyCard({required this.label, required this.kwh});
+
+  final String label;
+  final double? kwh;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = kwh == null ? '無資料' : '${_formatNumber(kwh!)} kWh';
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 14),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            value,
+            style: const TextStyle(
+              color: AppTheme.textPrimary,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ],
       ),
