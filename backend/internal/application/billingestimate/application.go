@@ -169,7 +169,7 @@ func calculate(monthValue string, projection persistence.BillingEstimateProjecti
 		}
 		result.Tiers = append(result.Tiers, Tier{FromKwh: coreestimate.FormatDecimal(tier.FromKwh), ToKwh: to, UsageKwh: coreestimate.FormatDecimal(tier.UsageKwh), RatePerKwh: coreestimate.FormatDecimal(tier.RatePerKwh), Subtotal: coreestimate.FormatDecimal(tier.Subtotal)})
 	}
-	result.Charges = &Charges{EnergyCharge: coreestimate.FormatTenths(calculation.EnergyCharge), MinimumMonthlyCharge: coreestimate.FormatTenths(calculation.MinimumMonthlyCharge), MinimumChargeAdjustment: coreestimate.FormatTenths(calculation.MinimumChargeAdjustment), EstimatedTotal: coreestimate.FormatDecimal(calculation.EstimatedTotal)}
+	result.Charges = &Charges{EnergyCharge: coreestimate.FormatTenths(calculation.EnergyCharge), MinimumMonthlyCharge: coreestimate.FormatDecimal(calculation.MinimumMonthlyCharge), MinimumChargeAdjustment: coreestimate.FormatDecimal(calculation.MinimumChargeAdjustment), EstimatedTotal: coreestimate.FormatDecimal(calculation.EstimatedTotal)}
 	if projection.Energy.Coverage != nil && projection.Energy.ExpectedDuration > 0 && projection.Energy.ObservedDuration == projection.Energy.ExpectedDuration {
 		result.Status = coreestimate.StatusComplete
 	} else {

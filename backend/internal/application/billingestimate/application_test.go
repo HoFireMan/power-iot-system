@@ -68,6 +68,18 @@ func TestServiceDistinguishesNoDataZeroPartialAndComplete(t *testing.T) {
 	}
 }
 
+func TestServicePreservesCatalogMinimumChargeDecimals(t *testing.T) {
+	projection := estimateProjection(ptrInt64(0), time.Hour, 2*time.Hour)
+	projection.MinimumMonthlyCharge = "100.05"
+	result, err := New(estimateRepositoryStub{projection: projection}, time.Now).Find(context.Background(), 1, 7, "2026-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Charges == nil || result.Charges.MinimumMonthlyCharge != "100.05" || result.Charges.MinimumChargeAdjustment != "100.05" || result.Charges.EstimatedTotal != "100" {
+		t.Fatalf("charges=%+v", result.Charges)
+	}
+}
+
 func TestServiceReturnsStableDomainOutcomesWithoutAmounts(t *testing.T) {
 	for _, test := range []struct {
 		err    error

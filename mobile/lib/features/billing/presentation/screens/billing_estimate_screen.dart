@@ -379,7 +379,21 @@ class _EstimateMessage extends StatelessWidget {
 }
 
 String _percentage(String ratio) {
-  final value = double.tryParse(ratio);
-  if (value == null) return ratio;
-  return (value * 100).toStringAsFixed(1);
+  final parts = ratio.trim().split('.');
+  if (parts.length > 2) return ratio;
+  try {
+    final whole = BigInt.parse(parts.first.isEmpty ? '0' : parts.first);
+    final fraction = parts.length == 2 ? parts[1] : '';
+    final denominator = BigInt.from(10).pow(fraction.length);
+    final numerator = whole * denominator +
+        (fraction.isEmpty ? BigInt.zero : BigInt.parse(fraction));
+    final scaledTenths =
+        (numerator * BigInt.from(1000) + denominator ~/ BigInt.from(2)) ~/
+            denominator;
+    final integer = scaledTenths ~/ BigInt.from(10);
+    final tenth = scaledTenths.remainder(BigInt.from(10));
+    return '$integer.$tenth';
+  } on FormatException {
+    return ratio;
+  }
 }

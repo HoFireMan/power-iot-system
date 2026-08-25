@@ -139,6 +139,12 @@ void main() {
     expect(find.textContaining('實際應繳金額仍以台電帳單為準'), findsOneWidget);
   });
 
+  testWidgets('coverage formatting does not use binary floating point',
+      (tester) async {
+    await _pump(tester, _estimate(coverage: '0.333333'));
+    expect(find.text('33.3%'), findsOneWidget);
+  });
+
   testWidgets('partial data and minimum adjustment are visible',
       (tester) async {
     await _pump(
