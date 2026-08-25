@@ -6,6 +6,7 @@ class Shop {
     required this.address,
     required this.phone,
     required this.isHead,
+    this.tariff,
   });
 
   final String id;
@@ -14,6 +15,7 @@ class Shop {
   final String? address;
   final String? phone;
   final bool isHead;
+  final String? tariff;
 
   factory Shop.fromJson(Object? value) {
     if (value is! Map || value.keys.any((key) => key is! String)) {
@@ -21,7 +23,9 @@ class Shop {
     }
     final map = value.map((key, value) => MapEntry(key as String, value));
     const keys = {'id', 'code', 'name', 'address', 'phone', 'isHead'};
-    if (map.length != keys.length || !map.keys.every(keys.contains)) {
+    if ((!map.keys.every(keys.contains)) ||
+        (map.length != keys.length &&
+            (map.length != keys.length + 1 || !map.containsKey('tariff')))) {
       throw const FormatException('Invalid shop response');
     }
     return Shop(
@@ -33,6 +37,7 @@ class Shop {
       isHead: map['isHead'] is bool
           ? map['isHead'] as bool
           : (throw const FormatException('Invalid isHead')),
+      tariff: _shopNullableString(map['tariff'], 'tariff'),
     );
   }
 }

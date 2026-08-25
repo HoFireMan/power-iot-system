@@ -6,6 +6,18 @@ import 'package:power_iot_app/config/theme.dart';
 import 'package:power_iot_app/features/shops/domain/models/shop.dart' as remote;
 import 'package:power_iot_app/features/profile/presentation/providers/profile_provider.dart';
 import 'package:power_iot_app/features/shops/providers/remote_shop_provider.dart';
+import 'package:power_iot_app/features/shops/domain/repositories/shops_repository.dart';
+
+const _commercialTariffs = <MapEntry<String, String>>[
+  MapEntry('LIGHTING_COMMERCIAL', '表燈營業'),
+  MapEntry('LOW_VOLTAGE', '低壓電力'),
+  MapEntry('HIGH_VOLTAGE', '高壓電力'),
+  MapEntry('EXTRA_HIGH_VOLTAGE', '特高壓電力'),
+];
+const _nonCommercialTariffs = <MapEntry<String, String>>[
+  MapEntry('LIGHTING_NONCOMMERCIAL', '表燈非營業'),
+  MapEntry('PACKAGE_LIGHTING', '包燈'),
+];
 
 class ShopListScreen extends ConsumerWidget {
   const ShopListScreen({super.key});
@@ -18,6 +30,9 @@ class ShopListScreen extends ConsumerWidget {
     // The server preference is authoritative. A temporary view choice remains
     // separate and is never sent as an authorization signal.
     final currentShopId = shopState.selectedShopId ?? snapshot?.currentShopId;
+    final profile = ref.watch(profileProvider);
+    final isAdmin =
+        profile.status == RemoteStatus.success && profile.data?.isAdmin == true;
 
     return Scaffold(
       appBar: AppBar(
@@ -31,7 +46,14 @@ class ShopListScreen extends ConsumerWidget {
         ),
       ),
       body: SafeArea(
-        child: _buildBody(context, ref, shopState, shops, currentShopId),
+        child: _buildBody(
+          context,
+          ref,
+          shopState,
+          shops,
+          currentShopId,
+          isAdmin,
+        ),
       ),
       // The selection above is intentionally view-only; dashboard data is not
       // loaded or authorized by this screen.
@@ -45,6 +67,7 @@ class ShopListScreen extends ConsumerWidget {
     ShopsState shopState,
     List<remote.Shop> shops,
     String? currentShopId,
+    bool isAdmin,
   ) {
     if (shopState.status == RemoteStatus.loading) {
       return const Center(child: CircularProgressIndicator());
@@ -67,8 +90,11 @@ class ShopListScreen extends ConsumerWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              const Icon(Icons.star_rounded,
-                  color: AppTheme.accentColor, size: 20),
+              const Icon(
+                Icons.star_rounded,
+                color: AppTheme.accentColor,
+                size: 20,
+              ),
               const SizedBox(width: 6),
               Text(
                 '目前檢視店家（僅限已授權店家）',
@@ -94,6 +120,7 @@ class ShopListScreen extends ConsumerWidget {
                       ref,
                       shop,
                       shop.id == currentShopId,
+                      isAdmin: isAdmin,
                     );
                   },
                 ),
@@ -111,7 +138,12 @@ class ShopListScreen extends ConsumerWidget {
   }
 
   Widget _buildShopCard(
-      BuildContext context, WidgetRef ref, remote.Shop shop, bool isSelected) {
+    BuildContext context,
+    WidgetRef ref,
+    remote.Shop shop,
+    bool isSelected, {
+    required bool isAdmin,
+  }) {
     return GestureDetector(
       onTap: () {
         ref.read(shopsProvider.notifier).selectShop(shop.id);
@@ -147,8 +179,9 @@ class ShopListScreen extends ConsumerWidget {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
                 color: isSelected ? AppTheme.primaryColor : Colors.grey.shade50,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(18)),
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(18),
+                ),
               ),
               child: Row(
                 children: [
@@ -161,8 +194,10 @@ class ShopListScreen extends ConsumerWidget {
                   ),
                   const SizedBox(width: 8),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
                       color: isSelected
                           ? Colors.white.withValues(alpha: 0.2)
@@ -216,14 +251,19 @@ class ShopListScreen extends ConsumerWidget {
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            Icon(Icons.location_on_outlined,
-                                size: 14, color: Colors.grey.shade500),
+                            Icon(
+                              Icons.location_on_outlined,
+                              size: 14,
+                              color: Colors.grey.shade500,
+                            ),
                             const SizedBox(width: 4),
                             Expanded(
                               child: Text(
                                 shop.address ?? '未提供地址',
                                 style: TextStyle(
-                                    fontSize: 13, color: Colors.grey.shade600),
+                                  fontSize: 13,
+                                  color: Colors.grey.shade600,
+                                ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -233,6 +273,12 @@ class ShopListScreen extends ConsumerWidget {
                       ],
                     ),
                   ),
+                  if (isAdmin)
+                    IconButton(
+                      tooltip: '電價分類設定',
+                      icon: const Icon(Icons.tune_rounded),
+                      onPressed: () => _showTariffSettings(context, ref, shop),
+                    ),
                 ],
               ),
             ),
@@ -240,6 +286,37 @@ class ShopListScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _showTariffSettings(
+    BuildContext context,
+    WidgetRef ref,
+    remote.Shop shop,
+  ) async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => _TariffDialog(current: shop.tariff),
+    );
+    if (selected == null || !context.mounted) return;
+    try {
+      final mutation = ref.read(shopsRepositoryProvider);
+      if (mutation is! ShopTariffMutation) {
+        throw StateError('shop tariff mutation unavailable');
+      }
+      await (mutation as ShopTariffMutation).updateTariff(shop.id, selected);
+      await ref.read(shopsProvider.notifier).load();
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('電價分類已更新')));
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('電價分類更新失敗')));
+      }
+    }
   }
 
   // --- 統一的導航欄 ---
@@ -263,29 +340,32 @@ class ShopListScreen extends ConsumerWidget {
         children: [
           // 1. 首頁 (跳轉)
           _NavIcon(
-              icon: Icons.home_rounded,
-              isSelected: false,
-              label: "首頁",
-              onTap: () => context.go('/dashboard')),
+            icon: Icons.home_rounded,
+            isSelected: false,
+            label: "首頁",
+            onTap: () => context.go('/dashboard'),
+          ),
           // 2. 設備 (跳轉)
           _NavIcon(
-              icon: Icons.electrical_services_rounded,
-              isSelected: false,
-              label: "設備",
-              onTap: () => context.go('/devices')),
+            icon: Icons.electrical_services_rounded,
+            isSelected: false,
+            label: "設備",
+            onTap: () => context.go('/devices'),
+          ),
           // 3. 個人 (跳轉)
           _NavIcon(
-              icon: Icons.person_rounded,
-              isSelected: false,
-              label: "個人",
-              onTap: () => context.go('/profile')),
+            icon: Icons.person_rounded,
+            isSelected: false,
+            label: "個人",
+            onTap: () => context.go('/profile'),
+          ),
           // 4. 店家 (當前頁，isSelected: true)
           _NavIcon(
-              icon: Icons.store_rounded,
-              isSelected: true,
-              label: "店家",
-              onTap: () {} // 已經在店家頁，不需動作
-              ),
+            icon: Icons.store_rounded,
+            isSelected: true,
+            label: "店家",
+            onTap: () {}, // 已經在店家頁，不需動作
+          ),
         ],
       ),
     );
@@ -293,17 +373,72 @@ class ShopListScreen extends ConsumerWidget {
 }
 
 // 支援文字標籤的 Icon 元件
+class _TariffDialog extends StatefulWidget {
+  const _TariffDialog({required this.current});
+  final String? current;
+
+  @override
+  State<_TariffDialog> createState() => _TariffDialogState();
+}
+
+class _TariffDialogState extends State<_TariffDialog> {
+  late String? selected = widget.current;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('電價分類設定'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const ListTile(title: Text('營業／電力用戶')),
+              ..._options(_commercialTariffs),
+              const ListTile(title: Text('非營業／包燈用戶')),
+              ..._options(_nonCommercialTariffs),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: selected == null
+                ? null
+                : () => Navigator.pop(context, selected),
+            child: const Text('儲存'),
+          ),
+        ],
+      );
+
+  List<Widget> _options(List<MapEntry<String, String>> values) => values
+      .map(
+        (entry) => RadioListTile<String>(
+          value: entry.key,
+          // ignore: deprecated_member_use
+          groupValue: selected,
+          title: Text(entry.value),
+          // ignore: deprecated_member_use
+          onChanged: (value) => setState(() => selected = value),
+        ),
+      )
+      .toList();
+}
+
 class _NavIcon extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool isSelected;
   final VoidCallback onTap;
 
-  const _NavIcon(
-      {required this.icon,
-      required this.label,
-      required this.isSelected,
-      required this.onTap});
+  const _NavIcon({
+    required this.icon,
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -319,13 +454,14 @@ class _NavIcon extends StatelessWidget {
             size: 26,
           ),
           const SizedBox(height: 4),
-          Text(label,
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                color:
-                    isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
-              )),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: isSelected ? AppTheme.primaryColor : Colors.grey.shade400,
+            ),
+          ),
         ],
       ),
     );

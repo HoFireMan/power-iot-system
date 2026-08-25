@@ -68,7 +68,9 @@ AuthenticatedHttpClient _client(_Adapter adapter, _Store store) {
   );
 }
 
-Map<String, Object?> _payload({Object? currentPowerW = 0, Object? dailyKwh, Object? monthlyKwh}) => {
+Map<String, Object?> _payload(
+        {Object? currentPowerW = 0, Object? dailyKwh, Object? monthlyKwh}) =>
+    {
       'shop': {'id': '7', 'code': 'S7', 'name': 'Remote Shop'},
       'generatedAt': '2026-01-02T03:04:05Z',
       'currentPowerW': currentPowerW,
@@ -92,7 +94,9 @@ Map<String, Object?> _payload({Object? currentPowerW = 0, Object? dailyKwh, Obje
       ],
     };
 
-Dashboard _dashboard({double? power = 0, double? dailyKwh, double? monthlyKwh}) => Dashboard(
+Dashboard _dashboard(
+        {double? power = 0, double? dailyKwh, double? monthlyKwh}) =>
+    Dashboard(
       shop: const DashboardShop(id: '7', code: 'S7', name: 'Remote Shop'),
       generatedAt: DateTime.utc(2026, 1, 2),
       currentPowerW: power,
@@ -304,7 +308,9 @@ void main() {
     expect(find.text('0 W'), findsOneWidget);
     expect(find.text('本日用電量'), findsOneWidget);
     expect(find.text('本月用電量'), findsOneWidget);
-    expect(find.text('無資料'), findsNWidgets(2));
+    expect(find.text('本日碳排放量'), findsOneWidget);
+    expect(find.text('本月碳排放量'), findsOneWidget);
+    expect(find.text('無資料'), findsNWidgets(4));
     expect(find.text('0.14'), findsNothing);
     expect(find.text('運轉中'), findsOneWidget);
     expect(find.text('已離線'), findsOneWidget);

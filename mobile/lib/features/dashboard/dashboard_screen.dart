@@ -237,6 +237,8 @@ class _DashboardContent extends StatelessWidget {
           _EnergySummary(
             dailyKwh: dashboard.dailyKwh,
             monthlyKwh: dashboard.monthlyKwh,
+            dailyKg: dashboard.dailyKg,
+            monthlyKg: dashboard.monthlyKg,
           ),
           const SizedBox(height: 24),
           const Text(
@@ -308,37 +310,85 @@ class _PowerCard extends StatelessWidget {
 }
 
 class _EnergySummary extends StatelessWidget {
-  const _EnergySummary({required this.dailyKwh, required this.monthlyKwh});
+  const _EnergySummary({
+    required this.dailyKwh,
+    required this.monthlyKwh,
+    required this.dailyKg,
+    required this.monthlyKg,
+  });
 
   final double? dailyKwh;
   final double? monthlyKwh;
+  final double? dailyKg;
+  final double? monthlyKg;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
       children: [
-        Expanded(
-          child: _EnergyCard(label: '本日用電量', kwh: dailyKwh),
+        Row(
+          children: [
+            Expanded(
+              child: _EnergyCard(label: '本日用電量', kwh: dailyKwh),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _EnergyCard(label: '本月用電量', kwh: monthlyKwh),
+            ),
+          ],
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _EnergyCard(label: '本月用電量', kwh: monthlyKwh),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _CarbonCard(label: '本日碳排放量', kg: dailyKg),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _CarbonCard(label: '本月碳排放量', kg: monthlyKg),
+            ),
+          ],
         ),
       ],
     );
   }
 }
 
+class _CarbonCard extends StatelessWidget {
+  const _CarbonCard({required this.label, required this.kg});
+  final String label;
+  final double? kg;
+
+  @override
+  Widget build(BuildContext context) => _EnergyCard(
+        label: label,
+        kwh: kg,
+        unit: 'kgCO₂e',
+        fixedTwoDecimals: true,
+        zeroAsInteger: true,
+      );
+}
+
 class _EnergyCard extends StatelessWidget {
-  const _EnergyCard({required this.label, required this.kwh});
+  const _EnergyCard({
+    required this.label,
+    required this.kwh,
+    this.unit = 'kWh',
+    this.fixedTwoDecimals = false,
+    this.zeroAsInteger = false,
+  });
 
   final String label;
   final double? kwh;
+  final String unit;
+  final bool fixedTwoDecimals;
+  final bool zeroAsInteger;
 
   @override
   Widget build(BuildContext context) {
-    final value = kwh == null ? '無資料' : '${_formatNumber(kwh!)} kWh';
+    final value = kwh == null
+        ? '無資料'
+        : '${fixedTwoDecimals && !(zeroAsInteger && kwh == 0) ? kwh!.toStringAsFixed(2) : _formatNumber(kwh!)} $unit';
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(

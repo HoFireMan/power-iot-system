@@ -84,6 +84,24 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	if err := apply.Commit(); err != nil {
 		return report, fmt.Errorf("B-02 body commit outcome unknown: %w", err)
 	}
+	// The dashboard carbon schema is installed under the same protected
+	// writer admission for a fresh B-02 database. Existing B-02 databases can
+	// apply the standalone 000008 migration through the protected operator.
+	carbonBody, err := fs.ReadFile(Files, "sql/000008_dashboard_carbon_summary.up.sql")
+	if err != nil {
+		return report, err
+	}
+	carbonTx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	if _, err := carbonTx.ExecContext(ctx, string(carbonBody)); err != nil {
+		_ = carbonTx.Rollback()
+		return report, fmt.Errorf("dashboard carbon body: %w", err)
+	}
+	if err := carbonTx.Commit(); err != nil {
+		return report, fmt.Errorf("dashboard carbon body commit outcome unknown: %w", err)
+	}
 
 	final, err := fence.Conn().BeginTx(ctx, nil)
 	if err != nil {

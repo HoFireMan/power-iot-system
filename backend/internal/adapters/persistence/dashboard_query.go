@@ -29,12 +29,13 @@ type DashboardDeviceProjection struct {
 }
 
 type DashboardProjection struct {
-	Shop          DashboardShopProjection
-	Devices       []DashboardDeviceProjection
-	CurrentPowerW *float64
-	DailyKwh      *float64
-	MonthlyKwh    *float64
-	Snapshot      time.Time
+	Shop                 DashboardShopProjection
+	Devices              []DashboardDeviceProjection
+	CurrentPowerW        *float64
+	DailyKwh             *float64
+	MonthlyKwh           *float64
+	CarbonFactorKgPerKwh *float64
+	Snapshot             time.Time
 }
 
 type DashboardQuery interface {
@@ -55,6 +56,7 @@ type dashboardQueryRow struct {
 	CurrentPower       sql.NullString
 	DailyEnergy        sql.NullString
 	MonthlyEnergy      sql.NullString
+	CarbonFactor       sql.NullString
 }
 
 var _ DashboardQuery = (*DashboardQueryRepository)(nil)
@@ -112,12 +114,21 @@ func (r *DashboardQueryRepository) FindDashboard(ctx context.Context, userID, sh
 	var rows []dashboardQueryRow
 	query := `
 WITH authorized_shop AS (
-	SELECT s.id, s.code, s.name
+	SELECT s.id, s.code, s.name, s.electricity_tariff
 	FROM shops AS s
 	JOIN user_shop_relations AS relation ON relation.shop_id = s.id
 	WHERE relation.user_id = $1
 	  AND s.id = $2
 	  AND s.is_active = TRUE
+), active_carbon_factor AS (
+	SELECT rate.factor_kgco2e_per_kwh
+	FROM authorized_shop AS shop
+	JOIN carbon_factor_sets AS factor_set
+	  ON factor_set.is_active = TRUE
+	JOIN carbon_factor_rates AS rate
+	  ON rate.set_id = factor_set.id
+	 AND rate.tariff_code = shop.electricity_tariff
+	LIMIT 1
 ), current_assignments AS (
 	SELECT assignment.id AS assignment_id,
 	       assignment.device_id,
@@ -226,10 +237,12 @@ SELECT authorized_shop.id AS shop_id,
          ELSE NULL
        END AS current_power,
        energy.daily_energy,
-       energy.monthly_energy
+       energy.monthly_energy,
+       factor.factor_kgco2e_per_kwh
 FROM authorized_shop
 CROSS JOIN coverage
 CROSS JOIN energy
+LEFT JOIN active_carbon_factor AS factor ON TRUE
 LEFT JOIN current_assignments AS current_assignment ON TRUE
 LEFT JOIN devices AS device ON device.id = current_assignment.device_id
 ORDER BY device.id ASC`
@@ -265,6 +278,9 @@ ORDER BY device.id ASC`
 		if err := mergeDashboardNumeric(&out.MonthlyKwh, row.MonthlyEnergy); err != nil {
 			return DashboardProjection{}, err
 		}
+		if err := mergeDashboardNumeric(&out.CarbonFactorKgPerKwh, row.CarbonFactor); err != nil {
+			return DashboardProjection{}, err
+		}
 		if !row.DeviceID.Valid {
 			continue
 		}
@@ -288,7 +304,7 @@ ORDER BY device.id ASC`
 func scanDashboardRows(rows *sql.Rows, destination *[]dashboardQueryRow) error {
 	for rows.Next() {
 		var row dashboardQueryRow
-		if err := rows.Scan(&row.ShopID, &row.ShopCode, &row.ShopName, &row.DeviceID, &row.MeasurementPointID, &row.DeviceName, &row.DeviceOnline, &row.DeviceSeen, &row.CurrentPower, &row.DailyEnergy, &row.MonthlyEnergy); err != nil {
+		if err := rows.Scan(&row.ShopID, &row.ShopCode, &row.ShopName, &row.DeviceID, &row.MeasurementPointID, &row.DeviceName, &row.DeviceOnline, &row.DeviceSeen, &row.CurrentPower, &row.DailyEnergy, &row.MonthlyEnergy, &row.CarbonFactor); err != nil {
 			return err
 		}
 		*destination = append(*destination, row)

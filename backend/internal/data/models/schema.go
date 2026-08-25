@@ -39,12 +39,33 @@ type Shop struct {
 	IsHead  bool   `gorm:"default:false"` // 是否為總部 (ishead)
 	Memo    string // 備註 (memo)
 
-	InviteUUID uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();uniqueIndex"`
-	IsActive   bool      `gorm:"default:true"` // 狀態 (status: 1=true, 9=false)
-	CreatedAt  time.Time
-	UpdatedAt  time.Time // 對應 modifytm
+	InviteUUID        uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();uniqueIndex"`
+	IsActive          bool      `gorm:"default:true"` // 狀態 (status: 1=true, 9=false)
+	CreatedAt         time.Time
+	UpdatedAt         time.Time // 對應 modifytm
+	ElectricityTariff *string   `gorm:"column:electricity_tariff;size:32"`
 
 	Devices []Device `gorm:"foreignKey:ShopID"`
+}
+
+// CarbonFactorSet is versioned factor metadata; rates are normalized below.
+type CarbonFactorSet struct {
+	ID            uint64 `gorm:"primaryKey"`
+	Organization  string `gorm:"size:200;not null"`
+	DocumentTitle string `gorm:"column:document_title;size:200;not null"`
+	SourceURL     string `gorm:"column:source_url;size:500;not null"`
+	VersionYear   int    `gorm:"column:version_year;not null"`
+	ROCYear       int    `gorm:"column:roc_year;not null"`
+	Unit          string `gorm:"size:32;not null"`
+	IsActive      bool   `gorm:"column:is_active;not null;default:true"`
+	CreatedAt     time.Time
+}
+
+type CarbonFactorRate struct {
+	ID                 uint64 `gorm:"primaryKey"`
+	SetID              uint64 `gorm:"column:set_id;not null"`
+	TariffCode         string `gorm:"column:tariff_code;size:32;not null"`
+	FactorKgCO2ePerKwh string `gorm:"column:factor_kgco2e_per_kwh;type:numeric(10,6);not null"`
 }
 
 // User 使用者 (對應 basic.employee 概念)
