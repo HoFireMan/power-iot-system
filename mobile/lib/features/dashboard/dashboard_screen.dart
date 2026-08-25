@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/features/dashboard/dashboard_route_observer.dart';
+import 'package:power_iot_app/features/billing/domain/models/billing_estimate.dart';
+import 'package:power_iot_app/features/billing/presentation/providers/billing_estimate_provider.dart';
 import 'package:power_iot_app/config/theme.dart';
 import 'package:power_iot_app/features/dashboard/domain/models/dashboard.dart';
 import 'package:power_iot_app/features/dashboard/presentation/providers/dashboard_provider.dart';
@@ -240,6 +242,8 @@ class _DashboardContent extends StatelessWidget {
             dailyKg: dashboard.dailyKg,
             monthlyKg: dashboard.monthlyKg,
           ),
+          const SizedBox(height: 12),
+          _BillingEstimateEntry(shopId: dashboard.shop.id),
           const SizedBox(height: 24),
           const Text(
             '設備狀態',
@@ -251,6 +255,42 @@ class _DashboardContent extends StatelessWidget {
           else
             _DeviceGrid(shopId: dashboard.shop.id, devices: dashboard.devices),
         ],
+      ),
+    );
+  }
+}
+
+class _BillingEstimateEntry extends ConsumerWidget {
+  const _BillingEstimateEntry({required this.shopId});
+  final String shopId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final now = DateTime.now();
+    final month =
+        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}';
+    final state =
+        ref.watch(billingEstimateProvider((shopId: shopId, month: month)));
+    final label = state.when(
+      loading: () => '查看本月預估電費',
+      error: (_, __) => '查看本月預估電費',
+      data: (estimate) {
+        final charges = estimate.charges;
+        if (charges == null || !estimate.hasAmount) return '本月預估電費（無資料）';
+        final suffix =
+            estimate.status == BillingEstimateStatus.partialDataEstimate
+                ? '（部分資料）'
+                : '';
+        return '本月預估電費  NT\$${charges.estimatedTotal}$suffix';
+      },
+    );
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.receipt_long_rounded),
+        title: Text(label),
+        subtitle: const Text('監測資料完整度與級距明細'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => context.push('/billing/estimate'),
       ),
     );
   }

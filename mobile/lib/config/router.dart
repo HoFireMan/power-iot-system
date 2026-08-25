@@ -9,6 +9,7 @@ import 'package:power_iot_app/features/admin/presentation/screens/replace_device
 import 'package:power_iot_app/features/admin/presentation/screens/unbind_device_screen.dart';
 import 'package:power_iot_app/features/auth/auth_controller.dart';
 import 'package:power_iot_app/features/auth/screens/login_screen.dart';
+import 'package:power_iot_app/features/billing/presentation/screens/billing_estimate_screen.dart';
 import 'package:power_iot_app/features/dashboard/dashboard_route_observer.dart';
 import 'package:power_iot_app/features/dashboard/dashboard_screen.dart';
 import 'package:power_iot_app/features/devices/presentation/screens/device_alert_screen.dart';
@@ -35,6 +36,10 @@ GoRouter createRouter(AuthController auth) => GoRouter(
         GoRoute(
           path: '/dashboard',
           builder: (context, state) => const DashboardScreen(),
+        ),
+        GoRoute(
+          path: '/billing/estimate',
+          builder: (context, state) => const BillingEstimateScreen(),
         ),
         GoRoute(
           path: '/devices',
@@ -107,6 +112,7 @@ String? authRedirect(AuthController auth, String location) {
 
 bool _isProtectedLocation(String location) =>
     location == '/dashboard' ||
+    location == '/billing/estimate' ||
     location == '/profile' ||
     location == '/devices' ||
     location.startsWith('/devices/') ||

@@ -19,6 +19,7 @@ import (
 	"power-iot-backend/internal/adapters/persistence"
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationbilling "power-iot-backend/internal/application/billing"
+	applicationbillingestimate "power-iot-backend/internal/application/billingestimate"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
 	applicationme "power-iot-backend/internal/application/me"
 	applicationmeasurementpointdetail "power-iot-backend/internal/application/measurementpointdetail"
@@ -120,6 +121,8 @@ func main() {
 	billingRepository := persistence.NewBillingConfigurationRepository(db)
 	billingService := applicationbilling.New(billingRepository, time.Now)
 	httpadapter.RegisterBillingConfigurationRoutes(r, authenticator, billingService, billingService)
+	estimateService := applicationbillingestimate.New(persistence.NewBillingEstimateQueryRepository(db), time.Now)
+	httpadapter.RegisterBillingEstimateRoute(r, authenticator, estimateService)
 	httpadapter.RegisterDashboardRoute(r, authenticator, applicationdashboard.NewGormQueryRunner(db))
 	httpadapter.RegisterMeasurementPointDetailRoute(r, authenticator, applicationmeasurementpointdetail.NewGormQueryRunner(db))
 	r.GET("/", func(c *gin.Context) {
