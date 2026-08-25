@@ -22,10 +22,10 @@ class Shop {
       throw const FormatException('Invalid shop response');
     }
     final map = value.map((key, value) => MapEntry(key as String, value));
-    const keys = {'id', 'code', 'name', 'address', 'phone', 'isHead'};
-    if ((!map.keys.every(keys.contains)) ||
-        (map.length != keys.length &&
-            (map.length != keys.length + 1 || !map.containsKey('tariff')))) {
+    const requiredKeys = {'id', 'code', 'name', 'address', 'phone', 'isHead'};
+    const allowedKeys = {...requiredKeys, 'tariff'};
+    if (!requiredKeys.every(map.containsKey) ||
+        !map.keys.every(allowedKeys.contains)) {
       throw const FormatException('Invalid shop response');
     }
     return Shop(
