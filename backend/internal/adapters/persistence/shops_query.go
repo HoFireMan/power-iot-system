@@ -10,12 +10,13 @@ import (
 // ShopProjection is the safe shop-list projection. It contains only fields
 // permitted by GET /api/v1/shops; relation and user metadata are not exposed.
 type ShopProjection struct {
-	ID      uint
-	Code    string
-	Name    string
-	Address *string
-	Phone   *string
-	IsHead  bool
+	ID                uint
+	Code              string
+	Name              string
+	Address           *string
+	Phone             *string
+	IsHead            bool
+	ElectricityTariff *string
 }
 
 // AuthorizedShopsQuery is the read-only B6-B persistence capability.
@@ -44,16 +45,17 @@ func (r *UserQueryRepository) FindAuthorizedShops(ctx context.Context, userID ui
 		return nil, nil, gorm.ErrInvalidDB
 	}
 	var rows []struct {
-		ID            uint
-		Code          string
-		Name          string
-		Address       sql.NullString
-		Phone         sql.NullString
-		IsHead        bool
-		CurrentShopID sql.NullInt64
+		ID                uint
+		Code              string
+		Name              string
+		Address           sql.NullString
+		Phone             sql.NullString
+		IsHead            bool
+		ElectricityTariff sql.NullString
+		CurrentShopID     sql.NullInt64
 	}
 	query := `
-SELECT DISTINCT s.id, s.code, s.name, s.address, s.phone, s.is_head,
+SELECT DISTINCT s.id, s.code, s.name, s.address, s.phone, s.is_head, s.electricity_tariff,
        CASE WHEN s.id = u.current_shop_id THEN u.current_shop_id ELSE NULL END AS current_shop_id
 FROM users AS u
 JOIN user_shop_relations AS relation
@@ -73,6 +75,7 @@ ORDER BY s.id ASC`
 		shops = append(shops, ShopProjection{
 			ID: row.ID, Code: row.Code, Name: row.Name,
 			Address: shopNullableString(row.Address), Phone: shopNullableString(row.Phone), IsHead: row.IsHead,
+			ElectricityTariff: shopNullableString(row.ElectricityTariff),
 		})
 		if row.CurrentShopID.Valid && row.CurrentShopID.Int64 > 0 {
 			id := uint(row.CurrentShopID.Int64)
@@ -82,6 +85,39 @@ ORDER BY s.id ASC`
 		}
 	}
 	return shops, current, nil
+}
+
+// ShopMutationRepository is the narrow mutation capability consumed by HTTP.
+type ShopMutationRepository struct{ db *gorm.DB }
+
+func NewShopMutationRepository(db *gorm.DB) *ShopMutationRepository {
+	return &ShopMutationRepository{db: db}
+}
+
+// UpdateShopTariff is one transactional, idempotent mutation. Authorization
+// is evaluated from the active Shop, explicit relation, and users.is_admin;
+// no current-shop or global-admin shortcut is accepted.
+func (r *ShopMutationRepository) UpdateShopTariff(ctx context.Context, actorID, shopID uint, tariff string) error {
+	if r == nil || r.db == nil {
+		return gorm.ErrInvalidDB
+	}
+	return r.db.WithContext(queryContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		result := tx.Exec(`
+UPDATE shops AS shop
+SET electricity_tariff = ?
+FROM users AS actor
+JOIN user_shop_relations AS relation
+  ON relation.user_id = actor.id
+WHERE relation.shop_id = shop.id
+  AND shop.id = ? AND shop.is_active = TRUE AND actor.id = ? AND actor.is_admin = TRUE`, tariff, shopID, actorID)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
 }
 
 func shopNullableString(value sql.NullString) *string {

@@ -37,19 +37,21 @@ func openPersistenceDB(t *testing.T) *gorm.DB {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not set; persistence integration test not run")
 	}
-	if err := migrations.Up(dsn); err != nil {
-		t.Fatal(err)
-	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := fs.ReadFile(migrations.Files, "sql/000007_b02_coverage_foundation.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Exec(string(body)).Error; err != nil {
-		t.Fatal(err)
+	for _, migrationFile := range []string{
+		"sql/000007_b02_coverage_foundation.up.sql",
+		"sql/000008_dashboard_carbon_summary.up.sql",
+	} {
+		body, err := fs.ReadFile(migrations.Files, migrationFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec(string(body)).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	return db
 }

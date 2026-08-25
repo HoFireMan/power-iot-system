@@ -42,8 +42,8 @@ type Device struct {
 	LastSeen            *time.Time
 }
 
-// Dashboard is the application result. Current power and shop energy are
-// supplied by authoritative persistence projections; carbon remains deferred.
+// Dashboard is the application result. Carbon is derived at read time only
+// from the accepted energy projection and a matching active factor.
 type Dashboard struct {
 	Shop          Shop
 	Devices       []Device
@@ -98,6 +98,20 @@ func (s *Service) GetDashboard(ctx context.Context, userID, shopID uint) (Dashbo
 		}
 		devices = append(devices, Device{ID: id, MeasurementPointRef: row.MeasurementPointID.String(), Name: row.Name, IsOnline: row.IsOnline, LastSeen: lastSeen})
 	}
+	var dailyKg, monthlyKg *float64
+	// Carbon is strictly a read-time derivation from the accepted energy
+	// projection and the matching active factor. Missing either input remains
+	// NULL; zero energy intentionally remains zero.
+	if projection.CarbonFactorKgPerKwh != nil {
+		if projection.DailyKwh != nil {
+			value := *projection.DailyKwh * *projection.CarbonFactorKgPerKwh
+			dailyKg = &value
+		}
+		if projection.MonthlyKwh != nil {
+			value := *projection.MonthlyKwh * *projection.CarbonFactorKgPerKwh
+			monthlyKg = &value
+		}
+	}
 	snapshotNow := projection.Snapshot.UTC()
 	if snapshotNow.IsZero() {
 		snapshotNow = s.now().UTC()
@@ -108,6 +122,8 @@ func (s *Service) GetDashboard(ctx context.Context, userID, shopID uint) (Dashbo
 		CurrentPowerW: projection.CurrentPowerW,
 		DailyKwh:      projection.DailyKwh,
 		MonthlyKwh:    projection.MonthlyKwh,
+		DailyKg:       dailyKg,
+		MonthlyKg:     monthlyKg,
 		GeneratedAt:   snapshotNow,
 	}, nil
 }

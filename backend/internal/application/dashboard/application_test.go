@@ -51,6 +51,35 @@ func TestServiceUsesOneSnapshotForGeneratedAtAndAssignments(t *testing.T) {
 	}
 }
 
+func TestServiceDerivesCarbonOnlyFromEnergyAndMatchingFactor(t *testing.T) {
+	query := &dashboardQueryStub{projection: persistence.DashboardProjection{
+		Shop:     persistence.DashboardShopProjection{ID: 1},
+		DailyKwh: floatPtr(9.7), MonthlyKwh: floatPtr(10),
+		CarbonFactorKgPerKwh: floatPtr(0.466),
+	}}
+	result, err := New(query, time.Now).GetDashboard(context.Background(), 2, 1)
+	if err != nil || result.DailyKg == nil || *result.DailyKg != 4.5202 || result.MonthlyKg == nil || *result.MonthlyKg != 4.66 {
+		t.Fatalf("carbon=%v/%v err=%v", result.DailyKg, result.MonthlyKg, err)
+	}
+	query.projection.CarbonFactorKgPerKwh = nil
+	result, err = New(query, time.Now).GetDashboard(context.Background(), 2, 1)
+	if err != nil || result.DailyKg != nil || result.MonthlyKg != nil {
+		t.Fatalf("missing factor must fail closed: %+v err=%v", result, err)
+	}
+}
+
+func TestServicePreservesZeroCarbonWhenEnergyIsValid(t *testing.T) {
+	query := &dashboardQueryStub{projection: persistence.DashboardProjection{
+		Shop:     persistence.DashboardShopProjection{ID: 1},
+		DailyKwh: floatPtr(0), MonthlyKwh: floatPtr(0),
+		CarbonFactorKgPerKwh: floatPtr(0.471),
+	}}
+	result, err := New(query, time.Now).GetDashboard(context.Background(), 2, 1)
+	if err != nil || result.DailyKg == nil || *result.DailyKg != 0 || result.MonthlyKg == nil || *result.MonthlyKg != 0 {
+		t.Fatalf("zero carbon=%v/%v err=%v", result.DailyKg, result.MonthlyKg, err)
+	}
+}
+
 func TestServiceSortsDevicesDeterministically(t *testing.T) {
 	query := &dashboardQueryStub{projection: persistence.DashboardProjection{
 		Shop:    persistence.DashboardShopProjection{ID: 1},

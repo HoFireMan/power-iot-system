@@ -43,8 +43,31 @@ type Shop struct {
 	IsActive   bool      `gorm:"default:true"` // 狀態 (status: 1=true, 9=false)
 	CreatedAt  time.Time
 	UpdatedAt  time.Time // 對應 modifytm
+	// Tariff persistence is handled by the dedicated Shop configuration SQL
+	// capability rather than legacy broad GORM writes.
+	ElectricityTariff *string `gorm:"-"`
 
 	Devices []Device `gorm:"foreignKey:ShopID"`
+}
+
+// CarbonFactorSet is versioned factor metadata; rates are normalized below.
+type CarbonFactorSet struct {
+	ID            uint64 `gorm:"primaryKey"`
+	Organization  string `gorm:"size:200;not null"`
+	DocumentTitle string `gorm:"column:document_title;size:200;not null"`
+	SourceURL     string `gorm:"column:source_url;size:500;not null"`
+	VersionYear   int    `gorm:"column:version_year;not null"`
+	ROCYear       int    `gorm:"column:roc_year;not null"`
+	Unit          string `gorm:"size:32;not null"`
+	IsActive      bool   `gorm:"column:is_active;not null;default:true"`
+	CreatedAt     time.Time
+}
+
+type CarbonFactorRate struct {
+	ID                 uint64 `gorm:"primaryKey"`
+	SetID              uint64 `gorm:"column:set_id;not null"`
+	TariffCode         string `gorm:"column:tariff_code;size:32;not null"`
+	FactorKgCO2ePerKwh string `gorm:"column:factor_kgco2e_per_kwh;type:numeric(10,6);not null"`
 }
 
 // User 使用者 (對應 basic.employee 概念)

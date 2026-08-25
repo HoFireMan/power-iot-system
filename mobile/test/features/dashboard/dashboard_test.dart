@@ -68,14 +68,21 @@ AuthenticatedHttpClient _client(_Adapter adapter, _Store store) {
   );
 }
 
-Map<String, Object?> _payload({Object? currentPowerW = 0, Object? dailyKwh, Object? monthlyKwh}) => {
+Map<String, Object?> _payload({
+  Object? currentPowerW = 0,
+  Object? dailyKwh,
+  Object? monthlyKwh,
+  Object? dailyKg,
+  Object? monthlyKg,
+}) =>
+    {
       'shop': {'id': '7', 'code': 'S7', 'name': 'Remote Shop'},
       'generatedAt': '2026-01-02T03:04:05Z',
       'currentPowerW': currentPowerW,
       'dailyKwh': dailyKwh,
       'monthlyKwh': monthlyKwh,
-      'dailyKg': null,
-      'monthlyKg': null,
+      'dailyKg': dailyKg,
+      'monthlyKg': monthlyKg,
       'devices': [
         {
           'measurementPointRef': '00000000-0000-4000-8000-000000000001',
@@ -92,14 +99,21 @@ Map<String, Object?> _payload({Object? currentPowerW = 0, Object? dailyKwh, Obje
       ],
     };
 
-Dashboard _dashboard({double? power = 0, double? dailyKwh, double? monthlyKwh}) => Dashboard(
+Dashboard _dashboard({
+  double? power = 0,
+  double? dailyKwh,
+  double? monthlyKwh,
+  double? dailyKg,
+  double? monthlyKg,
+}) =>
+    Dashboard(
       shop: const DashboardShop(id: '7', code: 'S7', name: 'Remote Shop'),
       generatedAt: DateTime.utc(2026, 1, 2),
       currentPowerW: power,
       dailyKwh: dailyKwh,
       monthlyKwh: monthlyKwh,
-      dailyKg: null,
-      monthlyKg: null,
+      dailyKg: dailyKg,
+      monthlyKg: monthlyKg,
       devices: const [
         DashboardDevice(
           measurementPointRef: '00000000-0000-4000-8000-000000000001',
@@ -130,14 +144,15 @@ void main() {
     expect(dashboard.devices[1].lastSeen, DateTime.utc(2026, 1, 2, 2, 4, 5));
   });
 
-  test('B7 DTO preserves zero and positive energy values', () {
+  test('B7 DTO preserves zero and positive server carbon values', () {
     final dashboard = DashboardDto.fromJson(
-      _payload(dailyKwh: 0, monthlyKwh: 12.5),
+      _payload(dailyKwh: 0, monthlyKwh: 12.5, dailyKg: 0, monthlyKg: 4.5202),
     ).toModel();
 
     expect(dashboard.dailyKwh, 0);
-    expect(dashboard.dailyKwh, isNotNull);
     expect(dashboard.monthlyKwh, 12.5);
+    expect(dashboard.dailyKg, 0);
+    expect(dashboard.monthlyKg, 4.5202);
   });
 
   test('B7 DTO rejects unknown fields instead of fabricating a shape', () {
@@ -304,7 +319,9 @@ void main() {
     expect(find.text('0 W'), findsOneWidget);
     expect(find.text('本日用電量'), findsOneWidget);
     expect(find.text('本月用電量'), findsOneWidget);
-    expect(find.text('無資料'), findsNWidgets(2));
+    expect(find.text('本日碳排放量'), findsOneWidget);
+    expect(find.text('本月碳排放量'), findsOneWidget);
+    expect(find.text('無資料'), findsNWidgets(4));
     expect(find.text('0.14'), findsNothing);
     expect(find.text('運轉中'), findsOneWidget);
     expect(find.text('已離線'), findsOneWidget);
@@ -334,6 +351,8 @@ void main() {
                   power: 12,
                   dailyKwh: 1,
                   monthlyKwh: 2.5,
+                  dailyKg: 4.52,
+                  monthlyKg: 11.75,
                 )),
           ),
         ],
@@ -346,6 +365,8 @@ void main() {
     expect(find.text('本月用電量'), findsOneWidget);
     expect(find.text('1 kWh'), findsOneWidget);
     expect(find.text('2.50 kWh'), findsOneWidget);
+    expect(find.text('4.52 kgCO₂e'), findsOneWidget);
+    expect(find.text('11.75 kgCO₂e'), findsOneWidget);
     expect(find.text('3.50 kWh'), findsNothing);
     expect(find.text('12 W'), findsOneWidget);
   });

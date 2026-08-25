@@ -4,22 +4,25 @@ package shops
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"gorm.io/gorm"
 	"power-iot-backend/internal/adapters/persistence"
 	applicationauth "power-iot-backend/internal/application/auth"
+	"power-iot-backend/internal/core/domain"
 )
 
 // Shop is the safe API projection. IDs are strings at the application
 // boundary, while nullable contact fields remain nullable.
 type Shop struct {
-	ID      string
-	Code    string
-	Name    string
-	Address *string
-	Phone   *string
-	IsHead  bool
+	ID                string
+	Code              string
+	Name              string
+	Address           *string
+	Phone             *string
+	IsHead            bool
+	ElectricityTariff *string
 }
 
 // Shops is the complete response projection for the list endpoint.
@@ -31,6 +34,37 @@ type Shops struct {
 // Query is the sole application capability required by the HTTP handler.
 type Query interface {
 	GetShops(context.Context, uint) (Shops, error)
+}
+
+type TariffMutation interface {
+	UpdateShopTariff(context.Context, uint, uint, string) error
+}
+
+var (
+	ErrInvalidTariff        = errors.New("invalid electricity tariff")
+	ErrShopMutationNotFound = errors.New("shop mutation target not found")
+)
+
+const (
+	TariffLightingCommercial    = domain.TariffLightingCommercial
+	TariffLowVoltage            = domain.TariffLowVoltage
+	TariffHighVoltage           = domain.TariffHighVoltage
+	TariffExtraHighVoltage      = domain.TariffExtraHighVoltage
+	TariffLightingNoncommercial = domain.TariffLightingNoncommercial
+	TariffPackageLighting       = domain.TariffPackageLighting
+)
+
+func ValidTariff(value string) bool { return domain.ValidElectricityTariff(value) }
+
+func UpdateTariff(ctx context.Context, mutation TariffMutation, actorID, shopID uint, tariff string) error {
+	if actorID == 0 || shopID == 0 || mutation == nil || !ValidTariff(tariff) {
+		return ErrInvalidTariff
+	}
+	err := mutation.UpdateShopTariff(ctx, actorID, shopID, tariff)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrShopMutationNotFound
+	}
+	return err
 }
 
 type Service struct {
@@ -62,7 +96,7 @@ func (s *Service) GetShops(ctx context.Context, userID uint) (Shops, error) {
 		out.Shops = append(out.Shops, Shop{
 			ID: strconv.FormatUint(uint64(projection.ID), 10), Code: projection.Code,
 			Name: projection.Name, Address: projection.Address, Phone: projection.Phone,
-			IsHead: projection.IsHead,
+			IsHead: projection.IsHead, ElectricityTariff: projection.ElectricityTariff,
 		})
 		if currentID != nil && projection.ID == *currentID {
 			authorizedCurrent = true

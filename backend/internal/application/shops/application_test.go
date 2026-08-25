@@ -22,6 +22,22 @@ func (s *queryStub) FindAuthorizedShops(_ context.Context, userID uint) ([]persi
 	return s.shops, s.current, s.err
 }
 
+func TestValidTariffAcceptsExactlyFrozenOptions(t *testing.T) {
+	for _, tariff := range []string{
+		TariffLightingCommercial, TariffLowVoltage, TariffHighVoltage,
+		TariffExtraHighVoltage, TariffLightingNoncommercial, TariffPackageLighting,
+	} {
+		if !ValidTariff(tariff) {
+			t.Fatalf("tariff %q rejected", tariff)
+		}
+	}
+	for _, tariff := range []string{"", "LOW_VOLTAGE ", "unknown", "low_voltage"} {
+		if ValidTariff(tariff) {
+			t.Fatalf("tariff %q accepted", tariff)
+		}
+	}
+}
+
 func TestGetShopsMapsAuthorizedProjectionAndKeepsOrder(t *testing.T) {
 	address := "A"
 	current := uint(22)

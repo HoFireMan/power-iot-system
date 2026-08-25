@@ -14,8 +14,6 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-
-	"power-iot-backend/internal/data/migrations"
 )
 
 func authDB(t *testing.T) *gorm.DB {
@@ -23,9 +21,6 @@ func authDB(t *testing.T) *gorm.DB {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not set; auth persistence integration test not run")
-	}
-	if err := migrations.Up(dsn); err != nil {
-		t.Fatal(err)
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
