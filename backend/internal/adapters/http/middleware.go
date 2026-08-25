@@ -89,6 +89,7 @@ var ErrValidation = errors.New("request validation failed")
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrUnauthorized       = errors.New("unauthorized")
+	ErrForbidden          = errors.New("forbidden")
 )
 
 // PublicErrorMapping is the complete public response selected for an error.
@@ -109,6 +110,8 @@ func MapPublicError(err error, requestID string) PublicErrorMapping {
 		code, message, status = "INVALID_CREDENTIALS", "invalid credentials", http.StatusUnauthorized
 	case errors.Is(err, ErrUnauthorized), errors.Is(err, applicationauth.ErrUnauthorized):
 		code, message, status = "UNAUTHORIZED", "unauthorized", http.StatusUnauthorized
+	case errors.Is(err, ErrForbidden):
+		code, message, status = "FORBIDDEN", "forbidden", http.StatusForbidden
 	case errors.Is(err, applicationdashboard.ErrShopNotFound), errors.Is(err, applicationshops.ErrShopMutationNotFound), errors.Is(err, applicationbilling.ErrConfigurationNotFound):
 		code, message, status = "SHOP_NOT_FOUND", "shop not found", http.StatusNotFound
 	case errors.Is(err, applicationshops.ErrInvalidTariff), errors.Is(err, applicationbilling.ErrInvalidPlan), errors.Is(err, corebilling.ErrUnsupportedBillingPlan), errors.Is(err, corebilling.ErrBillingTariffMismatch):

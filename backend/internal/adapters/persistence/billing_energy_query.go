@@ -76,7 +76,18 @@ func (r *BillingEnergyQueryRepository) FindBillingEnergy(ctx context.Context, us
 	if err := tx.QueryRowContext(ctx, "SELECT transaction_timestamp()").Scan(&databaseSnapshot); err != nil {
 		return core.Facts{}, err
 	}
-	snapshot := now().UTC()
+	result, err := findBillingEnergyInTx(ctx, tx, userID, shopID, month, now().UTC())
+	if err != nil {
+		return core.Facts{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Facts{}, err
+	}
+	committed = true
+	return result, nil
+}
+
+func findBillingEnergyInTx(ctx context.Context, tx *sql.Tx, userID, shopID uint, month core.BillingMonth, snapshot time.Time) (core.Facts, error) {
 	pointIDs, err := authorizedBillingPoints(ctx, tx, userID, shopID)
 	if err != nil {
 		return core.Facts{}, err
@@ -121,10 +132,6 @@ func (r *BillingEnergyQueryRepository) FindBillingEnergy(ctx context.Context, us
 	result.PeriodEnd = period.End
 	result.Cutoff = period.Cutoff
 	result.Snapshot = snapshot
-	if err := tx.Commit(); err != nil {
-		return core.Facts{}, err
-	}
-	committed = true
 	return result, nil
 }
 

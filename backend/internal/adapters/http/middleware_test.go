@@ -138,6 +138,7 @@ func TestMapPublicErrorCapabilities(t *testing.T) {
 		{"validation", ErrValidation, http.StatusBadRequest, "VALIDATION_ERROR"},
 		{"invalid credentials", auth.ErrInvalidCredentials, http.StatusUnauthorized, "INVALID_CREDENTIALS"},
 		{"unauthorized", auth.ErrUnauthorized, http.StatusUnauthorized, "UNAUTHORIZED"},
+		{"forbidden", ErrForbidden, http.StatusForbidden, "FORBIDDEN"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
