@@ -66,7 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("schema admission refused: disposition=%s state=%s: %v", admission.Disposition, admission.State, err)
 	}
-	if admission.Disposition != migrations.RuntimeServeV6 {
+	if !devseedAdmissionAccepted(admission.Disposition) {
 		log.Fatalf("schema admission refused: disposition=%s state=%s", admission.Disposition, admission.State)
 	}
 	shopIDForFixture, err := seedDevelopmentIdentity(context.Background(), db, password)
@@ -82,6 +82,15 @@ func main() {
 	}
 	fmt.Print(registrationMessage)
 	fmt.Print(fixtureMessage)
+}
+
+func devseedAdmissionAccepted(disposition migrations.RuntimeAdmissionDisposition) bool {
+	switch disposition {
+	case migrations.RuntimeServeV6, migrations.RuntimeServeB02:
+		return true
+	default:
+		return false
+	}
 }
 
 func openDevseedDatabase(dsn string) (*gorm.DB, error) {

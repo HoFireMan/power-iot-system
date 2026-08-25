@@ -43,6 +43,26 @@ func TestDevseedGuardFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDevseedAdmissionAcceptedOnlyServingSchemas(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		disposition migrations.RuntimeAdmissionDisposition
+		want        bool
+	}{
+		{name: "clean v6", disposition: migrations.RuntimeServeV6, want: true},
+		{name: "clean b02", disposition: migrations.RuntimeServeB02, want: true},
+		{name: "protected migration required", disposition: migrations.RuntimeProtectedMigrationNeeded, want: false},
+		{name: "empty", disposition: "", want: false},
+		{name: "unknown", disposition: migrations.RuntimeAdmissionDisposition("UNKNOWN"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := devseedAdmissionAccepted(test.disposition); got != test.want {
+				t.Fatalf("devseedAdmissionAccepted(%q)=%t, want %t", test.disposition, got, test.want)
+			}
+		})
+	}
+}
+
 func TestDevseedPasswordRequiresExplicitConfiguration(t *testing.T) {
 	secret := "development-only-password"
 	if got, err := readDevelopmentPassword(secret); err != nil || got != secret {
