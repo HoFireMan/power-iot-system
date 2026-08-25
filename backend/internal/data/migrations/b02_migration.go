@@ -21,6 +21,9 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 		return report, err
 	}
 	if inspection.State == ProtectedStateCleanB02 {
+		if err := RunDashboardCarbonMigration(ctx, databaseURL, admission); err != nil {
+			return report, err
+		}
 		report.State = ProtectedStateCleanB02
 		report.PostCommitState = ProtectedStateCleanB02
 		report.Outcome = ProtectedAlreadyComplete
@@ -129,6 +132,58 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	report.Committed = true
 	report.PostCommitVerified = true
 	return report, nil
+}
+
+// RunDashboardCarbonMigration applies the standalone 000008 feature schema to
+// an already clean B-02 database. It is deliberately protected rather than
+// reachable through generic migrations.Up, because this repository reserves
+// post-V5 schema changes for an externally admitted writer-drain operation.
+func RunDashboardCarbonMigration(ctx context.Context, databaseURL string, admission ExternalWriterAdmission) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := RequireExternalWriterAdmission(admission); err != nil {
+		return err
+	}
+	inspection, err := InspectProtectedMigration(ctx, databaseURL, D5MigrationSpec(admission))
+	if err != nil {
+		return err
+	}
+	if inspection.State != ProtectedStateCleanB02 {
+		return fmt.Errorf("dashboard carbon migration requires clean B-02, got %s", inspection.State)
+	}
+	fence, err := OpenExclusiveWriterFence(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := fence.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	capability, err := fence.Capability()
+	if err != nil {
+		return err
+	}
+	if err := RequireProtectedWork(capability); err != nil {
+		return err
+	}
+	body, err := fs.ReadFile(Files, "sql/000008_dashboard_carbon_summary.up.sql")
+	if err != nil {
+		return err
+	}
+	tx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("dashboard carbon body: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("dashboard carbon body commit outcome unknown: %w", err)
+	}
+	return nil
 }
 
 func configuredMetadataTable(ctx context.Context, databaseURL string, conn *sql.Conn) (string, error) {

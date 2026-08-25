@@ -78,7 +78,9 @@ type Shop struct {
 	// ElectricityTariff is an explicit, nullable tariff classification. It is
 	// intentionally not defaulted: carbon is unavailable until an administrator
 	// selects one of the supported classifications.
-	ElectricityTariff *string `gorm:"column:electricity_tariff;size:32"`
+	// Tariff persistence is handled by the narrow Shop mutation/query SQL
+	// capability; legacy GORM writers must not require the post-B02 column.
+	ElectricityTariff *string `gorm:"-"`
 
 	Devices []Device `gorm:"foreignKey:ShopID"`
 }

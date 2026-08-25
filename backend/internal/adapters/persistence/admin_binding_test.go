@@ -37,9 +37,6 @@ func openPersistenceDB(t *testing.T) *gorm.DB {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not set; persistence integration test not run")
 	}
-	if err := migrations.Up(dsn); err != nil {
-		t.Fatal(err)
-	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)

@@ -107,8 +107,9 @@ UPDATE shops AS shop
 SET electricity_tariff = ?
 FROM users AS actor
 JOIN user_shop_relations AS relation
-  ON relation.user_id = actor.id AND relation.shop_id = shop.id
-WHERE shop.id = ? AND shop.is_active = TRUE AND actor.id = ? AND actor.is_admin = TRUE`, tariff, shopID, actorID)
+  ON relation.user_id = actor.id
+WHERE relation.shop_id = shop.id
+  AND shop.id = ? AND shop.is_active = TRUE AND actor.id = ? AND actor.is_admin = TRUE`, tariff, shopID, actorID)
 		if result.Error != nil {
 			return result.Error
 		}

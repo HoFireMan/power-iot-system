@@ -39,11 +39,13 @@ type Shop struct {
 	IsHead  bool   `gorm:"default:false"` // 是否為總部 (ishead)
 	Memo    string // 備註 (memo)
 
-	InviteUUID        uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();uniqueIndex"`
-	IsActive          bool      `gorm:"default:true"` // 狀態 (status: 1=true, 9=false)
-	CreatedAt         time.Time
-	UpdatedAt         time.Time // 對應 modifytm
-	ElectricityTariff *string   `gorm:"column:electricity_tariff;size:32"`
+	InviteUUID uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();uniqueIndex"`
+	IsActive   bool      `gorm:"default:true"` // 狀態 (status: 1=true, 9=false)
+	CreatedAt  time.Time
+	UpdatedAt  time.Time // 對應 modifytm
+	// Tariff persistence is handled by the dedicated Shop configuration SQL
+	// capability rather than legacy broad GORM writes.
+	ElectricityTariff *string `gorm:"-"`
 
 	Devices []Device `gorm:"foreignKey:ShopID"`
 }
