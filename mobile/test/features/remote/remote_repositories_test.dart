@@ -141,6 +141,103 @@ void main() {
     expect(snapshot.currentShopId, '8');
   });
 
+  test('GET /shops accepts an optional tariff field', () {
+    final shop = Shop.fromJson({
+      'id': '1',
+      'code': 'devseed-shop',
+      'name': 'Development Seed Shop',
+      'address': null,
+      'phone': null,
+      'isHead': false,
+      'tariff': 'LIGHTING_COMMERCIAL',
+    });
+
+    expect(shop.tariff, 'LIGHTING_COMMERCIAL');
+  });
+
+  test('GET /shops accepts an explicitly null tariff', () {
+    final shop = Shop.fromJson({
+      'id': '1',
+      'code': 'devseed-shop',
+      'name': 'Development Seed Shop',
+      'address': null,
+      'phone': null,
+      'isHead': false,
+      'tariff': null,
+    });
+
+    expect(shop.tariff, isNull);
+  });
+
+  test('GET /shops rejects unknown fields', () {
+    expect(
+      () => Shop.fromJson({
+        'id': '1',
+        'code': 'devseed-shop',
+        'name': 'Development Seed Shop',
+        'address': null,
+        'phone': null,
+        'isHead': false,
+        'unexpected': true,
+      }),
+      throwsFormatException,
+    );
+  });
+
+  test('GET /shops rejects a missing required field', () {
+    final missingId = <String, Object?>{
+      'code': 'devseed-shop',
+      'name': 'Development Seed Shop',
+      'address': null,
+      'phone': null,
+      'isHead': false,
+    };
+    final missingIsHead = <String, Object?>{
+      'id': '1',
+      'code': 'devseed-shop',
+      'name': 'Development Seed Shop',
+      'address': null,
+      'phone': null,
+    };
+
+    expect(() => Shop.fromJson(missingId), throwsFormatException);
+    expect(() => Shop.fromJson(missingIsHead), throwsFormatException);
+  });
+
+  test('GET /shops rejects a malformed tariff', () {
+    expect(
+      () => Shop.fromJson({
+        'id': '1',
+        'code': 'devseed-shop',
+        'name': 'Development Seed Shop',
+        'address': null,
+        'phone': null,
+        'isHead': false,
+        'tariff': 466,
+      }),
+      throwsFormatException,
+    );
+  });
+
+  test('GET /shops snapshot accepts a shop with tariff', () {
+    final snapshot = ShopsSnapshot.fromJson({
+      'shops': [
+        {
+          'id': '1',
+          'code': 'devseed-shop',
+          'name': 'Development Seed Shop',
+          'address': null,
+          'phone': null,
+          'isHead': false,
+          'tariff': 'LIGHTING_COMMERCIAL',
+        },
+      ],
+      'currentShopId': '1',
+    });
+
+    expect(snapshot.shops.single.tariff, 'LIGHTING_COMMERCIAL');
+  });
+
   test('malformed remote shapes do not fabricate profile or shop data', () {
     expect(() => UserProfile.fromJson({'name': 'only'}), throwsFormatException);
     expect(() => ShopsSnapshot.fromJson({'shops': []}), throwsFormatException);
