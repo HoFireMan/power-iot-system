@@ -23,6 +23,7 @@ func migratePersistenceTestDatabase(dsn string) error {
 	for _, name := range []string{
 		"sql/000007_b02_coverage_foundation.up.sql",
 		"sql/000008_dashboard_carbon_summary.up.sql",
+		"sql/000009_billing_v1_catalog.up.sql",
 	} {
 		body, err := fs.ReadFile(migrations.Files, name)
 		if err != nil {

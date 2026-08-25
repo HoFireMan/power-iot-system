@@ -24,6 +24,9 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 		if err := RunDashboardCarbonMigration(ctx, databaseURL, admission); err != nil {
 			return report, err
 		}
+		if err := RunBillingV1Migration(ctx, databaseURL, admission); err != nil {
+			return report, err
+		}
 		report.State = ProtectedStateCleanB02
 		report.PostCommitState = ProtectedStateCleanB02
 		report.Outcome = ProtectedAlreadyComplete
@@ -105,6 +108,21 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	if err := carbonTx.Commit(); err != nil {
 		return report, fmt.Errorf("dashboard carbon body commit outcome unknown: %w", err)
 	}
+	billingBody, err := fs.ReadFile(Files, "sql/000009_billing_v1_catalog.up.sql")
+	if err != nil {
+		return report, err
+	}
+	billingTx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	if _, err := billingTx.ExecContext(ctx, string(billingBody)); err != nil {
+		_ = billingTx.Rollback()
+		return report, fmt.Errorf("billing V1 body: %w", err)
+	}
+	if err := billingTx.Commit(); err != nil {
+		return report, fmt.Errorf("billing V1 body commit outcome unknown: %w", err)
+	}
 
 	final, err := fence.Conn().BeginTx(ctx, nil)
 	if err != nil {
@@ -182,6 +200,57 @@ func RunDashboardCarbonMigration(ctx context.Context, databaseURL string, admiss
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("dashboard carbon body commit outcome unknown: %w", err)
+	}
+	return nil
+}
+
+// RunBillingV1Migration applies the additive Billing V1 catalog through the
+// protected writer-admission path. It is intentionally separate from generic
+// migration Up and performs no Shop backfill.
+func RunBillingV1Migration(ctx context.Context, databaseURL string, admission ExternalWriterAdmission) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := RequireExternalWriterAdmission(admission); err != nil {
+		return err
+	}
+	inspection, err := InspectProtectedMigration(ctx, databaseURL, D5MigrationSpec(admission))
+	if err != nil {
+		return err
+	}
+	if inspection.State != ProtectedStateCleanB02 {
+		return fmt.Errorf("billing V1 migration requires clean B-02, got %s", inspection.State)
+	}
+	fence, err := OpenExclusiveWriterFence(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := fence.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	capability, err := fence.Capability()
+	if err != nil {
+		return err
+	}
+	if err := RequireProtectedWork(capability); err != nil {
+		return err
+	}
+	body, err := fs.ReadFile(Files, "sql/000009_billing_v1_catalog.up.sql")
+	if err != nil {
+		return err
+	}
+	tx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("billing V1 body: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("billing V1 body commit outcome unknown: %w", err)
 	}
 	return nil
 }

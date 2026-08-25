@@ -18,6 +18,7 @@ import (
 	httpadapter "power-iot-backend/internal/adapters/http"
 	"power-iot-backend/internal/adapters/persistence"
 	applicationauth "power-iot-backend/internal/application/auth"
+	applicationbilling "power-iot-backend/internal/application/billing"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
 	applicationme "power-iot-backend/internal/application/me"
 	applicationmeasurementpointdetail "power-iot-backend/internal/application/measurementpointdetail"
@@ -116,6 +117,9 @@ func main() {
 	httpadapter.RegisterLogoutRoute(r, authenticator, httpadapter.LogoutHandlerConfig{Runner: loginRunner})
 	httpadapter.RegisterMeRoute(r, authenticator, applicationme.NewGormQueryRunner(db))
 	httpadapter.RegisterShopsRoute(r, authenticator, applicationshops.NewGormQueryRunner(db), persistence.NewShopMutationRepository(db))
+	billingRepository := persistence.NewBillingConfigurationRepository(db)
+	billingService := applicationbilling.New(billingRepository, time.Now)
+	httpadapter.RegisterBillingConfigurationRoutes(r, authenticator, billingService, billingService)
 	httpadapter.RegisterDashboardRoute(r, authenticator, applicationdashboard.NewGormQueryRunner(db))
 	httpadapter.RegisterMeasurementPointDetailRoute(r, authenticator, applicationmeasurementpointdetail.NewGormQueryRunner(db))
 	r.GET("/", func(c *gin.Context) {
