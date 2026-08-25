@@ -79,7 +79,6 @@ func (s *Service) SetConfiguration(ctx context.Context, actorID, shopID uint, pl
 		return ErrInvalidPlan
 	}
 	now := s.now().In(mustBusinessLocation())
-	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, mustBusinessLocation())
 	projection, err := s.repository.FindBillingConfiguration(ctx, actorID, shopID, now)
 	if err != nil {
 		return err
@@ -87,11 +86,7 @@ func (s *Service) SetConfiguration(ctx context.Context, actorID, shopID uint, pl
 	if !projection.Supported || projection.ElectricityTariff == nil || !corebilling.CompatiblePlan(*projection.ElectricityTariff, planCode) {
 		return corebilling.ErrBillingTariffMismatch
 	}
-	effective := start
-	if projection.Current != nil {
-		effective = start.AddDate(0, 1, 0)
-	}
-	err = s.repository.SetBillingPlan(ctx, actorID, shopID, planCode, effective)
+	err = s.repository.SetBillingPlan(ctx, actorID, shopID, planCode, now)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return ErrConfigurationNotFound
 	}

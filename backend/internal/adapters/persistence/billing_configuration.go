@@ -77,26 +77,34 @@ ORDER BY plan_code`, *tariff).Scan(&plans).Error; err != nil {
 	local := asOf.In(mustBusinessLocation())
 	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, mustBusinessLocation())
 	var assignments []struct {
-		PlanCode  string       `gorm:"column:plan_code"`
-		ValidFrom time.Time    `gorm:"column:valid_from"`
-		ValidTo   sql.NullTime `gorm:"column:valid_to"`
+		PlanCode  string         `gorm:"column:plan_code"`
+		ValidFrom string         `gorm:"column:valid_from"`
+		ValidTo   sql.NullString `gorm:"column:valid_to"`
 	}
+	dayText := day.Format("2006-01-02")
 	if err := r.db.WithContext(queryContext(ctx)).Raw(`
-SELECT p.plan_code, a.valid_from, a.valid_to
+SELECT p.plan_code, a.valid_from::text AS valid_from, a.valid_to::text AS valid_to
 FROM shop_billing_assignments AS a
 JOIN electricity_tariff_plans AS p ON p.id = a.tariff_plan_id
 WHERE a.shop_id = ?
-  AND (a.valid_to IS NULL OR a.valid_to >= ?)
-ORDER BY a.valid_from ASC`, shopID, day).Scan(&assignments).Error; err != nil {
+  AND (a.valid_to IS NULL OR a.valid_to > ?::date)
+ORDER BY a.valid_from ASC`, shopID, dayText).Scan(&assignments).Error; err != nil {
 		return BillingConfigurationProjection{}, err
 	}
 	for _, assignment := range assignments {
-		from := assignment.ValidFrom.In(mustBusinessLocation())
-		to := nullableTime(assignment.ValidTo)
-		item := &BillingAssignmentProjection{PlanCode: assignment.PlanCode, ValidFrom: from}
-		if to != nil {
-			item.ValidTo = to
+		from, err := parseBusinessDate(assignment.ValidFrom)
+		if err != nil {
+			return BillingConfigurationProjection{}, err
 		}
+		var to *time.Time
+		if assignment.ValidTo.Valid {
+			parsed, err := parseBusinessDate(assignment.ValidTo.String)
+			if err != nil {
+				return BillingConfigurationProjection{}, err
+			}
+			to = &parsed
+		}
+		item := &BillingAssignmentProjection{PlanCode: assignment.PlanCode, ValidFrom: from, ValidTo: to}
 		if !from.After(day) && (to == nil || day.Before(*to)) && out.Current == nil {
 			out.Current = item
 			continue
@@ -108,7 +116,7 @@ ORDER BY a.valid_from ASC`, shopID, day).Scan(&assignments).Error; err != nil {
 	return out, nil
 }
 
-func (r *BillingConfigurationRepository) SetBillingPlan(ctx context.Context, actorID, shopID uint, planCode string, effectiveFrom time.Time) error {
+func (r *BillingConfigurationRepository) SetBillingPlan(ctx context.Context, actorID, shopID uint, planCode string, asOf time.Time) error {
 	if r == nil || r.db == nil {
 		return gorm.ErrInvalidDB
 	}
@@ -142,42 +150,61 @@ FOR UPDATE OF s`, actorID, shopID).Scan(&shop).Error; err != nil {
 		if !shop.Tariff.Valid || !billing.CompatiblePlan(shop.Tariff.String, planCode) || shop.Tariff.String != plan.Tariff {
 			return billing.ErrBillingTariffMismatch
 		}
-		date := effectiveFrom.In(mustBusinessLocation())
-		start := time.Date(date.Year(), date.Month(), 1, 0, 0, 0, 0, mustBusinessLocation())
+
+		location := mustBusinessLocation()
+		local := asOf.In(location)
+		monthStart := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, location)
+		monthText := monthStart.Format("2006-01-02")
 		var current struct {
-			ID        string
-			PlanCode  string
-			ValidFrom time.Time
-			ValidTo   sql.NullTime
+			ID       string
+			PlanCode string
 		}
 		query := tx.Raw(`
-SELECT a.id, p.plan_code, a.valid_from, a.valid_to
+SELECT a.id, p.plan_code
 FROM shop_billing_assignments a
 JOIN electricity_tariff_plans p ON p.id = a.tariff_plan_id
-WHERE a.shop_id = ? AND a.valid_from <= ?
-  AND (a.valid_to IS NULL OR ? < a.valid_to)
+WHERE a.shop_id = ? AND a.valid_from <= ?::date
+  AND (a.valid_to IS NULL OR ?::date < a.valid_to)
 ORDER BY a.valid_from DESC
-LIMIT 1`, shopID, start, start).Scan(&current)
+LIMIT 1`, shopID, monthText, monthText).Scan(&current)
 		if query.Error != nil {
 			return query.Error
 		}
-		if query.RowsAffected == 1 && !current.ValidFrom.Before(start) {
-			if current.PlanCode == planCode {
+
+		target := monthStart
+		if query.RowsAffected == 1 {
+			target = monthStart.AddDate(0, 1, 0)
+		}
+		targetText := target.Format("2006-01-02")
+		var scheduled struct {
+			ID       string
+			PlanCode string
+		}
+		scheduledQuery := tx.Raw(`
+SELECT a.id, p.plan_code
+FROM shop_billing_assignments a
+JOIN electricity_tariff_plans p ON p.id = a.tariff_plan_id
+WHERE a.shop_id = ? AND a.valid_from = ?::date`, shopID, targetText).Scan(&scheduled)
+		if scheduledQuery.Error != nil {
+			return scheduledQuery.Error
+		}
+		if scheduledQuery.RowsAffected == 1 {
+			if scheduled.PlanCode == planCode {
 				return nil
 			}
-			return tx.Exec(`UPDATE shop_billing_assignments SET tariff_plan_id = ?, created_by_user_id = ?, updated_at = now() WHERE id = ?`, plan.ID, actorID, current.ID).Error
+			return tx.Exec(`UPDATE shop_billing_assignments SET tariff_plan_id = ?, created_by_user_id = ?, updated_at = now() WHERE id = ?`, plan.ID, actorID, scheduled.ID).Error
 		}
 		if query.RowsAffected == 1 {
 			if current.PlanCode == planCode {
 				return nil
 			}
-			if err := tx.Exec(`UPDATE shop_billing_assignments SET valid_to = ?, updated_at = now() WHERE id = ?`, start, current.ID).Error; err != nil {
+			if err := tx.Exec(`UPDATE shop_billing_assignments SET valid_to = ?::date, updated_at = now() WHERE id = ?`, targetText, current.ID).Error; err != nil {
 				return err
 			}
 		}
 		if err := tx.Exec(`
 INSERT INTO shop_billing_assignments (shop_id, tariff_plan_id, valid_from, created_by_user_id)
-VALUES (?, ?, ?, ?)`, shopID, plan.ID, start, actorID).Error; err != nil {
+VALUES (?, ?, ?::date, ?)`, shopID, plan.ID, targetText, actorID).Error; err != nil {
 			return err
 		}
 		return nil
@@ -195,12 +222,8 @@ func (r *BillingConfigurationRepository) HasBillingHistory(ctx context.Context, 
 	return count > 0, nil
 }
 
-func nullableTime(value sql.NullTime) *time.Time {
-	if !value.Valid {
-		return nil
-	}
-	out := value.Time.In(mustBusinessLocation())
-	return &out
+func parseBusinessDate(value string) (time.Time, error) {
+	return time.ParseInLocation("2006-01-02", value, mustBusinessLocation())
 }
 
 func mustBusinessLocation() *time.Location {

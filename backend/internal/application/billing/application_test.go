@@ -32,15 +32,15 @@ func TestServiceDerivesEffectiveMonthAndRejectsIncompatiblePlan(t *testing.T) {
 	if err := service.SetConfiguration(context.Background(), 2, 7, corebilling.PlanNoncommercialResidentialNonTOU); err != nil {
 		t.Fatal(err)
 	}
-	if repository.plan != corebilling.PlanNoncommercialResidentialNonTOU || !repository.effective.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, mustBusinessLocation())) {
+	if repository.plan != corebilling.PlanNoncommercialResidentialNonTOU || !repository.effective.Equal(now()) {
 		t.Fatalf("assignment=%s/%s", repository.plan, repository.effective)
 	}
 	repository.configuration.Current = &persistence.BillingAssignmentProjection{PlanCode: repository.plan, ValidFrom: repository.effective}
 	if err := service.SetConfiguration(context.Background(), 2, 7, corebilling.PlanNoncommercialNonresidentialNonTOU); err != nil {
 		t.Fatal(err)
 	}
-	if !repository.effective.Equal(time.Date(2026, 9, 1, 0, 0, 0, 0, mustBusinessLocation())) {
-		t.Fatalf("next effective=%s", repository.effective)
+	if !repository.effective.Equal(now()) {
+		t.Fatalf("as-of=%s", repository.effective)
 	}
 	if err := service.SetConfiguration(context.Background(), 2, 7, corebilling.PlanCommercialNonTOU); !errors.Is(err, corebilling.ErrBillingTariffMismatch) {
 		t.Fatalf("mismatch=%v", err)

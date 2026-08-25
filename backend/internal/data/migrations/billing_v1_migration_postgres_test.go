@@ -168,6 +168,27 @@ RETURNING id`).Scan(&extraPlanID); err != nil {
 	if _, err := db.Exec(`INSERT INTO electricity_rate_plans (rate_set_id, tariff_plan_id, minimum_monthly_charge) VALUES ($1, $2, 100)`, authoritativeSetID, extraPlanID); err == nil {
 		t.Fatal("authoritative rate plan insertion was accepted")
 	}
+	var draftSetID, draftRatePlanID, draftTierID, authoritativeRatePlanID int64
+	if err := db.QueryRow(`INSERT INTO electricity_rate_sets
+(provider, version_code, effective_from, source_organization, source_document, approval_reference, currency, includes_tax, status)
+VALUES ('TAIPOWER', 'TAIPOWER_DRAFT_PROBE', DATE '2030-01-01', 'x', 'x', 'x', 'TWD', true, 'DRAFT') RETURNING id`).Scan(&draftSetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`INSERT INTO electricity_rate_plans (rate_set_id, tariff_plan_id, minimum_monthly_charge) VALUES ($1, $2, 100) RETURNING id`, draftSetID, extraPlanID).Scan(&draftRatePlanID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`INSERT INTO electricity_rate_tiers (rate_plan_id, season, tier_order, lower_kwh, upper_kwh, rate_per_kwh) VALUES ($1, 'SUMMER', 1, 0, 100, 1) RETURNING id`, draftRatePlanID).Scan(&draftTierID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT id FROM electricity_rate_plans WHERE rate_set_id = $1 LIMIT 1`, authoritativeSetID).Scan(&authoritativeRatePlanID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE electricity_rate_plans SET rate_set_id = $1 WHERE id = $2`, authoritativeSetID, draftRatePlanID); err == nil {
+		t.Fatal("draft rate plan could be moved into authoritative set")
+	}
+	if _, err := db.Exec(`UPDATE electricity_rate_tiers SET rate_plan_id = $1 WHERE id = $2`, authoritativeRatePlanID, draftTierID); err == nil {
+		t.Fatal("draft tier could be moved into authoritative rate plan")
+	}
 	if _, err := db.Exec(`INSERT INTO electricity_rate_sets
 (provider, version_code, effective_from, source_organization, source_document, approval_reference, currency, includes_tax, status)
 VALUES ('TAIPOWER', 'TAIPOWER_OVERLAP', DATE '2025-09-01', 'x', 'x', 'x', 'TWD', true, 'AUTHORITATIVE')`); err == nil {

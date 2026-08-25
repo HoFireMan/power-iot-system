@@ -428,7 +428,8 @@ class _BillingDialogState extends State<BillingConfigurationDialog> {
   @override
   void initState() {
     super.initState();
-    selected = widget.configuration.currentAssignment?.planCode ??
+    selected = widget.configuration.scheduledAssignment?.planCode ??
+        widget.configuration.currentAssignment?.planCode ??
         (widget.configuration.plans.isEmpty
             ? null
             : widget.configuration.plans.first.code);

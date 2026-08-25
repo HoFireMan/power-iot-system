@@ -160,60 +160,48 @@ LANGUAGE plpgsql AS $$
 DECLARE
     set_status VARCHAR(20);
 BEGIN
-    IF TG_TABLE_NAME = 'electricity_rate_plans' THEN
-        SELECT status INTO set_status FROM electricity_rate_sets WHERE id = OLD.rate_set_id;
-    ELSE
-        SELECT rs.status INTO set_status
-        FROM electricity_rate_plans rp
-        JOIN electricity_rate_sets rs ON rs.id = rp.rate_set_id
-        WHERE rp.id = OLD.rate_plan_id;
+    IF TG_OP <> 'INSERT' THEN
+        IF TG_TABLE_NAME = 'electricity_rate_plans' THEN
+            SELECT status INTO set_status FROM electricity_rate_sets WHERE id = OLD.rate_set_id;
+        ELSE
+            SELECT rs.status INTO set_status
+            FROM electricity_rate_plans rp
+            JOIN electricity_rate_sets rs ON rs.id = rp.rate_set_id
+            WHERE rp.id = OLD.rate_plan_id;
+        END IF;
+        IF set_status IN ('AUTHORITATIVE', 'RETIRED') THEN
+            RAISE EXCEPTION 'authoritative electricity rate data is immutable';
+        END IF;
     END IF;
-    IF set_status IN ('AUTHORITATIVE', 'RETIRED') THEN
-        RAISE EXCEPTION 'authoritative electricity rate data is immutable';
+    IF TG_OP <> 'DELETE' THEN
+        IF TG_TABLE_NAME = 'electricity_rate_plans' THEN
+            SELECT status INTO set_status FROM electricity_rate_sets WHERE id = NEW.rate_set_id;
+        ELSE
+            SELECT rs.status INTO set_status
+            FROM electricity_rate_plans rp
+            JOIN electricity_rate_sets rs ON rs.id = rp.rate_set_id
+            WHERE rp.id = NEW.rate_plan_id;
+        END IF;
+        IF set_status IN ('AUTHORITATIVE', 'RETIRED') THEN
+            RAISE EXCEPTION 'authoritative electricity rate data is immutable';
+        END IF;
     END IF;
     RETURN COALESCE(NEW, OLD);
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION billing_rate_child_insert_guard() RETURNS trigger
-LANGUAGE plpgsql AS $$
-DECLARE
-    set_status VARCHAR(20);
-BEGIN
-    IF TG_TABLE_NAME = 'electricity_rate_plans' THEN
-        SELECT status INTO set_status FROM electricity_rate_sets WHERE id = NEW.rate_set_id;
-    ELSE
-        SELECT rs.status INTO set_status
-        FROM electricity_rate_plans rp
-        JOIN electricity_rate_sets rs ON rs.id = rp.rate_set_id
-        WHERE rp.id = NEW.rate_plan_id;
-    END IF;
-    IF set_status IN ('AUTHORITATIVE', 'RETIRED') THEN
-        RAISE EXCEPTION 'authoritative electricity rate data is immutable';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
 DROP TRIGGER IF EXISTS electricity_rate_plans_immutable ON electricity_rate_plans;
 CREATE TRIGGER electricity_rate_plans_immutable
-BEFORE UPDATE OR DELETE ON electricity_rate_plans
+BEFORE INSERT OR UPDATE OR DELETE ON electricity_rate_plans
 FOR EACH ROW EXECUTE FUNCTION billing_rate_children_immutable();
 
 DROP TRIGGER IF EXISTS electricity_rate_plans_insert_guard ON electricity_rate_plans;
-CREATE TRIGGER electricity_rate_plans_insert_guard
-AFTER INSERT ON electricity_rate_plans
-FOR EACH ROW EXECUTE FUNCTION billing_rate_child_insert_guard();
-
 DROP TRIGGER IF EXISTS electricity_rate_tiers_immutable ON electricity_rate_tiers;
 CREATE TRIGGER electricity_rate_tiers_immutable
-BEFORE UPDATE OR DELETE ON electricity_rate_tiers
+BEFORE INSERT OR UPDATE OR DELETE ON electricity_rate_tiers
 FOR EACH ROW EXECUTE FUNCTION billing_rate_children_immutable();
 
 DROP TRIGGER IF EXISTS electricity_rate_tiers_insert_guard ON electricity_rate_tiers;
-CREATE TRIGGER electricity_rate_tiers_insert_guard
-AFTER INSERT ON electricity_rate_tiers
-FOR EACH ROW EXECUTE FUNCTION billing_rate_child_insert_guard();
 
 INSERT INTO electricity_rate_sets
     (provider, version_code, effective_from, effective_to, source_organization, source_document,
@@ -297,27 +285,146 @@ WHERE provider = 'TAIPOWER'
 
 DO $$
 DECLARE
-    expected_tiers INTEGER := 34;
+    target_set_id BIGINT;
     actual_tiers INTEGER;
 BEGIN
+    SELECT id INTO target_set_id
+    FROM electricity_rate_sets
+    WHERE provider = 'TAIPOWER' AND version_code = 'TAIPOWER_2025_10_01';
+    IF target_set_id IS NULL OR (
+        SELECT count(*) FROM electricity_rate_sets
+        WHERE provider = 'TAIPOWER' AND version_code = 'TAIPOWER_2025_10_01'
+    ) <> 1 THEN
+        RAISE EXCEPTION 'TAIPOWER_2025_10_01 rate set seed mismatch';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM electricity_rate_sets
+        WHERE id = target_set_id
+          AND effective_from = DATE '2025-10-01'
+          AND (effective_to IS NULL OR effective_to > effective_from)
+          AND source_organization = '台灣電力公司 / 經濟部核定'
+          AND source_document = '電價表'
+          AND approval_reference = '114年9月26日經能字第11458000380號函'
+          AND currency = 'TWD'
+          AND includes_tax = TRUE
+          AND status IN ('AUTHORITATIVE', 'RETIRED')
+    ) THEN
+        RAISE EXCEPTION 'TAIPOWER_2025_10_01 rate set metadata mismatch';
+    END IF;
+    IF (SELECT count(*) FROM electricity_tariff_plans
+        WHERE plan_code IN ('LIGHTING_COMMERCIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU')) <> 3 OR EXISTS (
+        SELECT 1 FROM electricity_tariff_plans p
+        WHERE p.plan_code IN ('LIGHTING_COMMERCIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM (VALUES
+                ('LIGHTING_COMMERCIAL_NON_TOU'::varchar, 'LIGHTING_COMMERCIAL'::varchar, 'NON_TOU'::varchar, NULL::varchar, 'PROGRESSIVE_NON_TOU'::varchar),
+                ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL', 'NON_TOU', 'RESIDENTIAL', 'PROGRESSIVE_NON_TOU'),
+                ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL', 'NON_TOU', 'NON_RESIDENTIAL_NONCOMMERCIAL', 'PROGRESSIVE_NON_TOU')
+            ) AS expected(plan_code, electricity_tariff, billing_method, usage_class, calculator_kind)
+            WHERE p.plan_code = expected.plan_code
+              AND p.electricity_tariff = expected.electricity_tariff
+              AND p.billing_method = expected.billing_method
+              AND p.usage_class IS NOT DISTINCT FROM expected.usage_class
+              AND p.calculator_kind = expected.calculator_kind
+        )
+    ) OR EXISTS (
+        SELECT 1
+        FROM (VALUES
+            ('LIGHTING_COMMERCIAL_NON_TOU'::varchar, 'LIGHTING_COMMERCIAL'::varchar, 'NON_TOU'::varchar, NULL::varchar, 'PROGRESSIVE_NON_TOU'::varchar),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL', 'NON_TOU', 'RESIDENTIAL', 'PROGRESSIVE_NON_TOU'),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU', 'LIGHTING_NONCOMMERCIAL', 'NON_TOU', 'NON_RESIDENTIAL_NONCOMMERCIAL', 'PROGRESSIVE_NON_TOU')
+        ) AS expected(plan_code, electricity_tariff, billing_method, usage_class, calculator_kind)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM electricity_tariff_plans p
+            WHERE p.plan_code = expected.plan_code
+              AND p.electricity_tariff = expected.electricity_tariff
+              AND p.billing_method = expected.billing_method
+              AND p.usage_class IS NOT DISTINCT FROM expected.usage_class
+              AND p.calculator_kind = expected.calculator_kind
+        )
+    ) THEN
+        RAISE EXCEPTION 'Billing V1 tariff plan seed mismatch';
+    END IF;
+    IF (SELECT count(*) FROM electricity_rate_plans WHERE rate_set_id = target_set_id) <> 3 OR EXISTS (
+        SELECT 1 FROM electricity_rate_plans rp
+        WHERE rp.rate_set_id = target_set_id AND rp.minimum_monthly_charge <> 100.000000
+    ) THEN
+        RAISE EXCEPTION 'TAIPOWER_2025_10_01 rate plan seed mismatch';
+    END IF;
+
     SELECT count(*) INTO actual_tiers
     FROM electricity_rate_tiers t
     JOIN electricity_rate_plans rp ON rp.id = t.rate_plan_id
-    JOIN electricity_rate_sets rs ON rs.id = rp.rate_set_id
-    WHERE rs.provider = 'TAIPOWER'
-      AND rs.version_code = 'TAIPOWER_2025_10_01';
-    IF actual_tiers <> expected_tiers THEN
-        RAISE EXCEPTION 'TAIPOWER_2025_10_01 tier seed mismatch: got %, want %', actual_tiers, expected_tiers;
+    WHERE rp.rate_set_id = target_set_id;
+    IF actual_tiers <> 34 THEN
+        RAISE EXCEPTION 'TAIPOWER_2025_10_01 tier seed mismatch: got %, want 34', actual_tiers;
     END IF;
     IF EXISTS (
-        SELECT 1
-        FROM electricity_rate_plans rp
-        JOIN electricity_rate_sets rs ON rs.id = rp.rate_set_id
-        WHERE rs.provider = 'TAIPOWER'
-          AND rs.version_code = 'TAIPOWER_2025_10_01'
-          AND rp.minimum_monthly_charge <> 100.000000
+        WITH expected(plan_code, season, tier_order, lower_kwh, upper_kwh, rate_per_kwh) AS (
+            VALUES
+            ('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',1,0::numeric,330::numeric,2.71::numeric),
+            ('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',2,330,700,3.76),
+            ('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',3,700,1500,4.46),
+            ('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',4,1500,3000,7.08),
+            ('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',5,3000,NULL,7.43),
+            ('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',1,0,330,2.28),
+            ('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',2,330,700,3.10),
+            ('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',3,700,1500,3.61),
+            ('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',4,1500,3000,5.56),
+            ('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',5,3000,NULL,5.83),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',1,0,120,1.78),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',2,120,330,2.55),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',3,330,500,3.80),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',4,500,700,5.14),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',5,700,1000,6.44),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',6,1000,NULL,8.86),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',1,0,120,1.78),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',2,120,330,2.26),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',3,330,500,3.13),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',4,500,700,4.24),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',5,700,1000,5.27),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',6,1000,NULL,7.03),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',1,0,120,1.78),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',2,120,330,2.55),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',3,330,500,3.80),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',4,500,700,5.14),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',5,700,1000,6.44),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',6,1000,NULL,8.86),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',1,0,120,1.78),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',2,120,330,2.26),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',3,330,500,3.13),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',4,500,700,4.24),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',5,700,1000,5.27),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',6,1000,NULL,7.03)
+        ), actual AS (
+            SELECT p.plan_code, t.season, t.tier_order, t.lower_kwh, t.upper_kwh, t.rate_per_kwh
+            FROM electricity_rate_tiers t
+            JOIN electricity_rate_plans rp ON rp.id = t.rate_plan_id
+            JOIN electricity_tariff_plans p ON p.id = rp.tariff_plan_id
+            WHERE rp.rate_set_id = target_set_id
+        )
+        SELECT 1 FROM expected e
+        LEFT JOIN actual a ON a.plan_code = e.plan_code AND a.season = e.season AND a.tier_order = e.tier_order
+        WHERE a.plan_code IS NULL OR a.lower_kwh IS DISTINCT FROM e.lower_kwh
+           OR a.upper_kwh IS DISTINCT FROM e.upper_kwh OR a.rate_per_kwh IS DISTINCT FROM e.rate_per_kwh
+    ) OR EXISTS (
+        WITH expected(plan_code, season, tier_order) AS (
+            VALUES
+            ('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',1),('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',2),('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',3),('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',4),('LIGHTING_COMMERCIAL_NON_TOU','SUMMER',5),
+            ('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',1),('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',2),('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',3),('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',4),('LIGHTING_COMMERCIAL_NON_TOU','NON_SUMMER',5),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',1),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',2),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',3),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',4),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',5),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','SUMMER',6),
+            ('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',1),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',2),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',3),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',4),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',5),('LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU','NON_SUMMER',6),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',1),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',2),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',3),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',4),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',5),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','SUMMER',6),
+            ('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',1),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',2),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',3),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',4),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',5),('LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU','NON_SUMMER',6)
+        )
+        SELECT 1 FROM electricity_rate_tiers t
+        JOIN electricity_rate_plans rp ON rp.id = t.rate_plan_id
+        JOIN electricity_tariff_plans p ON p.id = rp.tariff_plan_id
+        LEFT JOIN expected e ON e.plan_code = p.plan_code AND e.season = t.season AND e.tier_order = t.tier_order
+        WHERE rp.rate_set_id = target_set_id AND e.plan_code IS NULL
     ) THEN
-        RAISE EXCEPTION 'TAIPOWER_2025_10_01 minimum charge seed mismatch';
+        RAISE EXCEPTION 'TAIPOWER_2025_10_01 exact tier seed mismatch';
     END IF;
 END;
 $$;
