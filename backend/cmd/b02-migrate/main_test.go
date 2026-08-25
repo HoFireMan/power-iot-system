@@ -57,6 +57,11 @@ func TestRunRejectsNonLocalAndLegacyDatabaseURLs(t *testing.T) {
 	}{
 		{name: "remote", url: "postgres://db.example/power_iot", want: "local 127.0.0.1"},
 		{name: "legacy", url: "postgres://127.0.0.1:5432/power_iot", want: "legacy PostgreSQL port"},
+		{name: "legacy with leading zero", url: "postgres://127.0.0.1:05432/power_iot", want: "legacy PostgreSQL port"},
+		{name: "host override", url: "postgres://127.0.0.1:55434/power_iot?host=remote.example", want: "connection overrides"},
+		{name: "port override", url: "postgres://127.0.0.1:55434/power_iot?port=5432", want: "connection overrides"},
+		{name: "database override", url: "postgres://127.0.0.1:55434/power_iot?dbname=legacy", want: "connection overrides"},
+		{name: "migration table override", url: "postgres://127.0.0.1:55434/power_iot?x-migrations-table=other", want: "connection overrides"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

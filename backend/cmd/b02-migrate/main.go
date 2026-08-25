@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,8 +112,18 @@ func validateRehearsalDatabaseURL(raw string) error {
 	if port == "" {
 		return errors.New("rehearsal database URL must specify a local port")
 	}
-	if port == "5432" {
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("rehearsal database URL must specify a valid local port")
+	}
+	if portNumber == 5432 {
 		return errors.New("rehearsal database URL must not use the legacy PostgreSQL port")
+	}
+	for key := range parsed.Query() {
+		switch strings.ToLower(key) {
+		case "host", "hostaddr", "port", "dbname", "service", "x-migrations-table", "x-migrations-table-quoted":
+			return errors.New("rehearsal database URL must not contain PostgreSQL connection overrides")
+		}
 	}
 	return nil
 }
