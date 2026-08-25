@@ -40,6 +40,7 @@ func main() {
 	shopID := flag.Uint("shop-id", 0, "optional existing shop ID; defaults to the development shop")
 	measurementPointName := flag.String("measurement-point-name", "", "optional measurement point name for a v1 ingest fixture")
 	assignmentFrom := flag.String("assignment-from", "", "optional assignment start in RFC3339 format; defaults to now")
+	adminFixture := flag.Bool("admin-fixture", false, "explicitly create the development scoped-admin fixture")
 	coverageEnvValue, coverageEnvSet := os.LookupEnv(coverageMaxIntervalConfigEnv)
 	coverageFlagDefault := ""
 	if coverageEnvSet {
@@ -72,6 +73,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	adminPassword, err := resolveAdminFixturePassword(*adminFixture, os.Getenv(devSeedAdminPasswordEnv))
+	if err != nil {
+		log.Fatal(err)
+	}
 	mac, err := iot.NormalizeMAC(firstNonEmpty(*macFlag, os.Getenv("DEV_DEVICE_MAC")))
 	if err != nil {
 		log.Fatal(err)
@@ -97,6 +102,12 @@ func main() {
 	shopIDForFixture, err := seedDevelopmentIdentity(context.Background(), db, password)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *adminFixture {
+		if err := seedDevelopmentAdminIdentity(context.Background(), db, shopIDForFixture, adminPassword); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("development admin fixture ready: account=%s shop=%d\n", devSeedAdminAccount, shopIDForFixture)
 	}
 	if *shopID == 0 {
 		*shopID = shopIDForFixture

@@ -124,6 +124,22 @@ func TestDevseedPasswordRequiresExplicitConfiguration(t *testing.T) {
 	}
 }
 
+func TestAdminFixturePasswordIsOptionalOnlyWhenFixtureIsDisabled(t *testing.T) {
+	if got, err := resolveAdminFixturePassword(false, ""); err != nil || got != "" {
+		t.Fatalf("disabled admin fixture got password=%q err=%v, want empty/nil", got, err)
+	}
+	for _, value := range []string{"", " ", "\t"} {
+		result, err := resolveAdminFixturePassword(true, value)
+		if err == nil || result != "" || (strings.TrimSpace(value) != "" && strings.Contains(err.Error(), value)) {
+			t.Fatalf("missing admin password=%q result=%q err=%v, want fail-closed error without secret", value, result, err)
+		}
+	}
+	secret := "separate-admin-password"
+	if got, err := resolveAdminFixturePassword(true, secret); err != nil || got != secret {
+		t.Fatalf("enabled admin fixture got password=%q err=%v, want supplied runtime secret", got, err)
+	}
+}
+
 func TestDevseedIdentityIsIdempotent(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

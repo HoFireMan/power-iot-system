@@ -143,6 +143,8 @@ MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt \
 
 For local/test B-02 coverage ingestion, the optional `--coverage-max-interval-ms` flag (or `DEVSEED_COVERAGE_MAX_INTERVAL_MS`) explicitly bootstraps `system_configs.key=coverage.max_interval_ms`. There is no implicit default; values must be at least `1000` milliseconds. A missing key is created, an identical value is idempotent, and a conflicting existing value fails closed. For the local simulator's five-second coverage intervals, pass `--coverage-max-interval-ms 5000`; this is local test configuration only and is not a production default.
 
+For an explicit local/test scoped-admin fixture, add `--admin-fixture` and supply the separate runtime secret `DEVSEED_ADMIN_PASSWORD`. The fixture creates `devseed-admin` with `is_admin=true` and a relation only to the development Shop; it is never created by default. Do not promote `devseed` or reuse `DEVSEED_PASSWORD` implicitly. This fixture does not configure Carbon or Billing.
+
 ### Trusted proxy client-IP configuration
 
 The backend reads the optional `TRUSTED_PROXY_CIDRS` environment variable as a comma-separated list of exact trusted reverse-proxy CIDRs. When it is empty or unset, the server uses direct-peer-only semantics: `X-Forwarded-For` and `Forwarded` are ignored from untrusted peers. Reverse-proxy operators must explicitly set the exact CIDR(s) for their deployment; malformed or trust-all CIDRs fail startup closed. No production CIDR value is supplied by this repository or this change.
