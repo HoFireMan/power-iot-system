@@ -49,6 +49,27 @@ func TestRunRejectsProductionStyleInvocation(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNonLocalAndLegacyDatabaseURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "remote", url: "postgres://db.example/power_iot", want: "local 127.0.0.1"},
+		{name: "legacy", url: "postgres://127.0.0.1:5432/power_iot", want: "legacy PostgreSQL port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if got := run([]string{"-rehearsal", "-execute", "-database-url", tc.url}, &stdout, &stderr); got != 2 {
+				t.Fatalf("exit=%d, want 2; stderr=%s", got, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr=%q, want %q", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
 func TestRunRequiresRehearsal(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if got := run(nil, &stdout, &stderr); got != 2 {
@@ -68,8 +89,8 @@ func TestRunExecuteRequiresDatabaseIdentityAndEvidence(t *testing.T) {
 		want string
 	}{
 		{name: "database", args: []string{"-rehearsal", "-execute", "-target-identity-file", identity, "-drain-evidence", evidence}, want: "-database-url"},
-		{name: "identity", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://db/app", "-drain-evidence", evidence}, want: "target-identity-file"},
-		{name: "evidence", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://db/app", "-target-identity-file", identity}, want: "drain-evidence"},
+		{name: "identity", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://127.0.0.1:55434/db", "-drain-evidence", evidence}, want: "target-identity-file"},
+		{name: "evidence", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://127.0.0.1:55434/db", "-target-identity-file", identity}, want: "drain-evidence"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,10 +116,10 @@ func TestRunRejectsMalformedIncompleteAndWrongIdentityInputs(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "malformed evidence", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://db/app", "-target-identity-file", identity, "-drain-evidence", malformedEvidence}, want: "drain evidence rejected"},
-		{name: "incomplete evidence", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://user:secret@db/app", "-target-identity-file", identity, "-drain-evidence", badEvidence}, want: "protected B-02 migration failed"},
-		{name: "wrong evidence target", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://db/app", "-target-identity-file", identity, "-drain-evidence", wrongTarget}, want: "drain evidence rejected"},
-		{name: "wrong identity", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://db/app", "-target-identity-file", wrongIdentity, "-drain-evidence", badEvidence}, want: "target identity verification failed"},
+		{name: "malformed evidence", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://127.0.0.1:55434/db", "-target-identity-file", identity, "-drain-evidence", malformedEvidence}, want: "drain evidence rejected"},
+		{name: "incomplete evidence", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://user:secret@127.0.0.1:55434/db", "-target-identity-file", identity, "-drain-evidence", badEvidence}, want: "protected B-02 migration failed"},
+		{name: "wrong evidence target", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://127.0.0.1:55434/db", "-target-identity-file", identity, "-drain-evidence", wrongTarget}, want: "drain evidence rejected"},
+		{name: "wrong identity", args: []string{"-rehearsal", "-execute", "-database-url", "postgres://127.0.0.1:55434/db", "-target-identity-file", wrongIdentity, "-drain-evidence", badEvidence}, want: "target identity verification failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

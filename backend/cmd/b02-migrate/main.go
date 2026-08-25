@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -55,6 +56,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "-database-url is required with -execute")
 		return 2
 	}
+	if err := validateRehearsalDatabaseURL(*databaseURL); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
 	if err := verifyTargetIdentity(*targetIdentityFile); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
@@ -92,6 +97,24 @@ func rehearsalDrainAdmission(evidence drainEvidence) migrations.TrustedDrainAdmi
 		}
 		return nil
 	}
+}
+
+func validateRehearsalDatabaseURL(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		return errors.New("rehearsal database URL must use PostgreSQL")
+	}
+	if parsed.Hostname() != "127.0.0.1" {
+		return errors.New("rehearsal database URL must target local 127.0.0.1")
+	}
+	port := parsed.Port()
+	if port == "" {
+		return errors.New("rehearsal database URL must specify a local port")
+	}
+	if port == "5432" {
+		return errors.New("rehearsal database URL must not use the legacy PostgreSQL port")
+	}
+	return nil
 }
 
 func verifyTargetIdentity(path string) error {
