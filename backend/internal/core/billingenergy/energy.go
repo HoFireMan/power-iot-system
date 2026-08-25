@@ -249,6 +249,14 @@ func Aggregate(shopID uint, month string, points []PointFacts) Facts {
 	for index := range result.Points {
 		point := &result.Points[index]
 		if point.ExpectedDuration > 0 {
+			// Coverage is a bounded completeness ratio. The persistence seam
+			// already supplies assignment-attributed unions, but keep the
+			// domain invariant here so malformed facts cannot expose >100%.
+			if point.ObservedDuration < 0 {
+				point.ObservedDuration = 0
+			} else if point.ObservedDuration > point.ExpectedDuration {
+				point.ObservedDuration = point.ExpectedDuration
+			}
 			point.Coverage = new(big.Rat).SetFrac(big.NewInt(int64(point.ObservedDuration)), big.NewInt(int64(point.ExpectedDuration)))
 		}
 		result.ExpectedDuration += point.ExpectedDuration

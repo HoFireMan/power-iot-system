@@ -200,6 +200,9 @@ func TestBillingEnergyDeduplicatesConflictsLegacyAndOverlaps(t *testing.T) {
 		}
 	}
 	insertReading(t, db, fixture.deviceID, fixture.pointID, start.Add(5*time.Hour))
+	if err := db.Exec(`INSERT INTO power_readings (time, recorded_at, received_at, device_id, energy_delta_kwh) VALUES (?, ?, ?, ?, ?::numeric)`, start.Add(6*time.Hour), start.Add(6*time.Hour), start.Add(7*time.Hour), fixture.deviceID, "99").Error; err != nil {
+		t.Fatal(err)
+	}
 	service := appbillingenergy.New(NewBillingEnergyQueryRepository(db), func() time.Time {
 		return time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	})
@@ -225,9 +228,12 @@ func TestBillingEnergyWeightedMultiplePointsAndNoExpectedWindow(t *testing.T) {
 	loc := mustBusinessLocation()
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, loc).UTC()
 	pointBStart := start.AddDate(0, 0, 15)
-	pointBEnd := start.AddDate(0, 0, 20)
+	pointBGapStart := start.AddDate(0, 0, 17)
+	pointBSecondStart := start.AddDate(0, 0, 20)
+	pointBEnd := start.AddDate(0, 0, 25)
 	insertBillingAssignment(t, db, fixture.deviceID, fixture.pointID, start, nil)
-	insertBillingAssignment(t, db, fixture.otherDevice, fixture.otherPointID, pointBStart, &pointBEnd)
+	insertBillingAssignment(t, db, fixture.otherDevice, fixture.otherPointID, pointBStart, &pointBGapStart)
+	insertBillingAssignment(t, db, fixture.otherDevice, fixture.otherPointID, pointBSecondStart, &pointBEnd)
 	insertBillingReading(t, db, fixture.pointID, fixture.deviceID, start, start.Add(2*time.Hour), 1, 0, "0", false)
 	insertBillingReading(t, db, fixture.otherPointID, fixture.otherDevice, pointBStart, pointBStart.Add(time.Hour), 1, 0, "2", false)
 	service := appbillingenergy.New(NewBillingEnergyQueryRepository(db), func() time.Time {
@@ -237,7 +243,7 @@ func TestBillingEnergyWeightedMultiplePointsAndNoExpectedWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantExpected := start.AddDate(0, 1, 0).Sub(start) + pointBEnd.Sub(pointBStart)
+	wantExpected := start.AddDate(0, 1, 0).Sub(start) + pointBGapStart.Sub(pointBStart) + pointBEnd.Sub(pointBSecondStart)
 	if facts.UsageMicros == nil || *facts.UsageMicros != 2_000_000 || facts.ExpectedDuration != wantExpected || facts.ObservedDuration != 3*time.Hour {
 		t.Fatalf("multi point facts=%+v", facts)
 	}

@@ -33,6 +33,31 @@ func TestParseBillingMonthAndBuildPeriodAtTaipeiBoundary(t *testing.T) {
 	}
 }
 
+func TestBillingMonthUsesTaipeiMonthBoundary(t *testing.T) {
+	month, err := ParseBillingMonth("2026-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	period, err := month.Period(time.Date(2026, 8, 31, 16, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if period.Current || !period.Cutoff.Equal(period.End) {
+		t.Fatalf("Taipei month boundary period=%+v", period)
+	}
+	september, err := ParseBillingMonth("2026-09")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := september.Period(time.Date(2026, 8, 31, 16, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !current.Current || !current.Cutoff.Equal(time.Date(2026, 8, 31, 16, 0, 0, 0, time.UTC)) {
+		t.Fatalf("Taipei current month period=%+v", current)
+	}
+}
+
 func TestBillingMonthHistoricalFutureAndLeapYear(t *testing.T) {
 	loc := mustLocation()
 	historical, err := ParseBillingMonth("2026-07")
@@ -121,6 +146,15 @@ func TestEvaluateObservedExcludesOverlapsAndPreservesNoData(t *testing.T) {
 	zero, warnings := EvaluateObserved([]ObservedInterval{{Interval: Interval{Start: start, End: end}, EnergyMicros: 0}}, start, end)
 	if zero.EnergyMicros == nil || *zero.EnergyMicros != 0 || zero.Duration != 4*time.Hour || len(warnings) != 0 {
 		t.Fatalf("zero=%+v warnings=%v", zero, warnings)
+	}
+}
+
+func TestAggregateCapsCoverageAtOne(t *testing.T) {
+	result := Aggregate(7, "2026-08", []PointFacts{{
+		MeasurementPointID: "A", ExpectedDuration: time.Hour, ObservedDuration: 2 * time.Hour,
+	}})
+	if result.ObservedDuration != time.Hour || result.Coverage == nil || result.Coverage.Cmp(big.NewRat(1, 1)) != 0 || result.Points[0].ObservedDuration != time.Hour {
+		t.Fatalf("capped aggregate=%+v", result)
 	}
 }
 
