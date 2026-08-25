@@ -147,6 +147,146 @@ For local/test B-02 coverage ingestion, the optional `--coverage-max-interval-ms
 
 The backend reads the optional `TRUSTED_PROXY_CIDRS` environment variable as a comma-separated list of exact trusted reverse-proxy CIDRs. When it is empty or unset, the server uses direct-peer-only semantics: `X-Forwarded-For` and `Forwarded` are ignored from untrusted peers. Reverse-proxy operators must explicitly set the exact CIDR(s) for their deployment; malformed or trust-all CIDRs fail startup closed. No production CIDR value is supplied by this repository or this change.
 
+## Local Development Runbook
+
+This runbook describes the reproducible local system-side path. It is not a production deployment procedure and does not define a hardware telemetry cadence.
+
+### Canonical local data path
+
+```text
+PostgreSQL / TimescaleDB
+  → schema admission (serving state: CLEAN_B02)
+  → canonical development seed and coverage configuration
+  → Mosquitto (MQTTS)
+  → Go Backend
+  → tools/device-simulator
+  → MQTT application ACK
+  → power_readings
+  → Backend Dashboard API / Flutter Dashboard
+```
+
+Each component has a separate responsibility:
+
+- PostgreSQL/TimescaleDB stores the protected application catalog and telemetry.
+- Schema admission proves that the database is eligible to serve; a normal serving database is `CLEAN_B02`.
+- `backend/cmd/devseed` creates or verifies only the development identity and fixture: user/shop, Device, MeasurementPoint, and current DeviceAssignment.
+- The devseed coverage option writes the runtime-owned `system_configs` entry needed by B-02 coverage ingestion.
+- Mosquitto terminates local TLS and carries device telemetry and application acknowledgements.
+- The Backend validates telemetry, resolves the current assignment, persists accepted readings, and sends the application ACK.
+- The simulator generates protocol telemetry; a publish without a successful application ACK is not an ingestion proof.
+- The Dashboard API and Flutter client expose the resulting current power and energy projections.
+
+### Database and schema admission
+
+Use a local isolated PostgreSQL/TimescaleDB database and set the Backend `DATABASE_URL` to that intended local database. Do not treat any particular workstation port as a repository or product default. Before serving, use the supported migration/admission operators and verify the protected serving state is `CLEAN_B02`.
+
+Protected migration transitions must use their supported operators. Do not use `migrate force`, manually edit migration metadata, apply raw schema SQL, recreate a protected database, or mutate migration state by hand. A schema that is not admitted as `CLEAN_B02` must be investigated or repaired through the supported operator boundary before telemetry verification continues.
+
+### Development seed and coverage configuration
+
+Run the canonical command from `backend/`; do not manually insert fixture rows or configuration:
+
+```bash
+cd backend
+set -a
+. ../.env
+set +a
+APP_ENV=development \
+DEVSEED_ENABLE=true \
+DATABASE_URL="${LOCAL_DATABASE_URL:?set the intended local database URL}" \
+DEVSEED_PASSWORD="${DEVSEED_PASSWORD:?supply the runtime secret}" \
+go run ./cmd/devseed \
+  --device-mac "${DEV_DEVICE_MAC:?set a registered development MAC}" \
+  --measurement-point-name "UI Test Meter" \
+  --coverage-max-interval-ms 5000
+```
+
+`APP_ENV=development` and `DEVSEED_ENABLE=true` are explicit admission guards. `DEVSEED_PASSWORD` is a runtime secret and must come from an existing protected secret mechanism; never put it in this README, a tracked environment file, command history, or runtime-state record. The command is idempotent for the existing development user/shop, Device, MeasurementPoint, and valid current DeviceAssignment. The Device MAC must belong to the intended local development fixture.
+
+`--coverage-max-interval-ms` is optional for non-coverage fixtures. When supplied, it configures `system_configs.key=coverage.max_interval_ms`. The value is an integer number of milliseconds, must be at least `1000`, and has no implicit default. A missing value is fail-closed at coverage ingest; an existing conflicting value must not be overwritten. For the five-second local simulator example, use `5000` explicitly. This is a **LOCAL DEVELOPMENT / TEST VALUE ONLY**; it is not a production default, hardware contract, or production telemetry cadence.
+
+### Backend and Mosquitto verification
+
+Start Mosquitto with the local TLS configuration and start the Backend only after the intended local database is admitted and the development fixture is available. Keep database, MQTT, JWT, and devseed credentials in protected runtime configuration; do not copy them into commands committed to documentation.
+
+Verify the local Backend health endpoint:
+
+```bash
+curl -fsS http://localhost:8080/
+```
+
+A healthy local response includes:
+
+```text
+db = connected
+mqtt_ready = true
+mqtt_ingestion_blocked = false
+```
+
+The Backend must point at the intended local database and the local MQTTS broker. A healthy process that started before a coverage key was created need not be restarted when its ingestor reads `coverage.max_interval_ms` from `system_configs` for each coverage ingest transaction; verify the source/runtime contract before restarting a service.
+
+### Canonical simulator and ACK proof
+
+The canonical simulator is `tools/device-simulator`. Use a development Device with a valid current DeviceAssignment and local TLS credentials supplied through protected runtime configuration. A five-second local coverage example is:
+
+```bash
+cd tools/device-simulator
+# Supply these from protected local runtime configuration; never echo them.
+: "${MQTT_BROKER_URL:?set the local tls:// broker URL}"
+: "${MQTT_USERNAME:?set the local MQTT username}"
+: "${MQTT_PASSWORD:?supply the local MQTT password at runtime}"
+: "${MQTT_CA_FILE:?set the local public CA path}"
+go run . \
+  --mode continuous \
+  --device-mac "${DEV_DEVICE_MAC:?set a registered development MAC}" \
+  --publish-interval 5s \
+  --coverage-profile \
+  --clock-synchronized=true
+```
+
+The simulator reads the broker URL, username, password, and CA path from these runtime environment variables; they may instead be passed as equivalent flags from a protected launcher. Do not place their values in this README or in the runtime-state file.
+
+The five-second interval is only a local development/test choice. Do not infer a production or physical-device cadence from it. The successful application path is:
+
+```text
+MQTT publish
+  → Backend validation and assignment resolution
+  → PostgreSQL persistence
+  → application ACK (stored or duplicate)
+```
+
+A simulator log that says only `PUBLISHED` is insufficient; the corresponding application ACK must succeed.
+
+### Telemetry verification sequence
+
+After multiple simulator publishes, verify in this order:
+
+1. The simulator has an established MQTTS connection.
+2. Each accepted publish receives a successful application ACK.
+3. The `power_readings` count increases.
+4. The latest `received_at` is recent.
+5. Coverage rows have `coverage_version=1`, non-null `interval_start`/`interval_end`, non-null `energy_delta_kwh`, and `recorded_at=interval_start`.
+6. Dashboard `currentPowerW` is non-null.
+7. Dashboard `dailyKwh` is non-null.
+8. Dashboard `monthlyKwh` is non-null.
+9. Flutter Dashboard displays the telemetry instead of its no-data state.
+
+Telemetry availability is independent from Carbon availability and Billing estimate availability. Successful telemetry does not create a carbon factor or a billing tariff/configuration; Carbon and Billing may remain unavailable while telemetry is healthy.
+
+### Configuration catalog: `coverage.max_interval_ms`
+
+| Field | Value |
+|---|---|
+| Purpose | Maximum accepted interval for B-02 coverage ingestion |
+| Type | Base-10 integer |
+| Unit | Milliseconds |
+| Minimum | `1000` |
+| Authority | `system_configs.key=coverage.max_interval_ms` |
+| Missing behavior | Fail closed; no implicit runtime default |
+| Implicit default | None |
+| Local example | `5000`, local development/test only |
+| Production value status | `UNRESOLVED / NOT ESTABLISHED` |
+
 ## Device Simulator
 
 Simulator source 位於 `tools/device-simulator/`，用於在沒有實體設備時產生 telemetry 並等待 application ACK。支援的主要模式包括 `once`、`continuous`、`duplicate`、`invalid`、`offline-replay` 與 `reconnect`。
