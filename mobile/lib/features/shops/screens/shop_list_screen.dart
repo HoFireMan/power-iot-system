@@ -7,6 +7,8 @@ import 'package:power_iot_app/features/shops/domain/models/shop.dart' as remote;
 import 'package:power_iot_app/features/profile/presentation/providers/profile_provider.dart';
 import 'package:power_iot_app/features/shops/providers/remote_shop_provider.dart';
 import 'package:power_iot_app/features/shops/domain/repositories/shops_repository.dart';
+import 'package:power_iot_app/features/billing/domain/models/billing_configuration.dart';
+import 'package:power_iot_app/features/billing/presentation/providers/billing_configuration_provider.dart';
 
 const _commercialTariffs = <MapEntry<String, String>>[
   MapEntry('LIGHTING_COMMERCIAL', '表燈營業'),
@@ -273,6 +275,12 @@ class ShopListScreen extends ConsumerWidget {
                       ],
                     ),
                   ),
+                  IconButton(
+                    tooltip: '電費方案設定',
+                    icon: const Icon(Icons.receipt_long_rounded),
+                    onPressed: () =>
+                        _showBillingSettings(context, ref, shop, isAdmin),
+                  ),
                   if (isAdmin)
                     IconButton(
                       tooltip: '電價分類設定',
@@ -286,6 +294,38 @@ class ShopListScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _showBillingSettings(
+    BuildContext context,
+    WidgetRef ref,
+    remote.Shop shop,
+    bool editable,
+  ) async {
+    try {
+      final configuration =
+          await ref.read(billingConfigurationProvider(shop.id).future);
+      if (!context.mounted) return;
+      final selected = await showDialog<String>(
+        context: context,
+        builder: (context) => BillingConfigurationDialog(
+            configuration: configuration, editable: editable),
+      );
+      if (selected == null || !editable || !context.mounted) return;
+      await ref
+          .read(billingConfigurationRepositoryProvider)
+          .setPlan(shop.id, selected);
+      ref.invalidate(billingConfigurationProvider(shop.id));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('電費方案已更新')));
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('電費方案載入或更新失敗')));
+      }
+    }
   }
 
   Future<void> _showTariffSettings(
@@ -370,6 +410,101 @@ class ShopListScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+class BillingConfigurationDialog extends StatefulWidget {
+  const BillingConfigurationDialog(
+      {required this.configuration, required this.editable, super.key});
+  final BillingConfiguration configuration;
+  final bool editable;
+
+  @override
+  State<BillingConfigurationDialog> createState() => _BillingDialogState();
+}
+
+class _BillingDialogState extends State<BillingConfigurationDialog> {
+  String? selected;
+
+  @override
+  void initState() {
+    super.initState();
+    selected = widget.configuration.currentAssignment?.planCode ??
+        (widget.configuration.plans.isEmpty
+            ? null
+            : widget.configuration.plans.first.code);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final configuration = widget.configuration;
+    if (!configuration.supported) {
+      return AlertDialog(
+        title: const Text('電費方案設定'),
+        content: const Text('目前尚未支援此電價類型的電費估算'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('關閉'))
+        ],
+      );
+    }
+    return AlertDialog(
+      title: const Text('電費方案設定'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(configuration.currentAssignment == null
+                ? '尚未設定計費方案'
+                : '目前方案：${_planLabel(configuration.currentAssignment!.planCode)}'),
+            Text(configuration.currentAssignment == null
+                ? '本月起生效'
+                : '本月起生效：${configuration.currentAssignment!.validFrom}'),
+            if (configuration.scheduledAssignment != null)
+              Text(
+                  '下月起生效：${_planLabel(configuration.scheduledAssignment!.planCode)}'),
+            const SizedBox(height: 8),
+            ...configuration.plans.map((plan) => RadioListTile<String>(
+                  value: plan.code,
+                  // ignore: deprecated_member_use
+                  groupValue: selected,
+                  title: Text(_planLabel(plan.code)),
+                  subtitle: plan.usageClass == null
+                      ? null
+                      : Text(_usageClassLabel(plan.usageClass!)),
+                  // ignore: deprecated_member_use
+                  onChanged: widget.editable
+                      ? (value) => setState(() => selected = value)
+                      : null,
+                )),
+            if (!widget.editable) const Text('僅限店家管理員修改'),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context), child: const Text('關閉')),
+        if (widget.editable)
+          FilledButton(
+            onPressed: selected == null
+                ? null
+                : () => Navigator.pop(context, selected),
+            child: const Text('儲存'),
+          ),
+      ],
+    );
+  }
+
+  String _planLabel(String code) => switch (code) {
+        'LIGHTING_COMMERCIAL_NON_TOU' => '一般電價（非時間電價）',
+        'LIGHTING_NONCOMMERCIAL_RESIDENTIAL_NON_TOU' => '住宅用',
+        'LIGHTING_NONCOMMERCIAL_NONRESIDENTIAL_NON_TOU' => '住宅以外非營業用',
+        _ => code,
+      };
+
+  String _usageClassLabel(String value) =>
+      value == 'RESIDENTIAL' ? '住宅用' : '住宅以外非營業用';
 }
 
 // 支援文字標籤的 Icon 元件

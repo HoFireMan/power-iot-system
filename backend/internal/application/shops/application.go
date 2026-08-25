@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 	"power-iot-backend/internal/adapters/persistence"
 	applicationauth "power-iot-backend/internal/application/auth"
+	corebilling "power-iot-backend/internal/core/billing"
 	"power-iot-backend/internal/core/domain"
 )
 
@@ -41,8 +42,9 @@ type TariffMutation interface {
 }
 
 var (
-	ErrInvalidTariff        = errors.New("invalid electricity tariff")
-	ErrShopMutationNotFound = errors.New("shop mutation target not found")
+	ErrInvalidTariff          = errors.New("invalid electricity tariff")
+	ErrShopMutationNotFound   = errors.New("shop mutation target not found")
+	ErrBillingHistoryConflict = corebilling.ErrBillingHistoryConflict
 )
 
 const (

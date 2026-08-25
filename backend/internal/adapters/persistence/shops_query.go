@@ -3,8 +3,10 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"gorm.io/gorm"
+	corebilling "power-iot-backend/internal/core/billing"
 )
 
 // ShopProjection is the safe shop-list projection. It contains only fields
@@ -102,6 +104,27 @@ func (r *ShopMutationRepository) UpdateShopTariff(ctx context.Context, actorID, 
 		return gorm.ErrInvalidDB
 	}
 	return r.db.WithContext(queryContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		var current sql.NullString
+		if err := tx.Raw(`
+SELECT s.electricity_tariff
+FROM shops AS s
+JOIN users AS actor ON actor.id = ? AND actor.is_admin = TRUE
+JOIN user_shop_relations AS relation
+  ON relation.user_id = actor.id AND relation.shop_id = s.id
+WHERE s.id = ? AND s.is_active = TRUE
+FOR UPDATE OF s`, actorID, shopID).Row().Scan(&current); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return gorm.ErrRecordNotFound
+			}
+			return err
+		}
+		var history int64
+		if err := tx.Raw(`SELECT count(*) FROM shop_billing_assignments WHERE shop_id = ?`, shopID).Row().Scan(&history); err != nil {
+			return err
+		}
+		if history > 0 && (!current.Valid || current.String != tariff) {
+			return corebilling.ErrBillingHistoryConflict
+		}
 		result := tx.Exec(`
 UPDATE shops AS shop
 SET electricity_tariff = ?
