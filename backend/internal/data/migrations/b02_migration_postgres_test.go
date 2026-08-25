@@ -3,6 +3,7 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 
@@ -39,6 +40,73 @@ func migrateB02ForTest(t *testing.T, dsn string) {
 	}
 	if _, err := RunB02Migration(context.Background(), dsn, admission); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunB02ProtectedOperatorRehearsalTransitionAndAdmission(t *testing.T) {
+	database := newB02Database(t)
+	ctx := context.Background()
+	initial, err := InspectProtectedMigration(ctx, database.DSN(), D5MigrationSpec(b02TestAdmission()))
+	if err != nil || initial.State != ProtectedStateCleanV5 {
+		t.Fatalf("pre-D6 state=%s err=%v", initial.State, err)
+	}
+	if report, err := RunD5Migration(ctx, database.DSN(), b02TestAdmission()); err != nil || report.PostCommitState != ProtectedStateCleanV6 {
+		t.Fatalf("D6 transition report=%+v err=%v", report, err)
+	}
+	before, err := InspectProtectedMigration(ctx, database.DSN(), D5MigrationSpec(b02TestAdmission()))
+	if err != nil || before.State != ProtectedStateCleanV6 {
+		t.Fatalf("pre-B-02 state=%s err=%v", before.State, err)
+	}
+	denied := errors.New("rehearsal drain is incomplete")
+	if _, err := RunB02ProtectedMigrationOperator(ctx, database.DSN(), func(context.Context) error { return denied }); !errors.Is(err, denied) {
+		t.Fatalf("failed admission error=%v, want %v", err, denied)
+	}
+	unchanged, err := InspectProtectedMigration(ctx, database.DSN(), D5MigrationSpec(b02TestAdmission()))
+	if err != nil || unchanged.State != ProtectedStateCleanV6 {
+		t.Fatalf("failed admission changed state=%s err=%v", unchanged.State, err)
+	}
+	db, err := sql.Open("postgres", database.DSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var billingRelation sql.NullString
+	if err := db.QueryRow(`SELECT to_regclass('electricity_rate_sets')`).Scan(&billingRelation); err != nil {
+		t.Fatal(err)
+	}
+	if billingRelation.Valid {
+		t.Fatalf("failed admission created billing relation %q", billingRelation.String)
+	}
+	if _, err := RunB02ProtectedMigrationOperator(ctx, database.DSN(), func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("accepted rehearsal operator failed: %v", err)
+	}
+	version, dirty, err := Version(database.DSN())
+	if err != nil || version != 7 || dirty {
+		t.Fatalf("metadata version=%d dirty=%t err=%v", version, dirty, err)
+	}
+	var sets, plans, ratePlans, tiers int
+	for _, query := range []struct {
+		query string
+		out   *int
+	}{
+		{`SELECT count(*) FROM electricity_rate_sets`, &sets},
+		{`SELECT count(*) FROM electricity_tariff_plans`, &plans},
+		{`SELECT count(*) FROM electricity_rate_plans`, &ratePlans},
+		{`SELECT count(*) FROM electricity_rate_tiers`, &tiers},
+	} {
+		if err := db.QueryRow(query.query).Scan(query.out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sets != 1 || plans != 3 || ratePlans != 3 || tiers != 34 {
+		t.Fatalf("B-02 seed counts sets=%d plans=%d ratePlans=%d tiers=%d", sets, plans, ratePlans, tiers)
+	}
+	var provider, versionCode string
+	if err := db.QueryRow(`SELECT provider, version_code FROM electricity_rate_sets`).Scan(&provider, &versionCode); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "TAIPOWER" || versionCode != "TAIPOWER_2025_10_01" {
+		t.Fatalf("rate set=%s/%s", provider, versionCode)
 	}
 }
 
