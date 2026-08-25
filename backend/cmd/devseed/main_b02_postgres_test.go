@@ -57,6 +57,25 @@ func TestDevseedSeedsCleanB02Database(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sqlDB.Close()
+	var coverageConfigCount int64
+	if err := db.Model(&domain.SystemConfig{}).Where("key = ?", coverageMaxIntervalConfigKey).Count(&coverageConfigCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if coverageConfigCount != 0 {
+		t.Fatalf("omitted coverage configuration created %d rows", coverageConfigCount)
+	}
+	configuredCommand := exec.CommandContext(commandCtx, "go", "run", ".", "--device-mac", mac, "--measurement-point-name", "UI Test Meter", "--coverage-max-interval-ms", "5000")
+	configuredCommand.Env = filteredDevseedTestEnvironment(database.DSN(), "b02-integration-development-password")
+	if _, err := configuredCommand.CombinedOutput(); err != nil {
+		t.Fatalf("canonical devseed coverage configuration failed: %v", err)
+	}
+	var coverageConfig domain.SystemConfig
+	if err := db.Where("key = ?", coverageMaxIntervalConfigKey).First(&coverageConfig).Error; err != nil {
+		t.Fatal(err)
+	}
+	if coverageConfig.Value != "5000" || coverageConfig.Description != coverageMaxIntervalConfigDescription {
+		t.Fatalf("coverage config=%+v, want canonical 5000 configuration", coverageConfig)
+	}
 	var user domain.User
 	if err := db.Where("account = ?", devSeedAccount).First(&user).Error; err != nil {
 		t.Fatal(err)

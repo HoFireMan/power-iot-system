@@ -63,6 +63,52 @@ func TestDevseedAdmissionAcceptedOnlyServingSchemas(t *testing.T) {
 	}
 }
 
+func TestParseCoverageMaxIntervalValue(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{name: "five seconds", raw: "5000", want: 5000},
+		{name: "minimum", raw: "1000", want: 1000},
+		{name: "below minimum", raw: "999", wantErr: true},
+		{name: "malformed duration", raw: "5s", wantErr: true},
+		{name: "malformed decimal", raw: "1.5", wantErr: true},
+		{name: "negative", raw: "-1", wantErr: true},
+		{name: "zero", raw: "0", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseCoverageMaxIntervalValue(test.raw)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("parseCoverageMaxIntervalValue(%q) error=%v, wantErr=%t", test.raw, err, test.wantErr)
+			}
+			if err == nil && got != test.want {
+				t.Fatalf("parseCoverageMaxIntervalValue(%q)=%d, want %d", test.raw, got, test.want)
+			}
+		})
+	}
+}
+
+func TestOptionalCoverageMaxIntervalValue(t *testing.T) {
+	if got, err := parseOptionalCoverageMaxIntervalValue("", false); err != nil || got != nil {
+		t.Fatalf("absent coverage configuration got=%v err=%v, want nil/nil", got, err)
+	}
+	got, err := parseOptionalCoverageMaxIntervalValue("5000", true)
+	if err != nil || got == nil || *got != 5000 {
+		t.Fatalf("provided coverage configuration got=%v err=%v, want 5000", got, err)
+	}
+	if value, provided := resolveCoverageMaxIntervalInput("5000", false, "1000", true); !provided || value != "1000" {
+		t.Fatalf("environment fallback value=%q provided=%t, want 1000/true", value, provided)
+	}
+	if value, provided := resolveCoverageMaxIntervalInput("5000", true, "1000", true); !provided || value != "5000" {
+		t.Fatalf("CLI precedence value=%q provided=%t, want 5000/true", value, provided)
+	}
+	if value, provided := resolveCoverageMaxIntervalInput("", false, "", false); provided || value != "" {
+		t.Fatalf("absent input value=%q provided=%t, want empty/false", value, provided)
+	}
+}
+
 func TestDevseedPasswordRequiresExplicitConfiguration(t *testing.T) {
 	secret := "development-only-password"
 	if got, err := readDevelopmentPassword(secret); err != nil || got != secret {

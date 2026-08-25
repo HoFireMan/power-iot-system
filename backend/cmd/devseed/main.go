@@ -40,10 +40,32 @@ func main() {
 	shopID := flag.Uint("shop-id", 0, "optional existing shop ID; defaults to the development shop")
 	measurementPointName := flag.String("measurement-point-name", "", "optional measurement point name for a v1 ingest fixture")
 	assignmentFrom := flag.String("assignment-from", "", "optional assignment start in RFC3339 format; defaults to now")
+	coverageEnvValue, coverageEnvSet := os.LookupEnv(coverageMaxIntervalConfigEnv)
+	coverageFlagDefault := ""
+	if coverageEnvSet {
+		coverageFlagDefault = coverageEnvValue
+	}
+	coverageFlagValue := flag.String("coverage-max-interval-ms", coverageFlagDefault, "optional B-02 coverage maximum interval in milliseconds")
 	flag.Parse()
 
 	appEnv := os.Getenv("APP_ENV")
 	if err := validateSeedGuard(appEnv, os.Getenv(devSeedEnableEnv)); err != nil {
+		log.Fatal(err)
+	}
+	coverageFlagSet := false
+	flag.Visit(func(value *flag.Flag) {
+		if value.Name == "coverage-max-interval-ms" {
+			coverageFlagSet = true
+		}
+	})
+	coverageInput, coverageInputSet := resolveCoverageMaxIntervalInput(
+		*coverageFlagValue,
+		coverageFlagSet,
+		coverageEnvValue,
+		coverageEnvSet,
+	)
+	coverageMaxInterval, err := parseOptionalCoverageMaxIntervalValue(coverageInput, coverageInputSet)
+	if err != nil {
 		log.Fatal(err)
 	}
 	password, err := readDevelopmentPassword(os.Getenv(devSeedPasswordEnv))
@@ -68,6 +90,9 @@ func main() {
 	}
 	if !devseedAdmissionAccepted(admission.Disposition) {
 		log.Fatalf("schema admission refused: disposition=%s state=%s", admission.Disposition, admission.State)
+	}
+	if err := ensureCoverageMaxInterval(context.Background(), db, coverageMaxInterval); err != nil {
+		log.Fatal(err)
 	}
 	shopIDForFixture, err := seedDevelopmentIdentity(context.Background(), db, password)
 	if err != nil {
