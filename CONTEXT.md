@@ -181,9 +181,13 @@ POST-I3-F1.
 
 ## Documentation and Scope Boundary
 
-The dashboard polling contract is documented in `README.md`. This context file
-records internal mainline progress and agent execution policy; it does not
-expand the accepted feature or authorize production activity.
+The dashboard polling contract is documented in `README.md`. Local telemetry
+runtime has been proven end-to-end; the repository-wide operational procedure
+is documented in the `README.md` Local Development Runbook, while current
+workstation state is kept outside Git at
+`/home/admin-195/.local/state/power-iot/runbooks/local-runtime-state.md`. This
+context file records internal mainline progress and agent execution policy; it
+does not expand the accepted feature or authorize production activity.
 
 Never read or stage:
 
