@@ -16,6 +16,9 @@ readonly CANONICAL_REPO_ROOT="${POWER_IOT_CANONICAL_REPO:-$(discover_canonical_r
 readonly CONFIG_ROOT="${POWER_IOT_LOCAL_CONFIG_ROOT:-$CANONICAL_REPO_ROOT}"
 readonly SECRET_ROOT="${POWER_IOT_LOCAL_SECRET_ROOT:-$HOME/.local/state/power-iot/dev-secrets}"
 readonly STATE_FILE="${POWER_IOT_LOCAL_STATE_FILE:-$HOME/.local/state/power-iot/runbooks/local-runtime-state.md}"
+readonly RUNTIME_STATE_ROOT="${POWER_IOT_LOCAL_RUNTIME_STATE_ROOT:-$HOME/.local/state/power-iot/runtime}"
+readonly BACKEND_TARGET_STATE="$RUNTIME_STATE_ROOT/backend-target.env"
+readonly SIMULATOR_BOOT_STATE="$RUNTIME_STATE_ROOT/simulator-boot-counter"
 readonly BACKEND_SESSION="power-iot-backend"
 readonly SIMULATOR_SESSION="power-iot-simulator"
 readonly FLUTTER_SESSION="power-iot-flutter"
@@ -59,7 +62,11 @@ valid_port() {
 }
 
 ui_db_port() {
-  local value="${POWER_IOT_LOCAL_DB_PORT:-$DEFAULT_UI_DB_PORT}"
+  local value="${POWER_IOT_LOCAL_DB_PORT:-}"
+  if [[ -z "$value" ]] && command -v docker >/dev/null 2>&1; then
+    value="$(canonical_ui_db_port 2>/dev/null || true)"
+  fi
+  value="${value:-$DEFAULT_UI_DB_PORT}"
   valid_port "$value" || { warn "invalid POWER_IOT_LOCAL_DB_PORT; using $DEFAULT_UI_DB_PORT"; value="$DEFAULT_UI_DB_PORT"; }
   printf '%s\n' "$value"
 }
@@ -140,15 +147,54 @@ container_field() {
 container_exists() { docker inspect "$1" >/dev/null 2>&1; }
 container_running() { [[ "$(container_field "$1" '{{.State.Running}}')" == true ]]; }
 
-canonical_ui_db() {
+canonical_ui_db_identity() {
   require_command docker
   container_exists "$UI_DB_CONTAINER" || { warn "$UI_DB_CONTAINER is absent"; return 1; }
   [[ "$(container_field "$UI_DB_CONTAINER" '{{.Config.Image}}')" == timescale/timescaledb:2.17.2-pg15 ]] || return 1
-  local ports mounts
-  ports="$(container_field "$UI_DB_CONTAINER" '{{json .NetworkSettings.Ports}}')"
+  local mounts
   mounts="$(container_field "$UI_DB_CONTAINER" '{{range .Mounts}}{{.Name}}:{{.Destination}} {{end}}')"
-  [[ "$ports" == *"55435"* ]] || return 1
   [[ "$mounts" == *"power_iot_ui_pgdata:/var/lib/postgresql/data"* ]] || return 1
+}
+
+canonical_ui_db_port() {
+  canonical_ui_db_identity || return 1
+  local published
+  published="$(container_field "$UI_DB_CONTAINER" '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}')"
+  valid_port "$published" || return 1
+  printf '%s\n' "$published"
+}
+
+canonical_ui_db() {
+  local published
+  published="$(canonical_ui_db_port)" || return 1
+  [[ "$published" != 5432 ]]
+}
+
+validate_backend_db_target() {
+  local published configured
+  published="$(canonical_ui_db_port)" || { fail 'canonical UI DB published port is unavailable'; return 2; }
+  if [[ "$published" == 5432 ]]; then
+    fail 'LEGACY_DB_TARGET_REFUSED: canonical UI DB resolves to legacy port 5432'
+    return 2
+  fi
+  configured="${POWER_IOT_LOCAL_DB_PORT:-$published}"
+  valid_port "$configured" || { fail 'configured UI DB port is invalid'; return 2; }
+  if [[ "$configured" == 5432 ]]; then
+    fail 'LEGACY_DB_TARGET_REFUSED: POWER_IOT_LOCAL_DB_PORT=5432 is forbidden'
+    return 2
+  fi
+  if [[ "$configured" != "$published" ]]; then
+    fail "CANONICAL_UI_DB_PORT_MISMATCH: configured port does not match published port"
+    return 2
+  fi
+  # This is intentionally constructed in memory and never printed.
+  PROVEN_DB_HOST='127.0.0.1'
+  PROVEN_DB_PORT="$published"
+  PROVEN_DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${PROVEN_DB_HOST}:${PROVEN_DB_PORT}/${POSTGRES_DB}?sslmode=disable"
+  [[ "$PROVEN_DATABASE_URL" == *"@127.0.0.1:${PROVEN_DB_PORT}/${POSTGRES_DB}?sslmode=disable"* ]] || {
+    fail 'BACKEND_DB_TARGET_UNVERIFIED: constructed target is not the proven UI DB endpoint'
+    return 2
+  }
 }
 
 canonical_mqtt() {
@@ -159,6 +205,45 @@ canonical_mqtt() {
   [[ "$(container_field "$MQTT_CONTAINER" '{{index .Config.Labels "com.docker.compose.service"}}')" == mqtt ]] || return 1
   [[ "$(container_field "$MQTT_CONTAINER" '{{index .Config.Labels "com.docker.compose.project.working_dir"}}')" == "$CANONICAL_REPO_ROOT/infrastructure" ]] || return 1
   [[ "$(container_field "$MQTT_CONTAINER" '{{json .NetworkSettings.Ports}}')" == *"8883"* ]] || return 1
+}
+
+state_value() {
+  local file="$1" key="$2"
+  [[ -r "$file" ]] || return 1
+  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$file"
+}
+
+record_backend_target() {
+  local db_port="$1" session_repo pane_pid tmp
+  mkdir -p "$RUNTIME_STATE_ROOT"
+  chmod 700 "$RUNTIME_STATE_ROOT"
+  session_repo="$(session_path "$BACKEND_SESSION")"
+  pane_pid="$(session_pane_pid "$BACKEND_SESSION")"
+  tmp="${BACKEND_TARGET_STATE}.tmp.$$"
+  umask 077
+  {
+    printf 'backend_session=%s\n' "$BACKEND_SESSION"
+    printf 'backend_repo=%s\n' "$session_repo"
+    printf 'backend_db_host=127.0.0.1\n'
+    printf 'backend_db_port=%s\n' "$db_port"
+    printf 'backend_pane_pid=%s\n' "$pane_pid"
+  } >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$BACKEND_TARGET_STATE"
+}
+
+backend_target_proven() {
+  local current_pid current_repo
+  validate_backend_db_target || return $?
+  [[ "$(state_value "$BACKEND_TARGET_STATE" backend_session || true)" == "$BACKEND_SESSION" ]] || return 1
+  current_repo="$(session_path "$BACKEND_SESSION")"
+  [[ -n "$current_repo" ]] || return 1
+  path_matches "$current_repo" "$REPO_ROOT/backend" || return 1
+  [[ "$(state_value "$BACKEND_TARGET_STATE" backend_repo || true)" == "$current_repo" ]] || return 1
+  [[ "$(state_value "$BACKEND_TARGET_STATE" backend_db_host || true)" == "$PROVEN_DB_HOST" ]] || return 1
+  [[ "$(state_value "$BACKEND_TARGET_STATE" backend_db_port || true)" == "$PROVEN_DB_PORT" ]] || return 1
+  current_pid="$(session_pane_pid "$BACKEND_SESSION")"
+  [[ -n "$current_pid" && "$(state_value "$BACKEND_TARGET_STATE" backend_pane_pid || true)" == "$current_pid" ]]
 }
 
 container_health() {
@@ -230,6 +315,14 @@ backend_health_label() {
   fi
 }
 
+backend_ingestion_label() {
+  local body
+  body="$(backend_health_body 2>/dev/null)" || { printf 'UNKNOWN'; return 0; }
+  if [[ "$body" == *'"mqtt_ingestion_blocked":false'* ]]; then printf 'ENABLED';
+  elif [[ "$body" == *'"mqtt_ingestion_blocked":true'* ]]; then printf 'BLOCKED';
+  else printf 'UNKNOWN'; fi
+}
+
 session_exists() { tmux has-session -t "$1" 2>/dev/null; }
 session_path() { tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null; }
 session_pane_pid() { tmux list-panes -t "$1" -F '#{pane_pid}' 2>/dev/null | head -n 1; }
@@ -251,7 +344,8 @@ descendant_has_cwd() {
 }
 
 path_matches() {
-  local actual="$1" expected="$2" alternate="$CANONICAL_REPO_ROOT/${expected#"$REPO_ROOT/"}"
+  local actual="$1" expected="$2" alternate
+  alternate="$CANONICAL_REPO_ROOT/${expected#"$REPO_ROOT/"}"
   [[ "$actual" == "$expected" || "$actual" == "$alternate" ]]
 }
 
@@ -281,16 +375,22 @@ start_backend() {
   canonical_mqtt || { fail "refusing Backend start: canonical MQTT provenance is not proven"; return 2; }
   container_running "$MQTT_CONTAINER" || { fail "canonical MQTT is not running"; return 1; }
   wait_for "canonical MQTT" "[[ \"\$(container_health '$MQTT_CONTAINER')\" == RUNNING ]]" 5 || return 1
+  validate_backend_db_target || return $?
   refuse_unowned_session "$BACKEND_SESSION" "$REPO_ROOT/backend" 'cmd/server' || return $?
   if owned_session "$BACKEND_SESSION" "$REPO_ROOT/backend" 'cmd/server'; then
+    backend_target_proven || { fail 'BACKEND_DB_TARGET_UNVERIFIED: existing Backend launch metadata does not prove the UI DB target'; return 2; }
     if backend_health_ok; then log 'Backend: already healthy (no duplicate)'; return 0; fi
     warn 'canonical Backend session exists but is not healthy; refusing duplicate start'
     return 1
   fi
-  local db_port="$(ui_db_port)" mqtt="$(mqtt_port)" port="$(backend_port)" env_file="$CONFIG_ROOT/.env" db_file="$SECRET_ROOT/ui-db.env"
+  local db_port="$PROVEN_DB_PORT" mqtt="$(mqtt_port)" port="$(backend_port)" env_file="$CONFIG_ROOT/.env" db_file="$SECRET_ROOT/ui-db.env"
+  local mqtt_ca_file="${MQTT_CA_FILE:-$CONFIG_ROOT/infrastructure/mosquitto/certs/ca.crt}" jwt_private_file="${JWT_ACTIVE_PRIVATE_KEY_FILE:-}"
   local command
-  command="cd '$REPO_ROOT/backend' && set -a && . '$env_file' && . '$db_file' && set +a && export DATABASE_URL=\"postgres://\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@127.0.0.1:$db_port/\${POSTGRES_DB}?sslmode=disable\" HTTP_ADDR=:$port D6_RUNTIME_MODE=POST_CUTOVER MQTT_BROKER_URL=tls://127.0.0.1:$mqtt && case \"\${MQTT_CA_FILE:-}\" in /*) ;; *) export MQTT_CA_FILE=../\${MQTT_CA_FILE:-infrastructure/mosquitto/certs/ca.crt} ;; esac && exec go run ./cmd/server"
+  if [[ "$mqtt_ca_file" != /* ]]; then mqtt_ca_file="$CONFIG_ROOT/${mqtt_ca_file#./}"; fi
+  if [[ -n "$jwt_private_file" && "$jwt_private_file" != /* ]]; then jwt_private_file="$CONFIG_ROOT/${jwt_private_file#./}"; fi
+  command="cd '$REPO_ROOT/backend' && set -a && . '$env_file' && . '$db_file' && set +a && export DATABASE_URL=\"postgres://\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@127.0.0.1:$db_port/\${POSTGRES_DB}?sslmode=disable\" HTTP_ADDR=:$port D6_RUNTIME_MODE=POST_CUTOVER MQTT_BROKER_URL=tls://127.0.0.1:$mqtt MQTT_CA_FILE='$mqtt_ca_file' JWT_ACTIVE_PRIVATE_KEY_FILE='$jwt_private_file' && exec go run ./cmd/server"
   tmux new-session -d -s "$BACKEND_SESSION" -c "$REPO_ROOT/backend" "$command" || { fail 'failed to create canonical Backend session'; return 1; }
+  record_backend_target "$db_port"
   wait_for 'Backend health' 'backend_health_ok' 30
 }
 
@@ -313,6 +413,56 @@ simulator_ack_ok() {
   [[ "$capture" == *'ACK stored'* || "$capture" == *'ACK duplicate'* ]]
 }
 
+simulator_stored_ack_for_boot() {
+  local boot="$1" capture
+  capture="$(tmux capture-pane -p -t "$SIMULATOR_SESSION" -S -200 2>/dev/null || true)"
+  [[ "$capture" == *"ACK stored"*"boot=$boot"* ]]
+}
+
+read_simulator_boot() {
+  local value
+  if [[ -r "$SIMULATOR_BOOT_STATE" ]]; then
+    value="$(<"$SIMULATOR_BOOT_STATE")"
+    [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value" && return 0
+  fi
+  printf 'unknown\n'
+  return 1
+}
+
+allocate_simulator_boot() {
+  local directory="$RUNTIME_STATE_ROOT" lock="${SIMULATOR_BOOT_STATE}.lock" attempts=0 acquired=0 current next tmp
+  mkdir -p "$directory"
+  chmod 700 "$directory"
+  while ((attempts < 200)); do
+    if (umask 077 && mkdir "$lock" 2>/dev/null); then
+      acquired=1
+      break
+    fi
+    # A lock with no live owner is intentionally not removed here: removing
+    # it while another allocator is between mkdir and pid write could allow
+    # duplicate counters. A stale lock fails closed after the bounded wait.
+    attempts=$((attempts + 1))
+    sleep 0.05
+  done
+  ((acquired == 1)) || { fail 'SIMULATOR_BOOT_COUNTER_LOCK_TIMEOUT'; return 1; }
+  printf '%s\n' "$$" >"$lock/pid"
+  trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true' RETURN
+  current=0
+  if [[ -e "$SIMULATOR_BOOT_STATE" ]]; then
+    current="$(<"$SIMULATOR_BOOT_STATE")"
+    [[ "$current" =~ ^[0-9]+$ ]] || { fail 'simulator boot counter state is invalid'; return 1; }
+  fi
+  next=$((current + 1))
+  tmp="${SIMULATOR_BOOT_STATE}.tmp.$$"
+  printf '%s\n' "$next" >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$SIMULATOR_BOOT_STATE"
+  printf '%s\n' "$next"
+  trap - RETURN
+  rm -f "$lock/pid"
+  rmdir "$lock"
+}
+
 start_telemetry() {
   start_core || return $?
   require_command tmux
@@ -322,15 +472,16 @@ start_telemetry() {
     if simulator_ack_ok; then log 'Simulator: already running with application ACK (no duplicate)'; else log 'Simulator: already running; ACK not yet observed'; fi
     return 0
   fi
-  local env_file="$CONFIG_ROOT/.env" mac="${DEV_DEVICE_MAC:-AABBCCDDEEFF}" normalized_mac
+  local env_file="$CONFIG_ROOT/.env" mac="${DEV_DEVICE_MAC:-AABBCCDDEEFF}" normalized_mac boot_counter
   normalized_mac="${mac//:/}"
   normalized_mac="${normalized_mac//-/}"
   normalized_mac="${normalized_mac// /}"
   [[ "$normalized_mac" =~ ^[A-Fa-f0-9]{12}$ ]] || { fail 'DEV_DEVICE_MAC is not a valid local device identity'; return 2; }
+  boot_counter="$(allocate_simulator_boot)" || { fail 'SIMULATOR_BOOT_COUNTER_ALLOCATION_FAILED'; return 1; }
   tmux new-session -d -s "$SIMULATOR_SESSION" -c "$REPO_ROOT/tools/device-simulator" \
-    "set -a && . '$env_file' && set +a && exec go run . --mode continuous --device-mac '$mac' --publish-interval 5s --coverage-profile --clock-synchronized=true --start-seq 0" \
+    "set -a && . '$env_file' && set +a && exec go run . --mode continuous --device-mac '$mac' --publish-interval 5s --coverage-profile --clock-synchronized=true --boot-counter '$boot_counter' --start-seq 0" \
     || { fail 'failed to create canonical Simulator session'; return 1; }
-  wait_for 'Simulator application ACK' 'simulator_ack_ok' 30 || return 1
+  wait_for 'Simulator stored application ACK' "simulator_stored_ack_for_boot '$boot_counter'" 30 || return 1
   update_state 'start telemetry'
 }
 
@@ -357,7 +508,7 @@ start_ui() {
   device="$(android_device)" || { fail 'no approved Android Emulator is connected; reuse an existing emulator or set POWER_IOT_ANDROID_DEVICE'; return 1; }
   require_command flutter
   tmux new-session -d -s "$FLUTTER_SESSION" -c "$REPO_ROOT/mobile" \
-    "exec flutter run --no-pub -d '$device' --dart-define=API_BASE_URL=http://10.0.2.2:$(backend_port)" \
+    "exec flutter run --no-pub -d '$device' --dart-define=POWER_IOT_BASE_URL=http://10.0.2.2:$(backend_port)" \
     || { fail 'failed to create canonical Flutter session'; return 1; }
   update_state 'start ui'
   log 'Flutter: started against the canonical Backend endpoint'
@@ -447,10 +598,27 @@ status_component() {
   printf '\n'
 }
 
+local_state_fact() {
+  local fact="$1"
+  [[ -r "$STATE_FILE" ]] || return 1
+  case "$fact" in
+    schema) awk '/schema state/{if (index($0, "CLEAN_B02")) value="CLEAN_B02"} END{if (value) print value}' "$STATE_FILE" | tail -n 1 ;;
+    coverage) awk -F'= ' '/coverage.max_interval_ms/{value=$2} END{if (value) print value}' "$STATE_FILE" | tr -d '`' ;;
+    tariff) awk -F': ' '/Development Shop tariff/{value=$2} END{if (value) print value}' "$STATE_FILE" | tr -d '`' ;;
+    billing) awk -F': ' '/Billing plan/{value=$2} END{if (value) print value}' "$STATE_FILE" | tr -d '`' ;;
+    *) return 1 ;;
+  esac
+}
+
 status() {
+  local simulator_boot schema_fact coverage_fact tariff_fact billing_fact
   # This function intentionally has no writes, starts, stops, or database
   # connections. Each probe is isolated so one unavailable tool is reportable.
   load_runtime_config >/dev/null 2>&1 || true
+  schema_fact="$(local_state_fact schema || true)"
+  coverage_fact="$(local_state_fact coverage || true)"
+  tariff_fact="$(local_state_fact tariff || true)"
+  billing_fact="$(local_state_fact billing || true)"
   printf 'Repository\n'
   printf '  root=%s\n' "$REPO_ROOT"
   printf '  branch='; git -C "$REPO_ROOT" branch --show-current 2>/dev/null || printf UNKNOWN; printf '\n'
@@ -459,12 +627,16 @@ status() {
 
   printf 'Services\n'
   if canonical_ui_db; then status_component 'UI DB' container_health "$UI_DB_CONTAINER"; else printf '%-16s UNKNOWN (not proven canonical)\n' 'UI DB'; fi
-  if canonical_ui_db; then printf '  UI DB endpoint=127.0.0.1:%s schema=CLEAN_B02 (local state)\n' "$(ui_db_port)"; fi
+  if canonical_ui_db; then printf '  UI DB endpoint=127.0.0.1:%s source=LIVE_VERIFIED\n' "$(ui_db_port)"; printf '  schema=%s source=%s\n' "${schema_fact:-UNKNOWN}" "$([[ -n "$schema_fact" ]] && printf LOCAL_STATE || printf UNKNOWN)"; fi
   if container_exists "$LEGACY_DB_CONTAINER"; then printf '%-16s PRESERVE_ONLY port=5432\n' 'Legacy DB'; else printf '%-16s PRESERVE_ONLY (not inspected)\n' 'Legacy DB'; fi
-  if canonical_mqtt; then status_component MQTT container_health "$MQTT_CONTAINER"; printf '  MQTT endpoint=tls://127.0.0.1:%s\n' "$(mqtt_port)"; else printf '%-16s UNKNOWN (not proven canonical)\n' MQTT; fi
+  if canonical_mqtt; then status_component MQTT container_health "$MQTT_CONTAINER"; printf '  MQTT endpoint=tls://127.0.0.1:%s source=LIVE_VERIFIED\n' "$(mqtt_port)"; else printf '%-16s UNKNOWN (not proven canonical)\n' MQTT; fi
 
   if session_exists "$BACKEND_SESSION" && owned_session "$BACKEND_SESSION" "$REPO_ROOT/backend" 'cmd/server'; then
-    printf '%-16s %s health=%s db_target=UI_DB:%s mqtt_ingestion=enabled\n' Backend "$(backend_health_label)" "$(backend_health_label)" "$(ui_db_port)"
+    if backend_target_proven; then
+      printf '%-16s %s health=%s source=LIVE_VERIFIED db_target=UI_DB:%s source=LOCAL_STATE mqtt_ingestion=%s\n' Backend "$(backend_health_label)" "$(backend_health_label)" "$PROVEN_DB_PORT" "$(backend_ingestion_label)"
+    else
+      printf '%-16s UNKNOWN BACKEND_DB_TARGET_UNVERIFIED health=%s\n' Backend "$(backend_health_label)"
+    fi
   elif session_exists "$BACKEND_SESSION"; then
     printf '%-16s UNKNOWN PROCESS_OWNERSHIP_UNVERIFIED\n' Backend
   else
@@ -472,7 +644,14 @@ status() {
   fi
 
   if session_exists "$SIMULATOR_SESSION" && owned_session "$SIMULATOR_SESSION" "$REPO_ROOT/tools/device-simulator" 'go run'; then
-    if simulator_ack_ok; then printf '%-16s RUNNING mode=continuous interval=5s coverage=yes ACK=PASS\n' Simulator; else printf '%-16s DEGRADED mode=continuous interval=5s coverage=yes ACK=UNKNOWN\n' Simulator; fi
+    simulator_boot="$(read_simulator_boot || true)"
+    if simulator_stored_ack_for_boot "$simulator_boot"; then
+      printf '%-16s RUNNING mode=continuous interval=5s coverage=yes ACK=STORED\n' Simulator
+    elif simulator_ack_ok; then
+      printf '%-16s RUNNING mode=continuous interval=5s coverage=yes ACK=DUPLICATE (existing diagnostic)\n' Simulator
+    else
+      printf '%-16s DEGRADED mode=continuous interval=5s coverage=yes ACK=UNKNOWN\n' Simulator
+    fi
   elif session_exists "$SIMULATOR_SESSION"; then
     printf '%-16s UNKNOWN PROCESS_OWNERSHIP_UNVERIFIED\n' Simulator
   else
@@ -493,9 +672,10 @@ status() {
   fi
 
   printf 'Configuration\n'
-  printf '  coverage.max_interval_ms=5000 (local state; source system_configs)\n'
-  printf '  shop_tariff=LIGHTING_COMMERCIAL (local state)\n'
-  printf '  billing_plan=LIGHTING_COMMERCIAL_NON_TOU (local state)\n'
+  printf '  schema=%s source=%s\n' "${schema_fact:-UNKNOWN}" "$([[ -n "$schema_fact" ]] && printf LOCAL_STATE || printf UNKNOWN)"
+  printf '  coverage.max_interval_ms=%s source=%s\n' "${coverage_fact:-UNKNOWN}" "$([[ -n "$coverage_fact" ]] && printf LOCAL_STATE || printf UNKNOWN)"
+  printf '  shop_tariff=%s source=%s\n' "${tariff_fact:-UNKNOWN}" "$([[ -n "$tariff_fact" ]] && printf LOCAL_STATE || printf UNKNOWN)"
+  printf '  billing_plan=%s source=%s\n' "${billing_fact:-UNKNOWN}" "$([[ -n "$billing_fact" ]] && printf LOCAL_STATE || printf UNKNOWN)"
   for key in MQTT_USERNAME MQTT_PASSWORD JWT_ACTIVE_KID JWT_ACTIVE_PRIVATE_KEY_FILE DEVSEED_PASSWORD DEVSEED_ADMIN_PASSWORD; do
     if secret_configured "$key"; then printf '  %-28s CONFIGURED\n' "$key"; else printf '  %-28s MISSING\n' "$key"; fi
   done
@@ -523,4 +703,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
