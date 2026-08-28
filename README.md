@@ -289,6 +289,37 @@ Telemetry availability is independent from Carbon availability and Billing estim
 | Local example | `5000`, local development/test only |
 | Production value status | `UNRESOLVED / NOT ESTABLISHED` |
 
+## Backend Interface Inventory
+
+The current server composition exposes 12 HTTP routes: `GET /` is public liveness/readiness (including database and MQTT state); public authentication routes are `POST /api/v1/auth/login` and `POST /api/v1/auth/refresh`; authenticated routes are logout, profile, shop listing, dashboard, measurement-point detail, billing configuration read, and billing estimate; scoped-admin mutations are `PATCH /api/v1/shops/:shopId` and `PUT /api/v1/shops/:shopId/billing/configuration`. Shop reads require an active Shop and an explicit `UserShopRelation`. Admin status does not bypass Shop scope, and `CurrentShopID` is only current-view preference state.
+
+MQTT requires TLS (`tls://`, TLS 1.2 minimum). The Backend subscribes to `device/upload/data` and `device/+/status`, publishes telemetry application ACKs to `device/{MAC}/telemetry/ack`, and distinguishes those ACKs from MQTT transport QoS. Device identity is the normalized uppercase MAC; protocol v1 uses `boot_counter` plus `seq` for identity/deduplication and may carry coverage interval fields. The canonical local simulator is `tools/device-simulator` and requires a successful application ACK, not only broker connectivity.
+
+## Local Runtime Asset Classes
+
+The local operator recognizes only evidence-backed `ACTIVE_CANONICAL` assets: the UI PostgreSQL/TimescaleDB container on port `55435`, the repository Mosquitto container on TLS port `8883`, the Backend, and the canonical simulator process. The database on port `5432` is `PRESERVE_LEGACY` and is never operator-managed. Historical, test, stale, unrelated, or insufficiently proven assets are reported but ignored by lifecycle commands; cleanup is a separate reviewed task.
+
+## Power-IoT Local Runtime Operator
+
+Use the Bash source of truth from the repository root:
+
+```bash
+./scripts/local-runtime.sh status
+./scripts/local-runtime.sh start core
+./scripts/local-runtime.sh start telemetry
+./scripts/local-runtime.sh start ui
+./scripts/local-runtime.sh stop simulator
+./scripts/local-runtime.sh stop backend
+./scripts/local-runtime.sh stop ui
+./scripts/local-runtime.sh stop runtime
+./scripts/local-runtime.sh restart backend
+./scripts/local-runtime.sh restart simulator
+./scripts/local-runtime.sh logs backend
+./scripts/local-runtime.sh logs simulator
+```
+
+`status` is read-only and exits successfully when its non-secret inventory is produced, including degraded or unknown components. Lifecycle commands verify repository paths, Docker provenance, and protected local configuration before acting, prevent duplicate starts, and refuse unverified process ownership. `stop runtime` stops Flutter, the simulator, the Backend, and canonical MQTT only; it preserves the UI database, legacy database, all volumes, telemetry history, fixtures, and Carbon/Billing configuration. Secrets are loaded from protected local sources and are never printed. The optional Windows launcher is `tools/windows/power-iot-local.bat`; old/test container cleanup is not part of this operator.
+
 ## Device Simulator
 
 Simulator source 位於 `tools/device-simulator/`，用於在沒有實體設備時產生 telemetry 並等待 application ACK。支援的主要模式包括 `once`、`continuous`、`duplicate`、`invalid`、`offline-replay` 與 `reconnect`。
