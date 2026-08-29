@@ -17,11 +17,19 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | MQTTS telemetry | ✅ Development/runtime verified |
 | Telemetry deduplication / ACK | ✅ Verified |
 | MeasurementPoint / DeviceAssignment | ✅ Implemented |
+| Measurement Point Detail read path | ✅ Development implemented / verified |
+| Dashboard daily/monthly energy | ✅ Development implemented / verified |
+| Dashboard Carbon summary | ✅ Development implemented / verified |
+| Shop tariff classification | ✅ Development implemented / verified |
+| Billing V1 configuration | ✅ Development implemented / verified |
+| Billing Energy / coverage | ✅ Development implemented / verified |
+| Billing estimate | ✅ Development implemented / verified |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | User authentication/session/JWT | ✅ Development implemented / verified |
 | Admin mutation authorization | 🕒 Planned |
 | Public Admin HTTP API | 🕒 Planned |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
+| Local Runtime Operator | ✅ Accepted / merged / ready for use |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
 | Production hardening | 🕒 Planned |
 
@@ -121,7 +129,12 @@ README.md                public project introduction
    MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt go run ./cmd/server
    ```
 
-   Server 會連線資料庫、執行 embedded versioned SQL migrations，再啟動 MQTT client 與 HTTP server。根路徑 health endpoint 為 `GET /`；目前沒有公開 Admin API。
+   Server 會連線資料庫、執行 embedded versioned SQL migrations，再啟動 MQTT client 與 HTTP server。根路徑 health endpoint 為 `GET /`；目前沒有公開 Admin Device Binding API。已註冊的 read 與 scoped-admin routes 見 Backend Interface Inventory。
+
+For an already-provisioned local workstation, normal Power-IoT lifecycle
+operations should prefer `./scripts/local-runtime.sh`. The manual Docker,
+Backend, and Simulator startup steps in this README remain useful for
+bootstrap, troubleshooting, or explicit verification.
 
 ## Backend
 
@@ -273,7 +286,7 @@ After multiple simulator publishes, verify in this order:
 8. Dashboard `monthlyKwh` is non-null.
 9. Flutter Dashboard displays the telemetry instead of its no-data state.
 
-Telemetry availability is independent from Carbon availability and Billing estimate availability. Successful telemetry does not create a carbon factor or a billing tariff/configuration; Carbon and Billing may remain unavailable while telemetry is healthy.
+Telemetry availability is independent from Carbon availability and Billing estimate availability. Successful telemetry does not create a carbon factor or a billing tariff/configuration; Carbon factors and Billing configuration/estimate data may remain unconfigured while telemetry is healthy.
 
 ### Configuration catalog: `coverage.max_interval_ms`
 
@@ -297,7 +310,7 @@ MQTT requires TLS (`tls://`, TLS 1.2 minimum). The Backend subscribes to `device
 
 ## Local Runtime Asset Classes
 
-The local operator recognizes only evidence-backed `ACTIVE_CANONICAL` assets: the UI PostgreSQL/TimescaleDB container on port `55435`, the repository Mosquitto container on TLS port `8883`, the Backend, and the canonical simulator process. The database on port `5432` is `PRESERVE_LEGACY` and is never operator-managed. Historical, test, stale, unrelated, or insufficiently proven assets are reported but ignored by lifecycle commands; cleanup is a separate reviewed task.
+The local operator recognizes only evidence-backed `ACTIVE_CANONICAL` assets. Current workstation evidence identifies the UI PostgreSQL/TimescaleDB container on port `55435`, the repository Mosquitto container on TLS port `8883`, the Backend, and the canonical simulator process; these port values are local observations, not universal product constants. The database on port `5432` is `PRESERVE_LEGACY`, and repository dedicated PostgreSQL test infrastructure on port `55434` is not runtime-owned. Historical, test, stale, unrelated, or insufficiently proven assets are reported but ignored by lifecycle commands; cleanup is a separate reviewed task.
 
 ## Power-IoT Local Runtime Operator
 
@@ -458,7 +471,7 @@ dart format --output=none --set-exit-if-changed .
 
 ## Mobile
 
-Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard，以及由 dashboard 資料驅動的 Device Management。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。這不代表 production deployment/readiness、physical hardware validation，或 I1-B daily/monthly energy/carbon aggregation 已完成。Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
+Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard and the Measurement Point Detail read path. Device Binding remains a backend transaction foundation rather than a public Admin Device Binding API. Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。Current accepted development capabilities include Dashboard daily/monthly energy, Dashboard Carbon summary, Shop tariff classification, Billing V1 configuration, historical energy/coverage, and billing estimates; these are system-integration capabilities, not an official utility bill. This does not imply production deployment/readiness or physical hardware validation. Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
 
 ## Firmware Boundary
 
