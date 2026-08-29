@@ -17,13 +17,23 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | MQTTS telemetry | ✅ Development/runtime verified |
 | Telemetry deduplication / ACK | ✅ Verified |
 | MeasurementPoint / DeviceAssignment | ✅ Implemented |
+| Measurement Point Detail read path | ✅ Development implemented / verified |
+| Dashboard daily/monthly energy | ✅ Development implemented / verified |
+| Dashboard Carbon summary | ✅ Development implemented / verified |
+| Shop tariff classification | ✅ Development implemented / verified |
+| Billing V1 configuration | ✅ Development implemented / verified |
+| Billing Energy / coverage | ✅ Development implemented / verified |
+| Billing estimate | ✅ Development implemented / verified |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | User authentication/session/JWT | ✅ Development implemented / verified |
-| Admin mutation authorization | 🕒 Planned |
-| Public Admin HTTP API | 🕒 Planned |
+| Scoped-admin Shop/Billing authorization | ✅ Development implemented / verified |
+| Public Admin Device Binding HTTP API | 🕒 Planned |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
+| Local Runtime Operator | ✅ Accepted / merged / ready for use |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
 | Production hardening | 🕒 Planned |
+
+Scoped-admin authorization is limited to verified Shop/Billing mutations; it does not establish global-admin authorization. Full Device Binding transport integration remains incomplete, and no public Admin Device Binding HTTP API is implemented.
 
 目前的驗證成熟度是 development/local system integration；上述完成項目不代表 production-ready 或 physical hardware validation complete。
 
@@ -121,7 +131,12 @@ README.md                public project introduction
    MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt go run ./cmd/server
    ```
 
-   Server 會連線資料庫、執行 embedded versioned SQL migrations，再啟動 MQTT client 與 HTTP server。根路徑 health endpoint 為 `GET /`；目前沒有公開 Admin API。
+   Server 會連線資料庫、執行 embedded versioned SQL migrations，再啟動 MQTT client 與 HTTP server。根路徑 health endpoint 為 `GET /`；目前沒有公開 Admin Device Binding API。已註冊的 read 與 scoped-admin routes 見 Backend Interface Inventory。
+
+For an already-provisioned local workstation, normal Power-IoT lifecycle
+operations should prefer `./scripts/local-runtime.sh`. The manual Docker,
+Backend, and Simulator startup steps in this README remain useful for
+bootstrap, troubleshooting, or explicit verification.
 
 ## Backend
 
@@ -273,7 +288,7 @@ After multiple simulator publishes, verify in this order:
 8. Dashboard `monthlyKwh` is non-null.
 9. Flutter Dashboard displays the telemetry instead of its no-data state.
 
-Telemetry availability is independent from Carbon availability and Billing estimate availability. Successful telemetry does not create a carbon factor or a billing tariff/configuration; Carbon and Billing may remain unavailable while telemetry is healthy.
+Telemetry availability is independent from Carbon availability and Billing estimate availability. Successful telemetry does not create a carbon factor or a billing tariff/configuration; Carbon factors and Billing configuration/estimate data may remain unconfigured while telemetry is healthy.
 
 ### Configuration catalog: `coverage.max_interval_ms`
 
@@ -297,28 +312,116 @@ MQTT requires TLS (`tls://`, TLS 1.2 minimum). The Backend subscribes to `device
 
 ## Local Runtime Asset Classes
 
-The local operator recognizes only evidence-backed `ACTIVE_CANONICAL` assets: the UI PostgreSQL/TimescaleDB container on port `55435`, the repository Mosquitto container on TLS port `8883`, the Backend, and the canonical simulator process. The database on port `5432` is `PRESERVE_LEGACY` and is never operator-managed. Historical, test, stale, unrelated, or insufficiently proven assets are reported but ignored by lifecycle commands; cleanup is a separate reviewed task.
+The local operator recognizes only evidence-backed `ACTIVE_CANONICAL` assets. Current workstation evidence identifies the UI PostgreSQL/TimescaleDB container on port `55435`, the repository Mosquitto container on TLS port `8883`, the Backend, and the canonical simulator process; these port values are local observations, not universal product constants. The database on port `5432` is `PRESERVE_LEGACY`, and repository dedicated PostgreSQL test infrastructure on port `55434` is not runtime-owned. Historical, test, stale, unrelated, or insufficiently proven assets are reported but ignored by lifecycle commands; cleanup is a separate reviewed task.
 
 ## Power-IoT Local Runtime Operator
 
-Use the Bash source of truth from the repository root:
+The reusable local lifecycle entry point is:
+
+- **WSL / Linux source of truth:** `./scripts/local-runtime.sh`
+- **Windows wrapper:** `tools/windows/power-iot-local.bat`
+
+The Bash script owns runtime logic. The BAT file only forwards the command and
+arguments into WSL. The Operator manages only verified `ACTIVE_CANONICAL`
+Power-IoT assets; it is not a general workstation process or container manager.
+
+### Quick start
+
+From the repository root:
 
 ```bash
 ./scripts/local-runtime.sh status
 ./scripts/local-runtime.sh start core
 ./scripts/local-runtime.sh start telemetry
 ./scripts/local-runtime.sh start ui
+```
+
+Use `status` first to inspect the non-secret inventory. `core` starts the local
+UI database, MQTT, and Backend. `telemetry` adds the Device Simulator. `ui`
+adds Flutter using the canonical UI startup path; an existing approved Android
+Emulator may be detected and reused, but the emulator is not normal
+Operator-owned shutdown state.
+
+### Runtime profiles
+
+| Profile | Starts | Intended use |
+|---|---|---|
+| `core` | UI DB + MQTT + Backend | Backend-only development |
+| `telemetry` | `core` + Device Simulator | Telemetry development and ACK verification |
+| `ui` | `core` + Flutter | Flutter integration against the canonical Backend endpoint |
+
+The Operator does not start an Android Emulator; it reuses an approved
+connected emulator when `ui` needs one.
+
+### Stop, restart, and logs
+
+Stop only the named canonical process, or use the full local runtime stop:
+
+```bash
 ./scripts/local-runtime.sh stop simulator
 ./scripts/local-runtime.sh stop backend
 ./scripts/local-runtime.sh stop ui
 ./scripts/local-runtime.sh stop runtime
+```
+
+`stop runtime` stops Flutter, the Simulator, the Backend, and canonical MQTT.
+It does **not** destroy database data: the canonical UI DB, legacy DB, database
+volumes, telemetry history, fixtures, Carbon/Billing configuration, and
+existing development configuration are preserved. The Operator performs no database reset, reseed, or purge.
+
+For a targeted restart or recent logs:
+
+```bash
 ./scripts/local-runtime.sh restart backend
 ./scripts/local-runtime.sh restart simulator
 ./scripts/local-runtime.sh logs backend
 ./scripts/local-runtime.sh logs simulator
 ```
 
-`status` is read-only and exits successfully when its non-secret inventory is produced, including degraded or unknown components. Lifecycle commands verify repository paths, Docker provenance, and protected local configuration before acting, prevent duplicate starts, and refuse unverified process ownership. `stop runtime` stops Flutter, the simulator, the Backend, and canonical MQTT only; it preserves the UI database, legacy database, all volumes, telemetry history, fixtures, and Carbon/Billing configuration. Secrets are loaded from protected local sources and are never printed. The optional Windows launcher is `tools/windows/power-iot-local.bat`; old/test container cleanup is not part of this operator.
+For the complete command surface:
+
+```bash
+./scripts/local-runtime.sh help
+```
+
+### Recommended daily workflow
+
+- **Backend-only:** `status` → `start core`
+- **Telemetry:** `status` → `start telemetry`
+- **Flutter integration:** `status` → `start ui`
+- **End of work:** `stop runtime`
+
+### Safety and ownership
+
+Lifecycle control applies only to verified `ACTIVE_CANONICAL` Power-IoT
+assets. It does not manage the legacy DB, repository dedicated PostgreSQL test
+infrastructure, unrelated IoT Backends, unrelated Flutter applications,
+unrelated Docker containers, GitHub MCP, or other projects sharing the
+workstation.
+
+On this workstation, the known roles are:
+
+| Endpoint | Role |
+|---|---|
+| `127.0.0.1:5432` | `PRESERVE_LEGACY` |
+| `127.0.0.1:55435` | Current canonical local UI DB |
+| `127.0.0.1:55434` | Repository dedicated PostgreSQL test infrastructure |
+
+These port values describe the current workstation, not universal product
+defaults. In particular, `55435` is a local UI DB endpoint and `55434` is not
+a runtime DB or an Operator-managed asset. Keep repository contracts distinct
+from current workstation state.
+
+Before lifecycle actions, the Operator verifies process and container
+ownership, repository paths, and protected configuration. If ownership or the
+Backend database target cannot be proven, it fails closed with states such as
+`PROCESS_OWNERSHIP_UNVERIFIED` or `BACKEND_DB_TARGET_UNVERIFIED`. This refusal
+is intentional; do not bypass it. `status` is read-only and reports non-secret
+facts even when a component is degraded or unknown. Secrets remain in
+protected local sources and are never printed.
+
+PR #25 is merged and this Operator is accepted for normal local Power-IoT
+operation.
 
 ## Device Simulator
 
@@ -370,7 +473,7 @@ dart format --output=none --set-exit-if-changed .
 
 ## Mobile
 
-Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard，以及由 dashboard 資料驅動的 Device Management。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。這不代表 production deployment/readiness、physical hardware validation，或 I1-B daily/monthly energy/carbon aggregation 已完成。Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
+Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard and the Measurement Point Detail read path. Device Binding remains a backend transaction foundation rather than a public Admin Device Binding API. Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。Current accepted development capabilities include Dashboard daily/monthly energy, Dashboard Carbon summary, Shop tariff classification, Billing V1 configuration, historical energy/coverage, and billing estimates; these are system-integration capabilities, not an official utility bill. This does not imply production deployment/readiness or physical hardware validation. Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
 
 ## Firmware Boundary
 

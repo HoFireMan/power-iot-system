@@ -13,60 +13,66 @@ Live canonical Git HEAD is authoritative in Git and is intentionally not
 maintained as a hardcoded SHA in this document. Obtain it from the canonical
 repository with `git rev-parse main`.
 
-Last accepted product implementation merge/checkpoint:
+## Accepted Local Runtime Operator
 
-`05d9ccd7caaa8015943eea8dd9564e3942bef83f`
+STATUS = **ACCEPTED / MERGED / READY_FOR_USE**
 
-Documentation/status reconciliation baseline before this task:
+PR = **25**
 
-`eb60b8288c1bc4ba69af9379db728f984a9febb2`
+MERGE_COMMIT = `43fc892478b44f898e8e3386650976aa69bfae06`
 
-A documentation-only merge may advance the live Git HEAD without changing the
-last accepted product implementation checkpoint above.
+PRIMARY_OPERATOR = `scripts/local-runtime.sh`
 
-I3:
+WINDOWS_WRAPPER = `tools/windows/power-iot-local.bat`
 
-**COMPLETE / ACCEPTED / MERGED TO MAIN**
+CANONICAL_BACKEND_RUNTIME = **main worktree**
 
-PR #7:
+BACKEND_DB_TARGET = **canonical UI DB**
 
-**MERGED**
+LEGACY_DB = **PRESERVE_ONLY**
 
-PR #7 merge commit:
+PROCESS_OWNERSHIP_GUARD = **ENABLED**
 
-`459f0f3b121aefe7793d943e9609ac4570d144f2`
+SIMULATOR_APPLICATION_ACK_HEALTH = **ENABLED**
 
-Last completed feature:
+SIMULATOR_BOOT_IDENTITY = **persistent monotonic local boot counter**
 
-**POST-I3-F1 — Dashboard Auto Refresh**
+For runtime commands and safety semantics, see:
 
-Last feature worktree:
+`README.md` → **Power-IoT Local Runtime Operator**
 
-`/home/admin-195/code/power-iot-system-wt-dashboard-auto-refresh`
+Future agents must prefer the Operator over inventing manual lifecycle commands
+for normal local Power-IoT operation.
 
-Last feature branch:
+## Current Accepted Product State
 
-`work/post-i3-dashboard-auto-refresh`
+Latest accepted source/product checkpoint before the Local Runtime Operator:
 
-POST-I3-F1 status:
+`5f62eef468fee0d896c496aab9be17906dc55f7f` (PR #24 merge).
 
-**COMPLETE / ACCEPTED / MERGED TO MAIN**
+PR #25 Local Runtime Operator merge:
 
-PR #8:
+`43fc892478b44f898e8e3386650976aa69bfae06`
 
-**MERGED**
+Current accepted development capability summary:
 
-PR #8 merge commit:
+- Auth/session/JWT development integration.
+- B-02 coverage foundation and local devseed coverage configuration.
+- Measurement Point Detail read path.
+- Dashboard daily/monthly energy and Carbon summary.
+- Shop tariff classification.
+- Billing V1 configuration, historical energy/coverage, and estimate support.
+- Local devseed scoped-admin fixture support.
+- Local Runtime Operator accepted and ready for use.
 
-`05d9ccd7caaa8015943eea8dd9564e3942bef83f`
+Current boundaries remain:
 
-GIT INTEGRATION:
-
-**COMPLETE**
-
-Next active feature:
-
-**NONE / NOT YET SELECTED**
+- Public Admin Device Binding HTTP API and full Device Binding transport
+  integration are not complete.
+- Physical ESP8266/fleet validation and production deployment/hardening remain
+  pending.
+- BLE provisioning, QR flow, offline cache, and other unproven alert/reporting
+  capabilities remain incomplete.
 
 Dashboard refresh contract:
 
@@ -86,7 +92,15 @@ Backend current-power freshness remains:
 
 Do not alter or reinterpret that contract here.
 
-## Accepted POST-I3-F1 Behavior
+## Historical PR #8 / POST-I3-F1 Snapshot
+
+I3 and POST-I3-F1 were completed and merged. PR #7 merged as
+`459f0f3b121aefe7793d943e9609ac4570d144f2`; PR #8 merged as
+`05d9ccd7caaa8015943eea8dd9564e3942bef83f`. The former post-PR #8 snapshot
+listed no next active feature; it is historical and is not the current
+mainline state.
+
+## Historical POST-I3-F1 Behavior
 
 - Dashboard automatic refresh is implemented.
 - Polling runs only while the app is resumed and the Dashboard route is visible.
@@ -172,7 +186,7 @@ recovery authority, and exclusion of DML/backfill and ownership/Authz redesign.
 Those historical phases are complete and are not unresolved blockers for
 POST-I3-F1.
 
-## GitHub Integration
+## Historical GitHub Integration
 
 - PR #6 security reconciliation: historical phase, no longer the active phase.
 - PR #7 frontend/backend integration: **MERGED** as the I3 merge commit above.
