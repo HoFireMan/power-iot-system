@@ -26,12 +26,14 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | Billing estimate | ✅ Development implemented / verified |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | User authentication/session/JWT | ✅ Development implemented / verified |
-| Admin mutation authorization | 🕒 Planned |
-| Public Admin HTTP API | 🕒 Planned |
+| Scoped-admin Shop/Billing authorization | ✅ Development implemented / verified |
+| Public Admin Device Binding HTTP API | 🕒 Planned |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
 | Local Runtime Operator | ✅ Accepted / merged / ready for use |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
 | Production hardening | 🕒 Planned |
+
+Scoped-admin authorization is limited to verified Shop/Billing mutations; it does not establish global-admin authorization. Full Device Binding transport integration remains incomplete, and no public Admin Device Binding HTTP API is implemented.
 
 目前的驗證成熟度是 development/local system integration；上述完成項目不代表 production-ready 或 physical hardware validation complete。
 
