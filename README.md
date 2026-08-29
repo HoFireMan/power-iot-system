@@ -301,24 +301,112 @@ The local operator recognizes only evidence-backed `ACTIVE_CANONICAL` assets: th
 
 ## Power-IoT Local Runtime Operator
 
-Use the Bash source of truth from the repository root:
+The reusable local lifecycle entry point is:
+
+- **WSL / Linux source of truth:** `./scripts/local-runtime.sh`
+- **Windows wrapper:** `tools/windows/power-iot-local.bat`
+
+The Bash script owns runtime logic. The BAT file only forwards the command and
+arguments into WSL. The Operator manages only verified `ACTIVE_CANONICAL`
+Power-IoT assets; it is not a general workstation process or container manager.
+
+### Quick start
+
+From the repository root:
 
 ```bash
 ./scripts/local-runtime.sh status
 ./scripts/local-runtime.sh start core
 ./scripts/local-runtime.sh start telemetry
 ./scripts/local-runtime.sh start ui
+```
+
+Use `status` first to inspect the non-secret inventory. `core` starts the local
+UI database, MQTT, and Backend. `telemetry` adds the Device Simulator. `ui`
+adds Flutter using the canonical UI startup path; an existing approved Android
+Emulator may be detected and reused, but the emulator is not normal
+Operator-owned shutdown state.
+
+### Runtime profiles
+
+| Profile | Starts | Intended use |
+|---|---|---|
+| `core` | UI DB + MQTT + Backend | Backend-only development |
+| `telemetry` | `core` + Device Simulator | Telemetry development and ACK verification |
+| `ui` | `core` + Flutter | Flutter integration against the canonical Backend endpoint |
+
+The Operator does not start an Android Emulator; it reuses an approved
+connected emulator when `ui` needs one.
+
+### Stop, restart, and logs
+
+Stop only the named canonical process, or use the full local runtime stop:
+
+```bash
 ./scripts/local-runtime.sh stop simulator
 ./scripts/local-runtime.sh stop backend
 ./scripts/local-runtime.sh stop ui
 ./scripts/local-runtime.sh stop runtime
+```
+
+`stop runtime` stops Flutter, the Simulator, the Backend, and canonical MQTT.
+It does **not** destroy database data: the canonical UI DB, legacy DB, database
+volumes, telemetry history, fixtures, Carbon/Billing configuration, and
+existing development configuration are preserved. The Operator performs no database reset, reseed, or purge.
+
+For a targeted restart or recent logs:
+
+```bash
 ./scripts/local-runtime.sh restart backend
 ./scripts/local-runtime.sh restart simulator
 ./scripts/local-runtime.sh logs backend
 ./scripts/local-runtime.sh logs simulator
 ```
 
-`status` is read-only and exits successfully when its non-secret inventory is produced, including degraded or unknown components. Lifecycle commands verify repository paths, Docker provenance, and protected local configuration before acting, prevent duplicate starts, and refuse unverified process ownership. `stop runtime` stops Flutter, the simulator, the Backend, and canonical MQTT only; it preserves the UI database, legacy database, all volumes, telemetry history, fixtures, and Carbon/Billing configuration. Secrets are loaded from protected local sources and are never printed. The optional Windows launcher is `tools/windows/power-iot-local.bat`; old/test container cleanup is not part of this operator.
+For the complete command surface:
+
+```bash
+./scripts/local-runtime.sh help
+```
+
+### Recommended daily workflow
+
+- **Backend-only:** `status` → `start core`
+- **Telemetry:** `status` → `start telemetry`
+- **Flutter integration:** `status` → `start ui`
+- **End of work:** `stop runtime`
+
+### Safety and ownership
+
+Lifecycle control applies only to verified `ACTIVE_CANONICAL` Power-IoT
+assets. It does not manage the legacy DB, repository dedicated PostgreSQL test
+infrastructure, unrelated IoT Backends, unrelated Flutter applications,
+unrelated Docker containers, GitHub MCP, or other projects sharing the
+workstation.
+
+On this workstation, the known roles are:
+
+| Endpoint | Role |
+|---|---|
+| `127.0.0.1:5432` | `PRESERVE_LEGACY` |
+| `127.0.0.1:55435` | Current canonical local UI DB |
+| `127.0.0.1:55434` | Repository dedicated PostgreSQL test infrastructure |
+
+These port values describe the current workstation, not universal product
+defaults. In particular, `55435` is a local UI DB endpoint and `55434` is not
+a runtime DB or an Operator-managed asset. Keep repository contracts distinct
+from current workstation state.
+
+Before lifecycle actions, the Operator verifies process and container
+ownership, repository paths, and protected configuration. If ownership or the
+Backend database target cannot be proven, it fails closed with states such as
+`PROCESS_OWNERSHIP_UNVERIFIED` or `BACKEND_DB_TARGET_UNVERIFIED`. This refusal
+is intentional; do not bypass it. `status` is read-only and reports non-secret
+facts even when a component is degraded or unknown. Secrets remain in
+protected local sources and are never printed.
+
+PR #25 is merged and this Operator is accepted for normal local Power-IoT
+operation.
 
 ## Device Simulator
 

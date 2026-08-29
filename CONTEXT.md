@@ -13,6 +13,37 @@ Live canonical Git HEAD is authoritative in Git and is intentionally not
 maintained as a hardcoded SHA in this document. Obtain it from the canonical
 repository with `git rev-parse main`.
 
+## Accepted Local Runtime Operator
+
+STATUS = **ACCEPTED / MERGED / READY_FOR_USE**
+
+PR = **25**
+
+MERGE_COMMIT = `43fc892478b44f898e8e3386650976aa69bfae06`
+
+PRIMARY_OPERATOR = `scripts/local-runtime.sh`
+
+WINDOWS_WRAPPER = `tools/windows/power-iot-local.bat`
+
+CANONICAL_BACKEND_RUNTIME = **main worktree**
+
+BACKEND_DB_TARGET = **canonical UI DB**
+
+LEGACY_DB = **PRESERVE_ONLY**
+
+PROCESS_OWNERSHIP_GUARD = **ENABLED**
+
+SIMULATOR_APPLICATION_ACK_HEALTH = **ENABLED**
+
+SIMULATOR_BOOT_IDENTITY = **persistent monotonic local boot counter**
+
+For runtime commands and safety semantics, see:
+
+`README.md` → **Power-IoT Local Runtime Operator**
+
+Future agents must prefer the Operator over inventing manual lifecycle commands
+for normal local Power-IoT operation.
+
 Last accepted product implementation merge/checkpoint:
 
 `05d9ccd7caaa8015943eea8dd9564e3942bef83f`
