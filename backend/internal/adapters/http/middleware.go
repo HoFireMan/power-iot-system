@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 
+	"power-iot-backend/internal/adapters/persistence"
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationbilling "power-iot-backend/internal/application/billing"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
 	applicationmeasurementpointdetail "power-iot-backend/internal/application/measurementpointdetail"
 	applicationshops "power-iot-backend/internal/application/shops"
 	corebilling "power-iot-backend/internal/core/billing"
+	"power-iot-backend/internal/core/domain"
 	"power-iot-backend/internal/security"
 
 	"github.com/gin-gonic/gin"
@@ -103,12 +105,13 @@ type PublicErrorMapping struct {
 // Unknown errors always become INTERNAL_ERROR; err is never serialized.
 func MapPublicError(err error, requestID string) PublicErrorMapping {
 	code, message, status := "INTERNAL_ERROR", "internal server error", http.StatusInternalServerError
+	domainCode := domain.CodeOf(err)
 	switch {
 	case errors.Is(err, ErrValidation):
 		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusBadRequest
 	case errors.Is(err, ErrInvalidCredentials), errors.Is(err, applicationauth.ErrInvalidCredentials):
 		code, message, status = "INVALID_CREDENTIALS", "invalid credentials", http.StatusUnauthorized
-	case errors.Is(err, ErrUnauthorized), errors.Is(err, applicationauth.ErrUnauthorized):
+	case errors.Is(err, ErrUnauthorized), errors.Is(err, applicationauth.ErrUnauthorized), domainCode == domain.ErrAuthenticationRequired:
 		code, message, status = "UNAUTHORIZED", "unauthorized", http.StatusUnauthorized
 	case errors.Is(err, ErrForbidden):
 		code, message, status = "FORBIDDEN", "forbidden", http.StatusForbidden
@@ -120,6 +123,18 @@ func MapPublicError(err error, requestID string) PublicErrorMapping {
 		code, message, status = "BILLING_CONFIGURATION_CONFLICT", "billing configuration conflict", http.StatusConflict
 	case errors.Is(err, applicationmeasurementpointdetail.ErrMeasurementPointNotFound):
 		code, message, status = "MEASUREMENT_POINT_NOT_FOUND", "measurement point not found", http.StatusNotFound
+	case errors.Is(err, persistence.ErrAdminBindingOverviewAuthenticationRequired):
+		code, message, status = "AUTHENTICATION_REQUIRED", "authentication required", http.StatusUnauthorized
+	case errors.Is(err, persistence.ErrAdminBindingOverviewNotFound), domainCode == domain.ErrShopNotFound:
+		code, message, status = "SHOP_NOT_FOUND", "shop not found", http.StatusNotFound
+	case domainCode == domain.ErrDeviceNotFound || domainCode == domain.ErrMeasurementPointNotFound || domainCode == domain.ErrAssignmentNotFound || domainCode == domain.ErrSiteScopeDenied || domainCode == domain.ErrTenantScopeDenied || domainCode == domain.ErrDeviceScopeDenied:
+		code, message, status = "RESOURCE_NOT_FOUND", "resource not found", http.StatusNotFound
+	case domainCode == domain.ErrOperationForbidden || errors.Is(err, persistence.ErrAdminBindingOverviewForbidden):
+		code, message, status = "FORBIDDEN", "forbidden", http.StatusForbidden
+	case domainCode == domain.ErrInvalidRequest || domainCode == domain.ErrInvalidSerial || domainCode == domain.ErrMalformedMAC || domainCode == domain.ErrIdentifiersInconsistent || domainCode == domain.ErrInvalidStateTransition || domainCode == domain.ErrInvalidEffectiveTime || domainCode == domain.ErrHistoricalCorrection || domainCode == domain.ErrDeviceNotEligible:
+		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusUnprocessableEntity
+	case domainCode == domain.ErrIdempotencyKeyReused || domainCode == domain.ErrDeviceAlreadyAssigned || domainCode == domain.ErrMeasurementPointOccupied || domainCode == domain.ErrAssignmentNotCurrent || domainCode == domain.ErrConcurrentTransition || domainCode == domain.ErrAssignmentTimeConflict || domainCode == domain.ErrOverlappingAssignment || domainCode == domain.ErrSerialConflict || domainCode == domain.ErrDeviceRetired:
+		code, message, status = "CONFLICT", "binding operation conflicts with current state", http.StatusConflict
 	}
 	return PublicErrorMapping{Status: status, Error: security.NewPublicError(code, message, requestID)}
 }

@@ -29,9 +29,10 @@ class ShopListScreen extends ConsumerWidget {
     final shopState = ref.watch(shopsProvider);
     final snapshot = shopState.data;
     final shops = snapshot?.shops ?? const <remote.Shop>[];
-    // The server preference is authoritative. A temporary view choice remains
-    // separate and is never sent as an authorization signal.
-    final currentShopId = shopState.selectedShopId ?? snapshot?.currentShopId;
+    // Selection is a local view preference. Only a Shop in the server-returned
+    // list can be displayed as selected; CurrentShopID is not authority.
+    final currentShopId =
+        shopState.selectedShopId ?? (shops.isEmpty ? null : shops.first.id);
     final profile = ref.watch(profileProvider);
     final isAdmin =
         profile.status == RemoteStatus.success && profile.data?.isAdmin == true;

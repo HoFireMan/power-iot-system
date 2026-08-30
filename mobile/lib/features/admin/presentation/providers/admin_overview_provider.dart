@@ -1,8 +1,36 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/network/remote_error.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../../data/repositories/mock_admin_overview_repository.dart';
+import '../../../auth/auth_controller.dart';
+import '../../../profile/presentation/providers/profile_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../../shops/domain/models/shop.dart';
+
+/// Resolves the authenticated admin's view shop from the server-authorized
+/// snapshot. The selected shop is a local view preference; the snapshot is
+/// the only authority and its first shop is the safe default when the server
+/// has no current-shop preference.
+Shop? selectedAdminShop(ShopsState state) {
+  final snapshot = state.data;
+  if (state.status != RemoteStatus.success || snapshot == null) {
+    return null;
+  }
+  final selectedId = state.selectedShopId;
+  if (selectedId != null) {
+    for (final shop in snapshot.shops) {
+      if (shop.id == selectedId) return shop;
+    }
+  }
+  // CurrentShopID is server metadata, not authorization or view-selection
+  // authority. When no local view choice survives, use a returned shop only.
+  return snapshot.shops.isEmpty ? null : snapshot.shops.first;
+}
+
+String? selectedAdminShopId(ShopsState state) => selectedAdminShop(state)?.id;
 
 class PendingCreateMeasurementPointRequest {
   const PendingCreateMeasurementPointRequest({
@@ -343,9 +371,42 @@ final unbindDeviceRequestIdentitySourceProvider =
   (ref) => MockUnbindDeviceRequestIdentitySource(),
 );
 
-final adminOverviewRepositoryProvider = Provider<AdminOverviewRepository>(
-  (ref) => MockAdminOverviewRepository(),
-);
+final adminOverviewRepositoryProvider =
+    Provider<AdminOverviewRepository>((ref) {
+  // Keep unauthenticated preview/tests deterministic; every accepted session
+  // uses the real scoped HTTP projection.
+  if (!ref.watch(authControllerProvider).isAuthenticated) {
+    return MockAdminOverviewRepository();
+  }
+  final shops = ref.watch(shopsProvider);
+  if (shops.status == RemoteStatus.unauthorized) {
+    throw const UnauthorizedException();
+  }
+  if (shops.status == RemoteStatus.error && shops.error != null) {
+    // Preserve the transport error so the screen can apply the existing safe
+    // authorization/validation/conflict/network/server category mapping.
+    throw shops.error!;
+  }
+  final shopId = selectedAdminShopId(shops);
+  // Do not fall back to the legacy mock shop state for authenticated calls.
+  // Until the server-authorized snapshot contains a Shop, no request is
+  // authorized or sent; the screen can expose its retry action instead.
+  if (shopId == null || shopId.trim().isEmpty) {
+    throw StateError('no authorized shop is available');
+  }
+  return RemoteAdminOverviewRepository(ref.watch(authClientProvider), shopId);
+});
+
+/// Reload the authoritative remote Shop snapshot before retrying its dependent
+/// overview. Unauthenticated preview routes continue using their local mock.
+Future<void> retryAdminOverview(WidgetRef ref) async {
+  if (ref.read(authControllerProvider).isAuthenticated) {
+    // Always replace the cached snapshot: a successful response may still be
+    // stale after a revocation or shop membership change.
+    await ref.read(shopsProvider.notifier).load();
+  }
+  ref.invalidate(adminOverviewProvider);
+}
 
 final adminOverviewProvider = FutureProvider<AdminOverview>((ref) {
   return ref.watch(adminOverviewRepositoryProvider).loadOverview();

@@ -65,6 +65,7 @@ func newBindingFixture() (*fakeLookup, domain.ActorContext, uint, uint, uuid.UUI
 	mp1, mp2, mp3 := uuid.New(), uuid.New(), uuid.New()
 	devA, devB, devC := uint(101), uint(102), uint(103)
 	serialA, serialB, serialC := "SERIAL-A", "SERIAL-B", "SERIAL-C"
+	ownerClientID := uint(1)
 	lookup := &fakeLookup{
 		shops: map[uint]*domain.Shop{
 			shop1: {ID: shop1, ClientID: 1, Name: "Shop 1"},
@@ -76,9 +77,9 @@ func newBindingFixture() (*fakeLookup, domain.ActorContext, uint, uint, uuid.UUI
 			mp3: {ID: mp3, ShopID: shop2, Name: "MP 3"},
 		},
 		devices: map[uint]*domain.Device{
-			devA: {ID: devA, ShopID: shop2, MacAddress: "AABBCCDDEEFF", SerialNumber: &serialA, Name: "A"},
-			devB: {ID: devB, ShopID: shop2, MacAddress: "BBCCDDEEFF00", SerialNumber: &serialB, Name: "B"},
-			devC: {ID: devC, ShopID: shop1, MacAddress: "CCDDEEFF0011", SerialNumber: &serialC, Name: "C"},
+			devA: {ID: devA, ShopID: shop2, InventoryOwnerClientID: &ownerClientID, MacAddress: "AABBCCDDEEFF", SerialNumber: &serialA, Name: "A"},
+			devB: {ID: devB, ShopID: shop2, InventoryOwnerClientID: &ownerClientID, MacAddress: "BBCCDDEEFF00", SerialNumber: &serialB, Name: "B"},
+			devC: {ID: devC, ShopID: shop1, InventoryOwnerClientID: &ownerClientID, MacAddress: "CCDDEEFF0011", SerialNumber: &serialC, Name: "C"},
 		},
 		bySerial:    map[string]uint{serialA: devA, serialB: devB, serialC: devC},
 		byMAC:       map[string]uint{"AABBCCDDEEFF": devA, "BBCCDDEEFF00": devB, "CCDDEEFF0011": devC},
@@ -203,6 +204,11 @@ func TestDeviceEligibilityRejectsLegacyAndMalformedDevices(t *testing.T) {
 	if got := codeOf(t, func() error { _, err := app.BindDevice(context.Background(), cmd); return err }()); got != domain.ErrInvalidSerial {
 		t.Fatalf("malformed request serial code=%s", got)
 	}
+	paddedSerial := " SERIAL-B"
+	cmd.DeviceRef = domain.DeviceRef{SerialNumber: &paddedSerial}
+	if got := codeOf(t, func() error { _, err := app.BindDevice(context.Background(), cmd); return err }()); got != domain.ErrInvalidSerial {
+		t.Fatalf("padded request serial code=%s", got)
+	}
 }
 
 func TestLegacyTransitionEligibilitySemantics(t *testing.T) {
@@ -264,6 +270,60 @@ func TestLegacyTransitionEligibilitySemantics(t *testing.T) {
 		t.Fatalf("legacy new Bind code=%s", got)
 	}
 
+}
+
+func TestBindingTransitionsRequireResolvedInventoryOwner(t *testing.T) {
+	lookup, actor, devA, devB, _, mp2, _, assignmentID := newBindingFixture()
+	app := New(lookup)
+
+	lookup.devices[devB].InventoryOwnerClientID = nil
+	if got := codeOf(t, func() error {
+		_, err := app.BindDevice(context.Background(), domain.BindDeviceCommand{
+			DeviceRef: refID(devB), MeasurementPointID: mp2,
+			RequestIdentity: "owner-required-bind", Actor: actor,
+		})
+		return err
+	}()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("NULL Bind owner code=%s", got)
+	}
+	lookup.devices[devB].InventoryOwnerClientID = func() *uint { value := uint(0); return &value }()
+	if got := codeOf(t, func() error {
+		_, err := app.BindDevice(context.Background(), domain.BindDeviceCommand{
+			DeviceRef: refID(devB), MeasurementPointID: mp2,
+			RequestIdentity: "owner-required-bind-zero", Actor: actor,
+		})
+		return err
+	}()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("zero Bind owner code=%s", got)
+	}
+
+	lookup.devices[devA].InventoryOwnerClientID = nil
+	if got := codeOf(t, func() error {
+		_, err := app.ReplaceDevice(context.Background(), domain.ReplaceDeviceCommand{
+			CurrentAssignmentID: assignmentID, ReplacementDeviceRef: refID(devB),
+			RequestIdentity: "owner-required-replace", Actor: actor,
+		})
+		return err
+	}()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("NULL Replace owner code=%s", got)
+	}
+	if got := codeOf(t, func() error {
+		_, err := app.RelocateDevice(context.Background(), domain.RelocateDeviceCommand{
+			CurrentAssignmentID: assignmentID, TargetMeasurementPointID: mp2,
+			RequestIdentity: "owner-required-relocate", Actor: actor,
+		})
+		return err
+	}()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("NULL Relocate owner code=%s", got)
+	}
+	if got := codeOf(t, func() error {
+		_, err := app.UnbindDevice(context.Background(), domain.UnbindDeviceCommand{
+			CurrentAssignmentID: assignmentID, RequestIdentity: "owner-required-unbind", Actor: actor,
+		})
+		return err
+	}()); got != domain.ErrTenantScopeDenied {
+		t.Fatalf("NULL Unbind owner code=%s", got)
+	}
 }
 
 func TestAssignmentNotFoundIsDistinctFromStaleAssignment(t *testing.T) {
@@ -418,8 +478,8 @@ func TestCrossClientBindingTransitionsFailClosedOnRelationalClientFacts(t *testi
 		t.Fatalf("cross-client replace code=%s", got)
 	}
 
-	// The device has no owner in this case; the source/target relational path
-	// still makes relocation fail closed. Device.ShopID is not consulted.
+	// The source/target relational path still makes relocation fail closed.
+	// Device.ShopID is not consulted.
 	lookup.devices[devA].InventoryOwnerClientID = nil
 	crossRelocate := domain.RelocateDeviceCommand{CurrentAssignmentID: assignmentID, TargetMeasurementPointID: mp3, RequestIdentity: "cross-client-relocate", Actor: actor}
 	if got := codeOf(t, func() error { _, err := app.RelocateDevice(context.Background(), crossRelocate); return err }()); got != domain.ErrTenantScopeDenied {

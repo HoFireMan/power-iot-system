@@ -8,9 +8,11 @@ class AdminOverview {
     required this.measurementPoints,
     required this.devices,
     this.activeAssignments = const [],
+    this.assignmentHistory = const [],
   });
 
   final List<MeasurementPoint> measurementPoints;
   final List<DeviceInventory> devices;
   final List<DeviceAssignment> activeAssignments;
+  final List<DeviceAssignment> assignmentHistory;
 }

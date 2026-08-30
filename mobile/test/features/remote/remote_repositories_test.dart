@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/core/network/authenticated_http_client.dart';
 import 'package:power_iot_app/features/auth/auth_controller.dart';
 import 'package:power_iot_app/core/network/remote_error.dart';
@@ -387,6 +388,52 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('目前沒有可用店家'), findsOneWidget);
     expect(find.textContaining('伺服器授權'), findsOneWidget);
+  });
+
+  testWidgets('admin profile binding menu opens the real admin route',
+      (tester) async {
+    final store = _Store();
+    final client = _client(_Adapter((_) async => _json(200, {})), store);
+    final router = GoRouter(
+      initialLocation: '/profile',
+      routes: [
+        GoRoute(
+          path: '/profile',
+          builder: (context, state) => const ProfileScreen(),
+        ),
+        GoRoute(
+          path: '/admin',
+          builder: (context, state) => const Text('real admin route'),
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authClientProvider.overrideWithValue(client),
+          profileRepositoryProvider.overrideWithValue(_ProfileFake(() async {
+            return const UserProfile(
+              id: '1',
+              account: 'admin',
+              name: 'Admin',
+              email: null,
+              phone: null,
+              isAdmin: true,
+              currentShopId: null,
+            );
+          })),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final bindingMenu = find.text('綁定感測器');
+    await tester.ensureVisible(bindingMenu);
+    await tester.tap(bindingMenu);
+    await tester.pumpAndSettle();
+    expect(find.text('real admin route'), findsOneWidget);
+    client.close();
   });
 
   testWidgets('profile screen renders loading before remote profile success',

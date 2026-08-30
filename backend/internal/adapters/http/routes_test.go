@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,90 @@ func (routeLogoutStub) AuthenticateAccessToken(context.Context, string) (applica
 }
 func (routeLogoutStub) Logout(context.Context, applicationauth.AuthenticatedIdentity) error {
 	return applicationauth.ErrUnauthorized
+}
+
+func TestAdminBindingRouteInventoryContainsExactlyFivePostsAndOneOverview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	RegisterAdminBindingRoutes(router, routeLogoutStub{}, AdminBindingHandlerConfig{})
+	want := map[string]bool{
+		"POST /api/v1/admin/measurement-points":                     false,
+		"POST /api/v1/admin/device-bindings":                        false,
+		"POST /api/v1/admin/device-bindings/:assignmentId/replace":  false,
+		"POST /api/v1/admin/device-bindings/:assignmentId/relocate": false,
+		"POST /api/v1/admin/device-bindings/:assignmentId/unbind":   false,
+		"GET /api/v1/admin/device-bindings":                         false,
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; !ok {
+			t.Fatalf("unexpected admin binding route %s", key)
+		}
+		want[key] = true
+	}
+	for route, present := range want {
+		if !present {
+			t.Errorf("missing admin binding route %s", route)
+		}
+	}
+	if len(router.Routes()) != len(want) {
+		t.Fatalf("routes=%v", router.Routes())
+	}
+}
+
+func TestAdminBindingUUIDTransportRejectsSurroundingWhitespace(t *testing.T) {
+	id := "11111111-1111-4111-8111-111111111111"
+	if !validUUID(id) {
+		t.Fatal("valid UUID rejected")
+	}
+	for _, padded := range []string{" " + id, id + " ", "\t" + id + "\n"} {
+		if validUUID(padded) {
+			t.Fatalf("whitespace-padded UUID accepted: %q", padded)
+		}
+	}
+}
+
+func TestAdminBindingStrictBodyAndIdempotencyBoundaries(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown field":  `{"reason":"ok","unexpected":true}`,
+		"trailing value": `{"reason":"ok"} {"extra":true}`,
+		"null":           `null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+			var request struct {
+				Reason string `json:"reason"`
+			}
+			if decodeStrict(ctx, &request) {
+				t.Fatal("strict decoder accepted invalid body")
+			}
+		})
+	}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"reason":"ok"}`))
+	if !decodeStrict(ctx, &struct {
+		Reason string `json:"reason"`
+	}{}) {
+		t.Fatal("strict decoder rejected valid body")
+	}
+	ctx, _ = gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", maxAdminBindingRequestBody+1)))
+	if decodeStrict(ctx, &struct {
+		Reason string `json:"reason"`
+	}{}) {
+		t.Fatal("strict decoder accepted an oversized body")
+	}
+	for _, key := range []string{"", "   "} {
+		ctx.Request.Header.Set("Idempotency-Key", key)
+		if requireIdempotency(ctx) {
+			t.Fatalf("accepted empty idempotency key %q", key)
+		}
+	}
+	ctx.Request.Header.Set("Idempotency-Key", strings.Repeat("x", 256))
+	if requireIdempotency(ctx) {
+		t.Fatal("accepted overlong idempotency key")
+	}
 }
 
 func TestAuthRouteInventoryIsExactlyThreeVersionedPosts(t *testing.T) {

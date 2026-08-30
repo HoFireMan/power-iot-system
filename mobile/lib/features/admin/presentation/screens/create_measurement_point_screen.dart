@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../shops/providers/shop_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
+import '../../../auth/auth_controller.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
 
 class CreateMeasurementPointScreen extends ConsumerStatefulWidget {
@@ -61,11 +64,24 @@ class _CreateMeasurementPointScreenState
       _submissionError = null;
     });
 
-    final currentShop = ref.read(shopProvider).currentShop;
+    final authenticated = ref.read(authControllerProvider).isAuthenticated;
+    final shops = authenticated ? ref.read(shopsProvider) : null;
+    final selectedShopId = authenticated ? selectedAdminShopId(shops!) : null;
+    if (authenticated && selectedShopId == null) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError = 'No authorized shop is available. Please retry.';
+        });
+      }
+      return;
+    }
+    final currentShopId =
+        authenticated ? selectedShopId! : ref.read(shopProvider).currentShop.id;
     final identitySource =
         ref.read(createMeasurementPointRequestIdentitySourceProvider);
     final pending = identitySource.pending;
-    final requestShopId = pending?.shopId ?? currentShop.id;
+    final requestShopId = pending?.shopId ?? currentShopId;
     final requestName = pending?.name ?? _nameController.text;
     final requestIdentity = identitySource.identityFor(
       shopId: requestShopId,
@@ -84,13 +100,13 @@ class _CreateMeasurementPointScreenState
           );
       createdName = point.name;
       identitySource.complete(requestIdentity);
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
@@ -101,12 +117,18 @@ class _CreateMeasurementPointScreenState
     setState(() {
       _isSubmitting = false;
     });
-    context.pop(createdName);
+    await retryAdminOverview(ref);
+    if (mounted) context.pop(createdName);
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentShop = ref.watch(shopProvider).currentShop;
+    final authenticated = ref.watch(authControllerProvider).isAuthenticated;
+    final shops = authenticated ? ref.watch(shopsProvider) : null;
+    final selectedShop = authenticated ? selectedAdminShop(shops!) : null;
+    final currentShopName = authenticated
+        ? (selectedShop?.name ?? 'No authorized shop')
+        : ref.watch(shopProvider).currentShop.name;
     final hasPendingUnresolvedRequest =
         ref.read(createMeasurementPointRequestIdentitySourceProvider).pending !=
             null;
@@ -123,7 +145,7 @@ class _CreateMeasurementPointScreenState
             child: ListView(
               padding: const EdgeInsets.all(20),
               children: [
-                Text('Site: ${currentShop.name}'),
+                Text('Site: $currentShopName'),
                 const SizedBox(height: 20),
                 TextFormField(
                   key: const Key('measurement-point-name-field'),
@@ -140,6 +162,15 @@ class _CreateMeasurementPointScreenState
                   onFieldSubmitted: (_) => _submit(),
                 ),
                 const SizedBox(height: 16),
+                if (authenticated && selectedShop == null) ...[
+                  const Text('No authorized shop is available.'),
+                  const SizedBox(height: 12),
+                  OutlinedButton(
+                    onPressed: () => retryAdminOverview(ref),
+                    child: const Text('Retry'),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 if (_submissionError case final error?) ...[
                   Text(
                     error,
@@ -151,7 +182,10 @@ class _CreateMeasurementPointScreenState
                   const SizedBox(height: 16),
                 ],
                 FilledButton(
-                  onPressed: _isSubmitting ? null : _submit,
+                  onPressed:
+                      _isSubmitting || (authenticated && selectedShop == null)
+                          ? null
+                          : _submit,
                   child: _isSubmitting
                       ? const SizedBox.square(
                           dimension: 20,

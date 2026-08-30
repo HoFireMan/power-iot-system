@@ -37,9 +37,13 @@ type ScopeSnapshot struct {
 // is typed deliberately so callers cannot smuggle an arbitrary authorization
 // map into command behavior.
 type ActorContext struct {
-	ActorID  uint
-	ScopeKey string
-	Scope    ScopeSnapshot
+	ActorID uint
+	// SessionID is populated by the HTTP adapter from the authenticated
+	// session. Direct application/domain callers may leave it nil; those
+	// trusted test actors retain their existing boundary.
+	SessionID uuid.UUID
+	ScopeKey  string
+	Scope     ScopeSnapshot
 }
 
 // DeviceRef is the only identity input accepted by binding commands. The
@@ -247,8 +251,16 @@ func (ref DeviceRef) Validate() error {
 	if ref.DeviceID != nil && *ref.DeviceID == 0 {
 		return NewDomainError(ErrInvalidRequest, "device ID must be non-zero")
 	}
-	if ref.SerialNumber != nil && strings.TrimSpace(*ref.SerialNumber) == "" {
-		return NewDomainError(ErrInvalidSerial, "serial number must be non-empty")
+	if ref.SerialNumber != nil {
+		trimmed := strings.TrimSpace(*ref.SerialNumber)
+		if trimmed == "" {
+			return NewDomainError(ErrInvalidSerial, "serial number must be non-empty")
+		}
+		// Reject rather than silently changing the lookup key. Authorization
+		// and execution must always address the same serial value.
+		if trimmed != *ref.SerialNumber {
+			return NewDomainError(ErrInvalidSerial, "serial number must not contain surrounding whitespace")
+		}
 	}
 	if ref.MAC != nil && !isCanonicalMAC(*ref.MAC) {
 		return NewDomainError(ErrMalformedMAC, "MAC must be uppercase 12-hex without separators")

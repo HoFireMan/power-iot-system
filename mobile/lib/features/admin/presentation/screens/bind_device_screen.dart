@@ -5,8 +5,11 @@ import 'package:go_router/go_router.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/models/device_ref.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
 import '../../../shops/providers/shop_provider.dart';
+import '../../../auth/auth_controller.dart';
 
 class BindDeviceScreen extends ConsumerStatefulWidget {
   const BindDeviceScreen({super.key});
@@ -56,13 +59,13 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
               measurementPointId: _selectedMeasurementPointId!,
             ),
           );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
@@ -74,14 +77,19 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
       _isSubmitting = false;
     });
     ref.read(bindDeviceRequestIdentitySourceProvider).complete(requestIdentity);
-    ref.invalidate(adminOverviewProvider);
+    await retryAdminOverview(ref);
+    if (!mounted) return;
     context.pop(true);
   }
 
   @override
   Widget build(BuildContext context) {
     final overview = ref.watch(adminOverviewProvider);
-    final currentShop = ref.watch(shopProvider).currentShop;
+    final authenticated = ref.watch(authControllerProvider).isAuthenticated;
+    final shops = authenticated ? ref.watch(shopsProvider) : null;
+    final siteName = authenticated
+        ? (selectedAdminShop(shops!)?.name ?? 'No authorized shop')
+        : ref.watch(shopProvider).currentShop.name;
 
     return PopScope(
       canPop: !_isSubmitting,
@@ -91,11 +99,23 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
           child: overview.when(
             loading: () => const Center(child: Text('Loading admin overview…')),
             error: (error, stackTrace) => Center(
-              child: Text('Unable to load admin overview: $error'),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(adminErrorMessage(
+                    error,
+                    'Unable to load admin overview. Please retry.',
+                  )),
+                  OutlinedButton(
+                    onPressed: () => retryAdminOverview(ref),
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
             ),
             data: (data) => _BindForm(
               overview: data,
-              siteName: currentShop.name,
+              siteName: siteName,
               formKey: _formKey,
               selectedSerialNumber: _selectedSerialNumber,
               selectedMeasurementPointId: _selectedMeasurementPointId,

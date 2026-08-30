@@ -7,6 +7,7 @@ import '../../domain/models/device_assignment.dart';
 import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
 
 class RelocateDeviceScreen extends ConsumerStatefulWidget {
@@ -61,13 +62,13 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
               targetMeasurementPointId: _selectedTargetMeasurementPointId!,
             ),
           );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
@@ -79,7 +80,8 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
     ref
         .read(relocateDeviceRequestIdentitySourceProvider)
         .complete(requestIdentity);
-    ref.invalidate(adminOverviewProvider);
+    await retryAdminOverview(ref);
+    if (!mounted) return;
     context.pop(true);
   }
 
@@ -95,7 +97,19 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
           child: overview.when(
             loading: () => const Center(child: Text('Loading admin overview…')),
             error: (error, stackTrace) => Center(
-              child: Text('Unable to load admin overview: $error'),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(adminErrorMessage(
+                    error,
+                    'Unable to load admin overview. Please retry.',
+                  )),
+                  OutlinedButton(
+                    onPressed: () => retryAdminOverview(ref),
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
             ),
             data: (data) => _buildData(context, data),
           ),

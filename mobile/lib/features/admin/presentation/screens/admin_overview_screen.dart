@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
 
 class AdminOverviewScreen extends ConsumerWidget {
@@ -13,28 +14,42 @@ class AdminOverviewScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final overview = ref.watch(adminOverviewProvider);
+    Future<void> retryOverview() => retryAdminOverview(ref);
+
+    // Compatibility routes are used only when the current router explicitly
+    // mounted the legacy path. Standalone/test composition remains usable.
+    var legacyMockRoute = false;
+    try {
+      legacyMockRoute =
+          GoRouterState.of(context).uri.path.startsWith('/admin/mock');
+    } on GoError {
+      // No router state means no navigation has been requested yet.
+    }
+    final routePrefix = legacyMockRoute ? '/admin/mock' : '/admin';
 
     Future<void> createMeasurementPoint() async {
       final createdName = await context.push<String>(
-        '/admin/mock/create-measurement-point',
+        '$routePrefix/create-measurement-point',
       );
       if (createdName == null || !context.mounted) {
         return;
       }
 
-      ref.invalidate(adminOverviewProvider);
+      await retryAdminOverview(ref);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Measurement Point created: $createdName')),
       );
     }
 
     Future<void> bindDevice() async {
-      final bound = await context.push<bool>('/admin/mock/bind-device');
+      final bound = await context.push<bool>('$routePrefix/bind-device');
       if (bound != true || !context.mounted) {
         return;
       }
 
-      ref.invalidate(adminOverviewProvider);
+      await retryAdminOverview(ref);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Device bound successfully.')),
       );
@@ -42,13 +57,14 @@ class AdminOverviewScreen extends ConsumerWidget {
 
     Future<void> replaceDevice(String assignmentId) async {
       final replaced = await context.push<bool>(
-        '/admin/mock/replace-device/$assignmentId',
+        '$routePrefix/replace-device/$assignmentId',
       );
       if (replaced != true || !context.mounted) {
         return;
       }
 
-      ref.invalidate(adminOverviewProvider);
+      await retryAdminOverview(ref);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Device replaced successfully.')),
       );
@@ -56,13 +72,14 @@ class AdminOverviewScreen extends ConsumerWidget {
 
     Future<void> relocateDevice(String assignmentId) async {
       final relocated = await context.push<bool>(
-        '/admin/mock/relocate-device/$assignmentId',
+        '$routePrefix/relocate-device/$assignmentId',
       );
       if (relocated != true || !context.mounted) {
         return;
       }
 
-      ref.invalidate(adminOverviewProvider);
+      await retryAdminOverview(ref);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Device relocated successfully.')),
       );
@@ -70,13 +87,14 @@ class AdminOverviewScreen extends ConsumerWidget {
 
     Future<void> unbindDevice(String assignmentId) async {
       final unbound = await context.push<bool>(
-        '/admin/mock/unbind-device/$assignmentId',
+        '$routePrefix/unbind-device/$assignmentId',
       );
       if (unbound != true || !context.mounted) {
         return;
       }
 
-      ref.invalidate(adminOverviewProvider);
+      await retryAdminOverview(ref);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Device unbound successfully.')),
       );
@@ -90,7 +108,20 @@ class AdminOverviewScreen extends ConsumerWidget {
             child: Text('Loading admin overview…'),
           ),
           error: (error, stackTrace) => Center(
-            child: Text('Unable to load admin overview: $error'),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(adminErrorMessage(
+                  error,
+                  'Unable to load admin overview. Please retry.',
+                )),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: retryOverview,
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
           ),
           data: (data) => _OverviewContent(
             overview: data,
