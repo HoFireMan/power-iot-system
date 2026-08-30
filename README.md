@@ -26,14 +26,14 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | Billing estimate | ✅ Development implemented / verified |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | User authentication/session/JWT | ✅ Development implemented / verified |
-| Scoped-admin Shop/Billing authorization | ✅ Development implemented / verified |
-| Public Admin Device Binding HTTP API | 🕒 Planned |
+| Scoped-admin Shop/Billing/Device Binding authorization | ✅ Development implemented / verified |
+| Authenticated Admin Device Binding HTTP API | ✅ Development implemented / verified |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
 | Local Runtime Operator | ✅ Accepted / merged / ready for use |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
 | Production hardening | 🕒 Planned |
 
-Scoped-admin authorization is limited to verified Shop/Billing mutations; it does not establish global-admin authorization. Full Device Binding transport integration remains incomplete, and no public Admin Device Binding HTTP API is implemented.
+Scoped-admin authorization covers verified Shop, Billing, and Admin Device Binding lifecycle mutations; it does not establish global-admin authorization. The Admin Device Binding HTTP API is authenticated and Shop-scoped: User → UserShopRelation → Shop → Client remains the authority chain. `is_admin` does not bypass Shop scope, `CurrentShopID` is preference-only, and `Device.ShopID` is not authorization authority.
 
 目前的驗證成熟度是 development/local system integration；上述完成項目不代表 production-ready 或 physical hardware validation complete。
 
@@ -72,7 +72,7 @@ MeasurementPoint 是持續存在的邏輯量測位置；Device 可被替換、�
 - PostgreSQL deduplication 與 TimescaleDB telemetry storage
 - persistence 成功後的 Stored / Duplicate ACK
 - 依歷史 MeasurementPoint attribution 處理延遲 telemetry
-- Admin Device binding、replacement、relocation、unbind 的 Backend transaction foundation
+- authenticated Shop-scoped Admin Device Binding HTTP lifecycle: Create Measurement Point, Bind, Replace, Relocate, and Unbind, with real Flutter integration and authoritative refresh
 - Device Simulator，支援無實體設備時的系統端驗證
 
 ## Technology Stack
@@ -131,7 +131,7 @@ README.md                public project introduction
    MQTT_CA_FILE=../infrastructure/mosquitto/certs/ca.crt go run ./cmd/server
    ```
 
-   Server 會連線資料庫、執行 embedded versioned SQL migrations，再啟動 MQTT client 與 HTTP server。根路徑 health endpoint 為 `GET /`；目前沒有公開 Admin Device Binding API。已註冊的 read 與 scoped-admin routes 見 Backend Interface Inventory。
+   Server 會連線資料庫、執行 embedded versioned SQL migrations，再啟動 MQTT client 與 HTTP server。根路徑 health endpoint 為 `GET /`；authenticated Admin Device Binding HTTP API routes require authenticated scoped-admin authorization。已註冊的 read 與 scoped-admin routes 見 Backend Interface Inventory。
 
 For an already-provisioned local workstation, normal Power-IoT lifecycle
 operations should prefer `./scripts/local-runtime.sh`. The manual Docker,
@@ -306,7 +306,7 @@ Telemetry availability is independent from Carbon availability and Billing estim
 
 ## Backend Interface Inventory
 
-The current server composition exposes 12 HTTP routes: `GET /` is public liveness/readiness (including database and MQTT state); public authentication routes are `POST /api/v1/auth/login` and `POST /api/v1/auth/refresh`; authenticated routes are logout, profile, shop listing, dashboard, measurement-point detail, billing configuration read, and billing estimate; scoped-admin mutations are `PATCH /api/v1/shops/:shopId` and `PUT /api/v1/shops/:shopId/billing/configuration`. Shop reads require an active Shop and an explicit `UserShopRelation`. Admin status does not bypass Shop scope, and `CurrentShopID` is only current-view preference state.
+The current server composition exposes 17 registered HTTP routes: public liveness is `GET /`; public authentication routes are `POST /api/v1/auth/login` and `POST /api/v1/auth/refresh`; authenticated routes include `POST /api/v1/auth/logout`, `GET /api/v1/me`, `GET /api/v1/shops`, `GET /api/v1/shops/:shopId/dashboard`, `GET /api/v1/shops/:shopId/measurement-points/:measurementPointRef`, `GET /api/v1/shops/:shopId/billing/configuration`, `PUT /api/v1/shops/:shopId/billing/configuration`, `GET /api/v1/shops/:shopId/billing/estimate`, and `PATCH /api/v1/shops/:shopId`. The authenticated, scoped-admin Admin Device Binding surface is `POST /api/v1/admin/measurement-points` (Create Measurement Point), `GET /api/v1/admin/device-bindings` (bounded workflow overview), `POST /api/v1/admin/device-bindings` (Bind), `POST /api/v1/admin/device-bindings/:assignmentId/replace` (Replace), `POST /api/v1/admin/device-bindings/:assignmentId/relocate` (Relocate), and `POST /api/v1/admin/device-bindings/:assignmentId/unbind` (Unbind). Shop reads and Admin Binding operations require server-verified Shop membership and Client ownership; `is_admin` does not bypass Shop scope, and `CurrentShopID` is only current-view preference state.
 
 MQTT requires TLS (`tls://`, TLS 1.2 minimum). The Backend subscribes to `device/upload/data` and `device/+/status`, publishes telemetry application ACKs to `device/{MAC}/telemetry/ack`, and distinguishes those ACKs from MQTT transport QoS. Device identity is the normalized uppercase MAC; protocol v1 uses `boot_counter` plus `seq` for identity/deduplication and may carry coverage interval fields. The canonical local simulator is `tools/device-simulator` and requires a successful application ACK, not only broker connectivity.
 
@@ -473,7 +473,7 @@ dart format --output=none --set-exit-if-changed .
 
 ## Mobile
 
-Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard and the Measurement Point Detail read path. Device Binding remains a backend transaction foundation rather than a public Admin Device Binding API. Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。Current accepted development capabilities include Dashboard daily/monthly energy, Dashboard Carbon summary, Shop tariff classification, Billing V1 configuration, historical energy/coverage, and billing estimates; these are system-integration capabilities, not an official utility bill. This does not imply production deployment/readiness or physical hardware validation. Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
+Flutter UI 已包含 login、dashboard、devices、shops、profile 與 alert 相關畫面，並使用 Riverpod 與 GoRouter。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard、Measurement Point Detail read path，以及 authenticated Shop-scoped Admin Device Binding lifecycle integration。Flutter Admin flow 支援 Create Measurement Point、Bind、Replace、Relocate、Unbind，並在成功 mutation 後以 authoritative Backend refresh reconciliation；request identity retry safety 與 local double-submit serialization 也已驗證。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。Current accepted development capabilities include Dashboard daily/monthly energy, Dashboard Carbon summary, Shop tariff classification, Billing V1 configuration, historical energy/coverage, and billing estimates; these are system-integration capabilities, not an official utility bill. This does not imply production deployment/readiness or physical hardware validation. Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。BLE provisioning、QR flow 與離線快取仍未完成。
 
 ## Firmware Boundary
 
