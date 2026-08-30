@@ -7,6 +7,7 @@ import '../../domain/models/device_assignment.dart';
 import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
 
 class RelocateDeviceScreen extends ConsumerStatefulWidget {
@@ -26,6 +27,7 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
   String? _selectedTargetMeasurementPointId;
   String? _submissionError;
   bool _isSubmitting = false;
+  bool _isCommitted = false;
   final _formKey = GlobalKey<FormState>();
 
   @override
@@ -39,7 +41,7 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
   }
 
   Future<void> _submit(DeviceAssignment current) async {
-    if (_isSubmitting || !_formKey.currentState!.validate()) {
+    if (_isSubmitting || _isCommitted || !_formKey.currentState!.validate()) {
       return;
     }
 
@@ -61,26 +63,48 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
               targetMeasurementPointId: _selectedTargetMeasurementPointId!,
             ),
           );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
 
-    if (!mounted) {
-      return;
-    }
-    setState(() => _isSubmitting = false);
     ref
         .read(relocateDeviceRequestIdentitySourceProvider)
         .complete(requestIdentity);
-    ref.invalidate(adminOverviewProvider);
-    context.pop(true);
+    _isCommitted = true;
+    if (!mounted) return;
+    await _reconcileCommitted();
+  }
+
+  Future<void> _reconcileCommitted() async {
+    try {
+      await retryAdminOverview(ref);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError =
+              'Device relocated, but the latest view could not be loaded.';
+        });
+      }
+      return;
+    }
+    if (mounted) context.pop(true);
+  }
+
+  Future<void> _retryReconciliation() async {
+    if (!_isCommitted || _isSubmitting) return;
+    setState(() {
+      _isSubmitting = true;
+      _submissionError = null;
+    });
+    await _reconcileCommitted();
   }
 
   @override
@@ -88,15 +112,29 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
     final overview = ref.watch(adminOverviewProvider);
 
     return PopScope(
-      canPop: !_isSubmitting,
+      canPop: !_isSubmitting && !_isCommitted,
       child: Scaffold(
         appBar: AppBar(title: const Text('Relocate Device')),
         body: SafeArea(
           child: overview.when(
             loading: () => const Center(child: Text('Loading admin overview…')),
-            error: (error, stackTrace) => Center(
-              child: Text('Unable to load admin overview: $error'),
-            ),
+            error: (error, stackTrace) => _isCommitted
+                ? _reconciliationError(context)
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(adminErrorMessage(
+                          error,
+                          'Unable to load admin overview. Please retry.',
+                        )),
+                        OutlinedButton(
+                          onPressed: () => retryAdminOverview(ref),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
             data: (data) => _buildData(context, data),
           ),
         ),
@@ -147,8 +185,29 @@ class _RelocateDeviceScreenState extends ConsumerState<RelocateDeviceScreen> {
       onTargetChanged: (value) =>
           setState(() => _selectedTargetMeasurementPointId = value),
       onSubmit: () => _submit(current!),
+      isCommitted: _isCommitted,
+      onRetryReconciliation: _retryReconciliation,
     );
   }
+
+  Widget _reconciliationError(BuildContext context) => Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _submissionError ??
+                  'Device relocated, but the latest view could not be loaded.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            OutlinedButton(
+              key: const Key('relocate-refresh-retry-button'),
+              onPressed: _isSubmitting ? null : _retryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
+          ],
+        ),
+      );
 
   DeviceInventory? _findDevice(AdminOverview overview, String deviceId) {
     for (final device in overview.devices) {
@@ -183,6 +242,8 @@ class _RelocateForm extends StatelessWidget {
     required this.isSubmitting,
     required this.onTargetChanged,
     required this.onSubmit,
+    required this.isCommitted,
+    required this.onRetryReconciliation,
   });
 
   final DeviceInventory currentDevice;
@@ -194,6 +255,8 @@ class _RelocateForm extends StatelessWidget {
   final bool isSubmitting;
   final ValueChanged<String?> onTargetChanged;
   final VoidCallback onSubmit;
+  final bool isCommitted;
+  final VoidCallback onRetryReconciliation;
 
   @override
   Widget build(BuildContext context) {
@@ -216,7 +279,7 @@ class _RelocateForm extends StatelessWidget {
             key: const Key('relocate-target-field'),
             value: selectedTargetMeasurementPointId,
             options: targetPoints,
-            enabled: !isSubmitting,
+            enabled: !isSubmitting && !isCommitted,
             onChanged: onTargetChanged,
           ),
           const SizedBox(height: 16),
@@ -227,9 +290,15 @@ class _RelocateForm extends StatelessWidget {
             ),
             const SizedBox(height: 16),
           ],
+          if (isCommitted && submissionError != null)
+            OutlinedButton(
+              key: const Key('relocate-refresh-retry-button'),
+              onPressed: isSubmitting ? null : onRetryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
           FilledButton(
             key: const Key('relocate-submit-button'),
-            onPressed: isSubmitting ? null : onSubmit,
+            onPressed: isSubmitting || isCommitted ? null : onSubmit,
             child: isSubmitting
                 ? const SizedBox.square(
                     dimension: 20,

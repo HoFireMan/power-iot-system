@@ -12,6 +12,7 @@ import 'package:power_iot_app/features/admin/domain/repositories/admin_overview_
 import 'package:power_iot_app/features/admin/presentation/providers/admin_overview_provider.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/admin_overview_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/create_measurement_point_screen.dart';
+import 'package:power_iot_app/features/auth/auth_controller.dart';
 import 'package:power_iot_app/features/shops/providers/shop_provider.dart';
 
 void main() {
@@ -124,6 +125,57 @@ void main() {
     expect(source.pending?.name, 'Kitchen Circuit');
   });
 
+  test('auth epoch clears every root lifecycle identity source', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    final create = container.read(
+      createMeasurementPointRequestIdentitySourceProvider,
+    );
+    final bind = container.read(bindDeviceRequestIdentitySourceProvider);
+    final replace = container.read(replaceDeviceRequestIdentitySourceProvider);
+    final relocate =
+        container.read(relocateDeviceRequestIdentitySourceProvider);
+    final unbind = container.read(unbindDeviceRequestIdentitySourceProvider);
+
+    final createIdentity = create.identityFor(shopId: 's1', name: 'Kitchen');
+    final bindIdentity =
+        bind.identityFor(serialNumber: 'SN-1', measurementPointId: 'p1');
+    final replaceIdentity =
+        replace.identityFor(currentAssignmentId: 'a1', serialNumber: 'SN-2');
+    final relocateIdentity = relocate.identityFor(
+      currentAssignmentId: 'a1',
+      targetMeasurementPointId: 'p2',
+    );
+    final unbindIdentity =
+        unbind.identityFor(currentAssignmentId: 'a1', reason: 'retire');
+
+    container.read(authClientProvider).beginSession();
+
+    expect(create.pending, isNull);
+    expect(bind.pending, isNull);
+    expect(replace.pending, isNull);
+    expect(relocate.pending, isNull);
+    expect(unbind.pending, isNull);
+    expect(create.identityFor(shopId: 's1', name: 'Kitchen'),
+        isNot(createIdentity));
+    expect(bind.identityFor(serialNumber: 'SN-1', measurementPointId: 'p1'),
+        isNot(bindIdentity));
+    expect(
+      replace.identityFor(currentAssignmentId: 'a1', serialNumber: 'SN-2'),
+      isNot(replaceIdentity),
+    );
+    expect(
+      relocate.identityFor(
+        currentAssignmentId: 'a1',
+        targetMeasurementPointId: 'p2',
+      ),
+      isNot(relocateIdentity),
+    );
+    expect(unbind.identityFor(currentAssignmentId: 'a1', reason: 'retire'),
+        isNot(unbindIdentity));
+  });
+
   test('changed create command gets a new identity', () {
     final source = MockCreateMeasurementPointRequestIdentitySource();
 
@@ -134,6 +186,70 @@ void main() {
     expect(changedIdentity, isNot(firstIdentity));
     expect(source.pending?.requestIdentity, changedIdentity);
     expect(source.pending?.name, 'Kitchen Circuit');
+  });
+
+  test(
+      'explicit create start-over abandons pending identity and allocates new one',
+      () {
+    final source = MockCreateMeasurementPointRequestIdentitySource();
+    final firstIdentity = source.identityFor(shopId: 's1', name: 'Kitchen');
+
+    source.abandon();
+    final newIdentity = source.identityFor(shopId: 's1', name: 'Kitchen');
+
+    expect(newIdentity, isNot(firstIdentity));
+    expect(source.pending?.requestIdentity, newIdentity);
+  });
+
+  testWidgets('explicit start-over restores editing and navigation',
+      (tester) async {
+    final repository = _RecordingCreationRepository()..failNextCreation = true;
+    final identitySource = MockCreateMeasurementPointRequestIdentitySource();
+    final container = ProviderContainer(
+      overrides: [
+        adminOverviewRepositoryProvider.overrideWithValue(repository),
+        createMeasurementPointRequestIdentitySourceProvider
+            .overrideWithValue(identitySource),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      _RouterTestApp(
+        router: _createAdminRouter(),
+        providerContainer: container,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Create Measurement Point'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('measurement-point-name-field')),
+      'Start Over Point',
+    );
+    await tester.tap(find.text('Create Measurement Point'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Unable to create Measurement Point. Please try again.'),
+        findsOneWidget);
+    final firstIdentity = identitySource.pending?.requestIdentity;
+    expect(firstIdentity, isNotNull);
+    await tester
+        .tap(find.byKey(const Key('create-measurement-point-start-over')));
+    await tester.pump();
+
+    expect(identitySource.pending, isNull);
+    expect(
+      tester
+          .widget<TextFormField>(
+            find.byKey(const Key('measurement-point-name-field')),
+          )
+          .enabled,
+      isTrue,
+    );
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Admin Overview'), findsOneWidget);
   });
 
   test('response-loss retry through a recreated consumer does not duplicate',
@@ -250,6 +366,8 @@ void main() {
       find.widgetWithText(FilledButton, 'Create Measurement Point'),
     );
     expect(retryButton.onPressed, isNotNull);
+    expect(find.byKey(const Key('create-measurement-point-start-over')),
+        findsOneWidget);
 
     await tester.pageBack();
     await tester.pumpAndSettle();

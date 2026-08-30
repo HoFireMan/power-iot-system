@@ -71,6 +71,9 @@ func newTelemetryFixture(t *testing.T, db *gorm.DB) telemetryFixture {
 	if err := db.Create(&fixture.shop).Error; err != nil {
 		t.Fatal(err)
 	}
+	ownerClientID := fixture.client.ID
+	fixture.first.InventoryOwnerClientID = &ownerClientID
+	fixture.second.InventoryOwnerClientID = &ownerClientID
 	fixture.point.ShopID = fixture.shop.ID
 	fixture.other.ShopID = fixture.shop.ID
 	fixture.first.ShopID = fixture.shop.ID

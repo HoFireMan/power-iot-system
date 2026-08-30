@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -335,6 +339,119 @@ func (e *Executor) run(ctx context.Context, action domain.BindingAction, key str
 	return result, domain.NewDomainError(domain.ErrConcurrentTransition, "transaction could not be serialized")
 }
 
+func sortedUniqueUintIDs(ids []uint) []uint {
+	sorted := append([]uint(nil), ids...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	if len(sorted) < 2 {
+		return sorted
+	}
+	unique := sorted[:1]
+	for _, id := range sorted[1:] {
+		if id != unique[len(unique)-1] {
+			unique = append(unique, id)
+		}
+	}
+	return unique
+}
+
+func revalidateAdminActor(tx *gorm.DB, actor domain.ActorContext) error {
+	// These are authorization facts, not ordinary reads. FOR SHARE keeps a
+	// revocation, deactivation, or ownership change from committing between
+	// revalidation and the mutation (or an idempotent replay) in this tx.
+	var auth struct {
+		IsAdmin bool
+	}
+	user := tx.Raw("SELECT is_admin FROM users WHERE id = ? AND auth_enabled = TRUE FOR SHARE", actor.ActorID).Scan(&auth)
+	if user.Error != nil {
+		return domain.NewDomainError(domain.ErrPersistenceFailure, "admin authorization revalidation failed")
+	}
+	if user.RowsAffected != 1 {
+		return domain.NewDomainError(domain.ErrOperationForbidden, "admin access required")
+	}
+	if !auth.IsAdmin {
+		return domain.NewDomainError(domain.ErrOperationForbidden, "admin access required")
+	}
+	clientText := strings.TrimPrefix(actor.Scope.TenantKey, "client:")
+	clientID, parseErr := strconv.ParseUint(clientText, 10, 64)
+	if parseErr != nil || clientID == 0 || uint64(uint(clientID)) != clientID {
+		return domain.NewDomainError(domain.ErrTenantScopeDenied, "authoritative Client scope is required")
+	}
+	// Relation and Shop locks must be acquired in deterministic order. This is
+	// especially important when concurrent cross-Shop Relocate requests overlap.
+	for _, shopID := range sortedUniqueUintIDs(actor.Scope.ShopIDs) {
+		var relation struct {
+			ClientID uint
+		}
+		query := tx.Raw(`SELECT s.client_id
+			FROM user_shop_relations r
+			JOIN shops s ON s.id = r.shop_id
+			WHERE r.user_id = ? AND r.shop_id = ? AND s.client_id = ? AND s.is_active = TRUE
+			FOR SHARE OF r, s`, actor.ActorID, shopID, uint(clientID)).Scan(&relation)
+		if query.Error != nil {
+			return domain.NewDomainError(domain.ErrPersistenceFailure, "admin scope revalidation failed")
+		}
+		if query.RowsAffected != 1 {
+			return domain.NewDomainError(domain.ErrSiteScopeDenied, "actor has no authoritative UserShopRelation for Shop")
+		}
+	}
+	deviceIDs := append([]uint(nil), actor.Scope.DeviceIDs...)
+	sort.Slice(deviceIDs, func(i, j int) bool { return deviceIDs[i] < deviceIDs[j] })
+	for i := 1; i < len(deviceIDs); i++ {
+		if deviceIDs[i] == deviceIDs[i-1] {
+			deviceIDs = append(deviceIDs[:i], deviceIDs[i+1:]...)
+			i--
+		}
+	}
+	for _, deviceID := range deviceIDs {
+		var device struct {
+			InventoryOwnerClientID sql.NullInt64
+		}
+		query := tx.Raw("SELECT inventory_owner_client_id FROM devices WHERE id = ? FOR SHARE", deviceID).Scan(&device)
+		if query.Error != nil {
+			return domain.NewDomainError(domain.ErrPersistenceFailure, "inventory authority revalidation failed")
+		}
+		if query.RowsAffected != 1 {
+			return domain.NewDomainError(domain.ErrDeviceNotFound, "device was not found")
+		}
+		// HTTP authorization requires a resolved, positive inventory owner. A
+		// NULL owner is not an implicit legacy owner and must fail closed.
+		if !device.InventoryOwnerClientID.Valid || device.InventoryOwnerClientID.Int64 <= 0 || uint64(device.InventoryOwnerClientID.Int64) != clientID {
+			return domain.NewDomainError(domain.ErrDeviceScopeDenied, "Device inventory owner is unavailable")
+		}
+	}
+	return nil
+}
+
+func revalidateAdminSession(tx *gorm.DB, actor domain.ActorContext) error {
+	// HTTP actors carry the authenticated session UUID. Locking this row in
+	// the same transaction as replay/mutation closes the logout race and makes
+	// a revoked or expired session unable to replay an old operation.
+	if actor.SessionID == uuid.Nil {
+		return nil
+	}
+	var session struct {
+		UserID uint
+	}
+	// Materialize the locked row before evaluating expiration. This makes the
+	// volatile clock_timestamp() check run after any wait to acquire FOR UPDATE,
+	// rather than using a timestamp evaluated against a stale pre-wait row.
+	query := tx.Raw(`WITH locked_session AS MATERIALIZED (
+		SELECT user_id, expires_at
+		FROM refresh_sessions
+		WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+		FOR UPDATE
+	)
+	SELECT user_id FROM locked_session
+	WHERE expires_at > clock_timestamp()`, actor.SessionID, actor.ActorID).Scan(&session)
+	if query.Error != nil {
+		return domain.NewDomainError(domain.ErrPersistenceFailure, "session revalidation failed")
+	}
+	if query.RowsAffected != 1 {
+		return domain.NewDomainError(domain.ErrAuthenticationRequired, "authenticated session is no longer valid")
+	}
+	return nil
+}
+
 func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domain.BindingAction, key string, actor domain.ActorContext, hash []byte, resolveClient operationClientResolver, work func(*gorm.DB, domain.AdminBindingOperation) (domain.AdminBindingResult, error)) (domain.AdminBindingResult, error) {
 	ctx = normalizeExecutionContext(ctx)
 	if tx == nil {
@@ -346,6 +463,17 @@ func (e *Executor) executeClaimed(ctx context.Context, tx *gorm.DB, action domai
 	// must occur only after the shared fence is held.
 	if err := migrations.AcquireSharedWriterFenceOnGORM(ctx, tx); err != nil {
 		return domain.AdminBindingResult{}, domain.NewDomainError(domain.ErrPersistenceFailure, "shared writer admission failed")
+	}
+	// HTTP admin actors use a server-derived scope key. Revalidate live admin
+	// status and every relation in this transaction before replay lookup; a
+	// revoked relation must never receive a previously committed response.
+	if strings.HasPrefix(actor.ScopeKey, "admin-binding:") {
+		if err := revalidateAdminSession(tx, actor); err != nil {
+			return domain.AdminBindingResult{}, err
+		}
+		if err := revalidateAdminActor(tx, actor); err != nil {
+			return domain.AdminBindingResult{}, err
+		}
 	}
 	// Replay lookup is the only read before authority planning. New operations
 	// carry authoritative Client provenance at INSERT time, so the same writer

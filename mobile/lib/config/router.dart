@@ -68,6 +68,33 @@ GoRouter createRouter(AuthController auth) => GoRouter(
           builder: (context, state) => const ShopListScreen(),
         ),
         GoRoute(
+          path: '/admin',
+          builder: (context, state) => const AdminOverviewScreen(),
+        ),
+        GoRoute(
+          path: '/admin/create-measurement-point',
+          builder: (context, state) => const CreateMeasurementPointScreen(),
+        ),
+        GoRoute(
+          path: '/admin/bind-device',
+          builder: (context, state) => const BindDeviceScreen(),
+        ),
+        GoRoute(
+          path: '/admin/replace-device/:assignmentId',
+          builder: (context, state) => ReplaceDeviceScreen(
+              assignmentId: state.pathParameters['assignmentId']!),
+        ),
+        GoRoute(
+          path: '/admin/relocate-device/:assignmentId',
+          builder: (context, state) => RelocateDeviceScreen(
+              assignmentId: state.pathParameters['assignmentId']!),
+        ),
+        GoRoute(
+          path: '/admin/unbind-device/:assignmentId',
+          builder: (context, state) => UnbindDeviceScreen(
+              assignmentId: state.pathParameters['assignmentId']!),
+        ),
+        GoRoute(
           path: '/admin/mock',
           builder: (context, state) => const AdminOverviewScreen(),
         ),
@@ -119,4 +146,6 @@ bool _isProtectedLocation(String location) =>
     location.startsWith('/shops/') &&
         location.contains('/measurement-points/') ||
     location == '/shops' ||
+    location == '/admin' ||
+    location.startsWith('/admin/') ||
     location.startsWith('/admin/mock');

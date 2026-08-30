@@ -7,6 +7,7 @@ import '../../domain/models/device_assignment.dart';
 import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
 
 class UnbindDeviceScreen extends ConsumerStatefulWidget {
@@ -24,6 +25,7 @@ class _UnbindDeviceScreenState extends ConsumerState<UnbindDeviceScreen> {
 
   final _reasonController = TextEditingController();
   bool _isSubmitting = false;
+  bool _isCommitted = false;
   String? _submissionError;
 
   @override
@@ -42,7 +44,7 @@ class _UnbindDeviceScreenState extends ConsumerState<UnbindDeviceScreen> {
   }
 
   Future<void> _submit(DeviceAssignment current) async {
-    if (_isSubmitting) {
+    if (_isSubmitting || _isCommitted) {
       return;
     }
 
@@ -65,26 +67,48 @@ class _UnbindDeviceScreenState extends ConsumerState<UnbindDeviceScreen> {
               reason: reason,
             ),
           );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
 
-    if (!mounted) {
-      return;
-    }
-    setState(() => _isSubmitting = false);
     ref
         .read(unbindDeviceRequestIdentitySourceProvider)
         .complete(requestIdentity);
-    ref.invalidate(adminOverviewProvider);
-    context.pop(true);
+    _isCommitted = true;
+    if (!mounted) return;
+    await _reconcileCommitted();
+  }
+
+  Future<void> _reconcileCommitted() async {
+    try {
+      await retryAdminOverview(ref);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError =
+              'Device unbound, but the latest view could not be loaded.';
+        });
+      }
+      return;
+    }
+    if (mounted) context.pop(true);
+  }
+
+  Future<void> _retryReconciliation() async {
+    if (!_isCommitted || _isSubmitting) return;
+    setState(() {
+      _isSubmitting = true;
+      _submissionError = null;
+    });
+    await _reconcileCommitted();
   }
 
   @override
@@ -92,15 +116,29 @@ class _UnbindDeviceScreenState extends ConsumerState<UnbindDeviceScreen> {
     final overview = ref.watch(adminOverviewProvider);
 
     return PopScope(
-      canPop: !_isSubmitting,
+      canPop: !_isSubmitting && !_isCommitted,
       child: Scaffold(
         appBar: AppBar(title: const Text('Unbind Device')),
         body: SafeArea(
           child: overview.when(
             loading: () => const Center(child: Text('Loading admin overview…')),
-            error: (error, stackTrace) => Center(
-              child: Text('Unable to load admin overview: $error'),
-            ),
+            error: (error, stackTrace) => _isCommitted
+                ? _reconciliationError(context)
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(adminErrorMessage(
+                          error,
+                          'Unable to load admin overview. Please retry.',
+                        )),
+                        OutlinedButton(
+                          onPressed: () => retryAdminOverview(ref),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
             data: (data) => _buildData(context, data),
           ),
         ),
@@ -137,8 +175,29 @@ class _UnbindDeviceScreenState extends ConsumerState<UnbindDeviceScreen> {
       submissionError: _submissionError,
       isSubmitting: _isSubmitting,
       onSubmit: () => _submit(current!),
+      isCommitted: _isCommitted,
+      onRetryReconciliation: _retryReconciliation,
     );
   }
+
+  Widget _reconciliationError(BuildContext context) => Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _submissionError ??
+                  'Device unbound, but the latest view could not be loaded.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            OutlinedButton(
+              key: const Key('unbind-refresh-retry-button'),
+              onPressed: _isSubmitting ? null : _retryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
+          ],
+        ),
+      );
 
   DeviceInventory? _findDevice(AdminOverview overview, String deviceId) {
     for (final device in overview.devices) {
@@ -170,6 +229,8 @@ class _UnbindForm extends StatelessWidget {
     required this.submissionError,
     required this.isSubmitting,
     required this.onSubmit,
+    required this.isCommitted,
+    required this.onRetryReconciliation,
   });
 
   final DeviceInventory currentDevice;
@@ -178,6 +239,8 @@ class _UnbindForm extends StatelessWidget {
   final String? submissionError;
   final bool isSubmitting;
   final VoidCallback onSubmit;
+  final bool isCommitted;
+  final VoidCallback onRetryReconciliation;
 
   @override
   Widget build(BuildContext context) {
@@ -201,7 +264,7 @@ class _UnbindForm extends StatelessWidget {
         TextField(
           key: const Key('unbind-reason-field'),
           controller: reasonController,
-          enabled: !isSubmitting,
+          enabled: !isSubmitting && !isCommitted,
           maxLines: 3,
           decoration: const InputDecoration(
             labelText: 'Reason (optional)',
@@ -216,9 +279,15 @@ class _UnbindForm extends StatelessWidget {
           ),
           const SizedBox(height: 16),
         ],
+        if (isCommitted && submissionError != null)
+          OutlinedButton(
+            key: const Key('unbind-refresh-retry-button'),
+            onPressed: isSubmitting ? null : onRetryReconciliation,
+            child: const Text('Retry refresh'),
+          ),
         FilledButton(
           key: const Key('unbind-submit-button'),
-          onPressed: isSubmitting ? null : onSubmit,
+          onPressed: isSubmitting || isCommitted ? null : onSubmit,
           child: isSubmitting
               ? const SizedBox.square(
                   dimension: 20,

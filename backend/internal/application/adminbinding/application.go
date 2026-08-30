@@ -267,6 +267,9 @@ func (a *Application) UnbindDevice(ctx context.Context, cmd domain.UnbindDeviceC
 	if err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
+	if err := a.ensureInventoryOwnerClient(ctx, device, clientID); err != nil {
+		return domain.AssignmentTransitionPlan{}, err
+	}
 	if err := a.authorizeRelational(ctx, actor, domain.ActionUnbind, []uint{point.ShopID}, []uint{device.ID}); err != nil {
 		return domain.AssignmentTransitionPlan{}, err
 	}
@@ -468,15 +471,12 @@ func ensureEligibleDevice(device *domain.Device) error {
 	return nil
 }
 
-// ensureInventoryOwnerClient treats a NULL owner as unresolved but not
-// contradictory for a new bind. Any existing authoritative owner must match
+// ensureInventoryOwnerClient requires a resolved, positive inventory owner
+// for every binding transition. Any existing authoritative owner must match
 // the relational path Client; Device.ShopID is intentionally ignored.
 func (a *Application) ensureInventoryOwnerClient(ctx context.Context, device *domain.Device, clientID uint) error {
-	if device == nil || clientID == 0 {
+	if device == nil || clientID == 0 || device.InventoryOwnerClientID == nil || *device.InventoryOwnerClientID == 0 {
 		return domain.NewDomainError(domain.ErrTenantScopeDenied, "authoritative inventory Client is unavailable")
-	}
-	if device.InventoryOwnerClientID == nil {
-		return nil
 	}
 	if *device.InventoryOwnerClientID != clientID {
 		return domain.NewDomainError(domain.ErrTenantScopeDenied, "Device inventory owner belongs to a different Client")

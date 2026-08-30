@@ -1,8 +1,40 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/network/remote_error.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../../data/repositories/mock_admin_overview_repository.dart';
+import '../../../auth/auth_controller.dart';
+import '../../../profile/presentation/providers/profile_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../../shops/domain/models/shop.dart';
+
+/// Resolves the authenticated admin's view shop from the server-authorized
+/// snapshot. The selected shop is a local view preference; the snapshot is
+/// the only authority and its first shop is the safe default when the server
+/// has no current-shop preference.
+Shop? selectedAdminShop(ShopsState state) {
+  final snapshot = state.data;
+  if (state.status != RemoteStatus.success || snapshot == null) {
+    return null;
+  }
+  final selectedId = state.selectedShopId;
+  if (selectedId != null) {
+    for (final shop in snapshot.shops) {
+      if (shop.id == selectedId) return shop;
+    }
+  }
+  // CurrentShopID is only a server-provided view preference. It may select a
+  // Shop for display when that Shop is present in the authorized snapshot, but
+  // it never grants authorization and is never sent as an authority value.
+  for (final shop in snapshot.shops) {
+    if (shop.id == snapshot.currentShopId) return shop;
+  }
+  return snapshot.shops.isEmpty ? null : snapshot.shops.first;
+}
+
+String? selectedAdminShopId(ShopsState state) => selectedAdminShop(state)?.id;
 
 class PendingCreateMeasurementPointRequest {
   const PendingCreateMeasurementPointRequest({
@@ -25,6 +57,14 @@ abstract interface class CreateMeasurementPointRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  /// Drops unresolved identity at an authentication-session boundary.
+  void resetForAuthEpoch();
+
+  /// Explicitly abandons the unresolved command. This is only called by a
+  /// deliberate user start-over action; failed delivery is never cleared
+  /// implicitly.
+  void abandon();
 }
 
 class PendingBindDeviceRequest {
@@ -48,6 +88,9 @@ abstract interface class BindDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  /// Drops unresolved identity at an authentication-session boundary.
+  void resetForAuthEpoch();
 }
 
 class MockCreateMeasurementPointRequestIdentitySource
@@ -89,12 +132,27 @@ class MockCreateMeasurementPointRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void abandon() {
+    _pending = null;
+  }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final createMeasurementPointRequestIdentitySourceProvider =
-    Provider<CreateMeasurementPointRequestIdentitySource>(
-  (ref) => MockCreateMeasurementPointRequestIdentitySource(),
-);
+    Provider<CreateMeasurementPointRequestIdentitySource>((ref) {
+  final source = MockCreateMeasurementPointRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class MockBindDeviceRequestIdentitySource
     implements BindDeviceRequestIdentitySource {
@@ -133,12 +191,22 @@ class MockBindDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final bindDeviceRequestIdentitySourceProvider =
-    Provider<BindDeviceRequestIdentitySource>(
-  (ref) => MockBindDeviceRequestIdentitySource(),
-);
+    Provider<BindDeviceRequestIdentitySource>((ref) {
+  final source = MockBindDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class PendingReplaceDeviceRequest {
   const PendingReplaceDeviceRequest({
@@ -161,6 +229,8 @@ abstract interface class ReplaceDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  void resetForAuthEpoch();
 }
 
 class MockReplaceDeviceRequestIdentitySource
@@ -200,12 +270,22 @@ class MockReplaceDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final replaceDeviceRequestIdentitySourceProvider =
-    Provider<ReplaceDeviceRequestIdentitySource>(
-  (ref) => MockReplaceDeviceRequestIdentitySource(),
-);
+    Provider<ReplaceDeviceRequestIdentitySource>((ref) {
+  final source = MockReplaceDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class PendingRelocateDeviceRequest {
   const PendingRelocateDeviceRequest({
@@ -228,6 +308,8 @@ abstract interface class RelocateDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  void resetForAuthEpoch();
 }
 
 class MockRelocateDeviceRequestIdentitySource
@@ -267,12 +349,22 @@ class MockRelocateDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final relocateDeviceRequestIdentitySourceProvider =
-    Provider<RelocateDeviceRequestIdentitySource>(
-  (ref) => MockRelocateDeviceRequestIdentitySource(),
-);
+    Provider<RelocateDeviceRequestIdentitySource>((ref) {
+  final source = MockRelocateDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class PendingUnbindDeviceRequest {
   const PendingUnbindDeviceRequest({
@@ -295,6 +387,8 @@ abstract interface class UnbindDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  void resetForAuthEpoch();
 }
 
 class MockUnbindDeviceRequestIdentitySource
@@ -336,16 +430,62 @@ class MockUnbindDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final unbindDeviceRequestIdentitySourceProvider =
-    Provider<UnbindDeviceRequestIdentitySource>(
-  (ref) => MockUnbindDeviceRequestIdentitySource(),
-);
+    Provider<UnbindDeviceRequestIdentitySource>((ref) {
+  final source = MockUnbindDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
-final adminOverviewRepositoryProvider = Provider<AdminOverviewRepository>(
-  (ref) => MockAdminOverviewRepository(),
-);
+final adminOverviewRepositoryProvider =
+    Provider<AdminOverviewRepository>((ref) {
+  // Keep unauthenticated preview/tests deterministic; every accepted session
+  // uses the real scoped HTTP projection.
+  if (!ref.watch(authControllerProvider).isAuthenticated) {
+    return MockAdminOverviewRepository();
+  }
+  final shops = ref.watch(shopsProvider);
+  if (shops.status == RemoteStatus.unauthorized) {
+    throw const UnauthorizedException();
+  }
+  if (shops.status == RemoteStatus.error && shops.error != null) {
+    // Preserve the transport error so the screen can apply the existing safe
+    // authorization/validation/conflict/network/server category mapping.
+    throw shops.error!;
+  }
+  final shopId = selectedAdminShopId(shops);
+  // Do not fall back to the legacy mock shop state for authenticated calls.
+  // Until the server-authorized snapshot contains a Shop, no request is
+  // authorized or sent; the screen can expose its retry action instead.
+  if (shopId == null || shopId.trim().isEmpty) {
+    throw StateError('no authorized shop is available');
+  }
+  return RemoteAdminOverviewRepository(ref.watch(authClientProvider), shopId);
+});
+
+/// Reload the authoritative remote Shop snapshot before retrying its dependent
+/// overview. Unauthenticated preview routes continue using their local mock.
+Future<void> retryAdminOverview(WidgetRef ref) async {
+  if (ref.read(authControllerProvider).isAuthenticated) {
+    // Always replace the cached snapshot: a successful response may still be
+    // stale after a revocation or shop membership change.
+    await ref.read(shopsProvider.notifier).load();
+  }
+  // Await the replacement projection rather than merely invalidating it. A
+  // mutation screen remains locked until the authoritative refresh finishes.
+  final refreshedOverview = ref.refresh(adminOverviewProvider.future);
+  await refreshedOverview;
+}
 
 final adminOverviewProvider = FutureProvider<AdminOverview>((ref) {
   return ref.watch(adminOverviewRepositoryProvider).loadOverview();

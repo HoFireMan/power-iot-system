@@ -2,12 +2,25 @@ package adminbinding
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"power-iot-backend/internal/core/domain"
 )
+
+func TestSortedUniqueUintIDsDeterministicallyCopiesInput(t *testing.T) {
+	input := []uint{9, 3, 9, 0, 3, 1}
+	got := sortedUniqueUintIDs(input)
+	want := []uint{0, 1, 3, 9}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sorted unique IDs=%v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(input, []uint{9, 3, 9, 0, 3, 1}) {
+		t.Fatalf("helper mutated input: %v", input)
+	}
+}
 
 func TestCanonicalRequestHashIsStableAndExcludesGeneratedIdentity(t *testing.T) {
 	deviceID := uint(7)

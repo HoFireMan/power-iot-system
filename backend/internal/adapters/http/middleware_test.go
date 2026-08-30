@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"power-iot-backend/internal/adapters/persistence"
 	"power-iot-backend/internal/application/auth"
 	"power-iot-backend/internal/deployment"
 	"power-iot-backend/internal/security"
@@ -138,6 +139,7 @@ func TestMapPublicErrorCapabilities(t *testing.T) {
 		{"validation", ErrValidation, http.StatusBadRequest, "VALIDATION_ERROR"},
 		{"invalid credentials", auth.ErrInvalidCredentials, http.StatusUnauthorized, "INVALID_CREDENTIALS"},
 		{"unauthorized", auth.ErrUnauthorized, http.StatusUnauthorized, "UNAUTHORIZED"},
+		{"overview authentication required", persistence.ErrAdminBindingOverviewAuthenticationRequired, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED"},
 		{"forbidden", ErrForbidden, http.StatusForbidden, "FORBIDDEN"},
 	}
 	for _, tc := range cases {

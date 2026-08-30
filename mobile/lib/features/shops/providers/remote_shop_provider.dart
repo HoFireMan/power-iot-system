@@ -58,11 +58,13 @@ class ShopsNotifier extends StateNotifier<ShopsState> {
   int _request = 0;
   late int _epoch;
   bool _loadAfterAuthentication = false;
+  String? _selectedShopId;
 
   void _authEpochChanged(int epoch) {
     if (!mounted || epoch == _epoch) return;
     _epoch = epoch;
     _request++;
+    _selectedShopId = null;
     _loadAfterAuthentication = !authClient.isLogoutInProgress;
     state = const ShopsState.loading();
   }
@@ -81,13 +83,22 @@ class ShopsNotifier extends StateNotifier<ShopsState> {
   Future<void> load() async {
     final request = ++_request;
     final epoch = authClient.authEpoch;
+    // Loading replaces the remote snapshot, but a local view choice can be
+    // carried across the refresh and retained only if the new snapshot still
+    // authorizes that Shop.
+    final selectedShopId = _selectedShopId ?? state.selectedShopId;
     if (mounted) state = const ShopsState.loading();
     try {
       final shops = await repository.fetchShops();
       if (mounted &&
           request == _request &&
           authClient.isSessionCurrent(epoch)) {
-        state = ShopsState.success(shops);
+        final selected = selectedShopId != null &&
+                shops.shops.any((shop) => shop.id == selectedShopId)
+            ? selectedShopId
+            : null;
+        _selectedShopId = selected;
+        state = ShopsState.success(shops, selectedShopId: selected);
       }
     } catch (error) {
       if (!mounted ||
@@ -112,11 +123,15 @@ class ShopsNotifier extends StateNotifier<ShopsState> {
 
   void selectShop(String shopId) {
     if (!mounted) return;
-    state = state.withSelection(shopId);
+    final next = state.withSelection(shopId);
+    if (next == state) return;
+    _selectedShopId = next.selectedShopId;
+    state = next;
   }
 
   void clearSelection() {
     if (!mounted) return;
+    _selectedShopId = null;
     state = state.withSelection(null);
   }
 

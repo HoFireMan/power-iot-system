@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../shops/providers/shop_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
+import '../../../auth/auth_controller.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
 
 class CreateMeasurementPointScreen extends ConsumerStatefulWidget {
@@ -22,6 +25,8 @@ class _CreateMeasurementPointScreenState
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   bool _isSubmitting = false;
+  bool _isCommitted = false;
+  String? _committedName;
   String? _submissionError;
 
   @override
@@ -52,7 +57,7 @@ class _CreateMeasurementPointScreenState
   }
 
   Future<void> _submit() async {
-    if (_isSubmitting || !_formKey.currentState!.validate()) {
+    if (_isSubmitting || _isCommitted || !_formKey.currentState!.validate()) {
       return;
     }
 
@@ -61,11 +66,24 @@ class _CreateMeasurementPointScreenState
       _submissionError = null;
     });
 
-    final currentShop = ref.read(shopProvider).currentShop;
+    final authenticated = ref.read(authControllerProvider).isAuthenticated;
+    final shops = authenticated ? ref.read(shopsProvider) : null;
+    final selectedShopId = authenticated ? selectedAdminShopId(shops!) : null;
+    if (authenticated && selectedShopId == null) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError = 'No authorized shop is available. Please retry.';
+        });
+      }
+      return;
+    }
+    final currentShopId =
+        authenticated ? selectedShopId! : ref.read(shopProvider).currentShop.id;
     final identitySource =
         ref.read(createMeasurementPointRequestIdentitySourceProvider);
     final pending = identitySource.pending;
-    final requestShopId = pending?.shopId ?? currentShop.id;
+    final requestShopId = pending?.shopId ?? currentShopId;
     final requestName = pending?.name ?? _nameController.text;
     final requestIdentity = identitySource.identityFor(
       shopId: requestShopId,
@@ -84,13 +102,15 @@ class _CreateMeasurementPointScreenState
           );
       createdName = point.name;
       identitySource.complete(requestIdentity);
-    } catch (_) {
+      _isCommitted = true;
+      _committedName = createdName;
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
@@ -98,21 +118,49 @@ class _CreateMeasurementPointScreenState
     if (!mounted) {
       return;
     }
+    await _reconcileCommitted();
+  }
+
+  Future<void> _reconcileCommitted() async {
+    try {
+      await retryAdminOverview(ref);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError =
+              'Measurement Point created, but the latest view could not be loaded.';
+        });
+      }
+      return;
+    }
+    if (mounted) context.pop(_committedName);
+  }
+
+  Future<void> _retryReconciliation() async {
+    if (!_isCommitted || _isSubmitting) return;
     setState(() {
-      _isSubmitting = false;
+      _isSubmitting = true;
+      _submissionError = null;
     });
-    context.pop(createdName);
+    await _reconcileCommitted();
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentShop = ref.watch(shopProvider).currentShop;
+    final authenticated = ref.watch(authControllerProvider).isAuthenticated;
+    final shops = authenticated ? ref.watch(shopsProvider) : null;
+    final selectedShop = authenticated ? selectedAdminShop(shops!) : null;
+    final currentShopName = authenticated
+        ? (selectedShop?.name ?? 'No authorized shop')
+        : ref.watch(shopProvider).currentShop.name;
     final hasPendingUnresolvedRequest =
         ref.read(createMeasurementPointRequestIdentitySourceProvider).pending !=
             null;
 
     return PopScope(
       canPop: !_isSubmitting &&
+          !_isCommitted &&
           !hasPendingUnresolvedRequest &&
           _submissionError == null,
       child: Scaffold(
@@ -123,12 +171,13 @@ class _CreateMeasurementPointScreenState
             child: ListView(
               padding: const EdgeInsets.all(20),
               children: [
-                Text('Site: ${currentShop.name}'),
+                Text('Site: $currentShopName'),
                 const SizedBox(height: 20),
                 TextFormField(
                   key: const Key('measurement-point-name-field'),
                   controller: _nameController,
                   enabled: !_isSubmitting &&
+                      !_isCommitted &&
                       !hasPendingUnresolvedRequest &&
                       _submissionError == null,
                   decoration: const InputDecoration(
@@ -140,6 +189,15 @@ class _CreateMeasurementPointScreenState
                   onFieldSubmitted: (_) => _submit(),
                 ),
                 const SizedBox(height: 16),
+                if (authenticated && selectedShop == null) ...[
+                  const Text('No authorized shop is available.'),
+                  const SizedBox(height: 12),
+                  OutlinedButton(
+                    onPressed: () => retryAdminOverview(ref),
+                    child: const Text('Retry'),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 if (_submissionError case final error?) ...[
                   Text(
                     error,
@@ -148,10 +206,39 @@ class _CreateMeasurementPointScreenState
                     style:
                         TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
+                  const SizedBox(height: 12),
+                ],
+                if (hasPendingUnresolvedRequest) ...[
+                  OutlinedButton(
+                    key: const Key('create-measurement-point-start-over'),
+                    onPressed: _isSubmitting || _isCommitted
+                        ? null
+                        : () {
+                            ref
+                                .read(
+                                  createMeasurementPointRequestIdentitySourceProvider,
+                                )
+                                .abandon();
+                            setState(() => _submissionError = null);
+                          },
+                    child: const Text('Start over'),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                if (_isCommitted && _submissionError != null) ...[
+                  OutlinedButton(
+                    key: const Key('create-measurement-point-refresh-retry'),
+                    onPressed: _isSubmitting ? null : _retryReconciliation,
+                    child: const Text('Retry refresh'),
+                  ),
                   const SizedBox(height: 16),
                 ],
                 FilledButton(
-                  onPressed: _isSubmitting ? null : _submit,
+                  onPressed: _isSubmitting ||
+                          _isCommitted ||
+                          (authenticated && selectedShop == null)
+                      ? null
+                      : _submit,
                   child: _isSubmitting
                       ? const SizedBox.square(
                           dimension: 20,

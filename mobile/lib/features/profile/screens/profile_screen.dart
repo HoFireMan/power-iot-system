@@ -98,7 +98,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                             icon: Icons.sensors, title: "感測器列表", onTap: () {}),
                         _buildDivider(),
                         _buildMenuItem(
-                            icon: Icons.link, title: "綁定感測器", onTap: () {}),
+                            icon: Icons.link,
+                            title: "綁定感測器",
+                            onTap: () => context.go('/admin')),
                         _buildDivider(),
                         _buildMenuItem(
                             icon: Icons.add_business_outlined,

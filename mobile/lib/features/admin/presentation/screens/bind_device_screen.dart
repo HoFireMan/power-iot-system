@@ -5,8 +5,11 @@ import 'package:go_router/go_router.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/models/device_ref.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../data/repositories/admin_overview_repository_impl.dart';
 import '../providers/admin_overview_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
 import '../../../shops/providers/shop_provider.dart';
+import '../../../auth/auth_controller.dart';
 
 class BindDeviceScreen extends ConsumerStatefulWidget {
   const BindDeviceScreen({super.key});
@@ -24,6 +27,7 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
   String? _selectedMeasurementPointId;
   String? _submissionError;
   bool _isSubmitting = false;
+  bool _isCommitted = false;
 
   @override
   void initState() {
@@ -34,7 +38,7 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
   }
 
   Future<void> _submit() async {
-    if (_isSubmitting || !_formKey.currentState!.validate()) {
+    if (_isSubmitting || _isCommitted || !_formKey.currentState!.validate()) {
       return;
     }
 
@@ -56,46 +60,84 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
               measurementPointId: _selectedMeasurementPointId!,
             ),
           );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _isSubmitting = false;
-        _submissionError = _failureMessage;
+        _submissionError = adminErrorMessage(error, _failureMessage);
       });
       return;
     }
 
-    if (!mounted) {
+    ref.read(bindDeviceRequestIdentitySourceProvider).complete(requestIdentity);
+    _isCommitted = true;
+    if (!mounted) return;
+    await _reconcileCommitted();
+  }
+
+  Future<void> _reconcileCommitted() async {
+    try {
+      await retryAdminOverview(ref);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError =
+              'Device bound, but the latest view could not be loaded.';
+        });
+      }
       return;
     }
+    if (mounted) context.pop(true);
+  }
+
+  Future<void> _retryReconciliation() async {
+    if (!_isCommitted || _isSubmitting) return;
     setState(() {
-      _isSubmitting = false;
+      _isSubmitting = true;
+      _submissionError = null;
     });
-    ref.read(bindDeviceRequestIdentitySourceProvider).complete(requestIdentity);
-    ref.invalidate(adminOverviewProvider);
-    context.pop(true);
+    await _reconcileCommitted();
   }
 
   @override
   Widget build(BuildContext context) {
     final overview = ref.watch(adminOverviewProvider);
-    final currentShop = ref.watch(shopProvider).currentShop;
+    final authenticated = ref.watch(authControllerProvider).isAuthenticated;
+    final shops = authenticated ? ref.watch(shopsProvider) : null;
+    final siteName = authenticated
+        ? (selectedAdminShop(shops!)?.name ?? 'No authorized shop')
+        : ref.watch(shopProvider).currentShop.name;
 
     return PopScope(
-      canPop: !_isSubmitting,
+      canPop: !_isSubmitting && !_isCommitted,
       child: Scaffold(
         appBar: AppBar(title: const Text('Bind Device')),
         body: SafeArea(
           child: overview.when(
             loading: () => const Center(child: Text('Loading admin overview…')),
-            error: (error, stackTrace) => Center(
-              child: Text('Unable to load admin overview: $error'),
-            ),
+            error: (error, stackTrace) => _isCommitted
+                ? _reconciliationError(context)
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(adminErrorMessage(
+                          error,
+                          'Unable to load admin overview. Please retry.',
+                        )),
+                        OutlinedButton(
+                          onPressed: () => retryAdminOverview(ref),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
             data: (data) => _BindForm(
               overview: data,
-              siteName: currentShop.name,
+              siteName: siteName,
               formKey: _formKey,
               selectedSerialNumber: _selectedSerialNumber,
               selectedMeasurementPointId: _selectedMeasurementPointId,
@@ -107,12 +149,33 @@ class _BindDeviceScreenState extends ConsumerState<BindDeviceScreen> {
                 () => _selectedMeasurementPointId = value,
               ),
               onSubmit: _submit,
+              isCommitted: _isCommitted,
+              onRetryReconciliation: _retryReconciliation,
             ),
           ),
         ),
       ),
     );
   }
+
+  Widget _reconciliationError(BuildContext context) => Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _submissionError ??
+                  'Device bound, but the latest view could not be loaded.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            OutlinedButton(
+              key: const Key('bind-refresh-retry-button'),
+              onPressed: _isSubmitting ? null : _retryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
+          ],
+        ),
+      );
 }
 
 class _BindForm extends StatelessWidget {
@@ -127,6 +190,8 @@ class _BindForm extends StatelessWidget {
     required this.onDeviceChanged,
     required this.onMeasurementPointChanged,
     required this.onSubmit,
+    required this.isCommitted,
+    required this.onRetryReconciliation,
   });
 
   final AdminOverview overview;
@@ -139,6 +204,8 @@ class _BindForm extends StatelessWidget {
   final ValueChanged<String?> onDeviceChanged;
   final ValueChanged<String?> onMeasurementPointChanged;
   final VoidCallback onSubmit;
+  final bool isCommitted;
+  final VoidCallback onRetryReconciliation;
 
   @override
   Widget build(BuildContext context) {
@@ -183,7 +250,7 @@ class _BindForm extends StatelessWidget {
                   ),
                 )
                 .toList(),
-            enabled: !isSubmitting,
+            enabled: !isSubmitting && !isCommitted,
             onChanged: onDeviceChanged,
           ),
           const SizedBox(height: 16),
@@ -201,7 +268,7 @@ class _BindForm extends StatelessWidget {
                   ),
                 )
                 .toList(),
-            enabled: !isSubmitting,
+            enabled: !isSubmitting && !isCommitted,
             onChanged: onMeasurementPointChanged,
           ),
           const SizedBox(height: 16),
@@ -212,9 +279,15 @@ class _BindForm extends StatelessWidget {
             ),
             const SizedBox(height: 16),
           ],
+          if (isCommitted && submissionError != null)
+            OutlinedButton(
+              key: const Key('bind-refresh-retry-button'),
+              onPressed: isSubmitting ? null : onRetryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
           FilledButton(
             key: const Key('bind-submit-button'),
-            onPressed: isSubmitting ? null : onSubmit,
+            onPressed: isSubmitting || isCommitted ? null : onSubmit,
             child: isSubmitting
                 ? const SizedBox.square(
                     dimension: 20,

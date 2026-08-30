@@ -73,7 +73,7 @@ func newExecutorFixture(t *testing.T, db *gorm.DB, pointCount, deviceCount int) 
 	for i := 0; i < deviceCount; i++ {
 		serial := fmt.Sprintf("SERIAL-%s-%d", suffix, i)
 		mac := fmt.Sprintf("AA%010X", fixture.shop.ID*100+uint(i))
-		fixture.devices = append(fixture.devices, domain.Device{ShopID: fixture.shop.ID, MacAddress: mac, SerialNumber: &serial, Name: fmt.Sprintf("Device-%d", i)})
+		fixture.devices = append(fixture.devices, domain.Device{ShopID: fixture.shop.ID, InventoryOwnerClientID: &fixture.client.ID, MacAddress: mac, SerialNumber: &serial, Name: fmt.Sprintf("Device-%d", i)})
 		if err := db.Create(&fixture.devices[i]).Error; err != nil {
 			t.Fatal(err)
 		}
