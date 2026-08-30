@@ -25,6 +25,8 @@ class _CreateMeasurementPointScreenState
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   bool _isSubmitting = false;
+  bool _isCommitted = false;
+  String? _committedName;
   String? _submissionError;
 
   @override
@@ -55,7 +57,7 @@ class _CreateMeasurementPointScreenState
   }
 
   Future<void> _submit() async {
-    if (_isSubmitting || !_formKey.currentState!.validate()) {
+    if (_isSubmitting || _isCommitted || !_formKey.currentState!.validate()) {
       return;
     }
 
@@ -100,6 +102,8 @@ class _CreateMeasurementPointScreenState
           );
       createdName = point.name;
       identitySource.complete(requestIdentity);
+      _isCommitted = true;
+      _committedName = createdName;
     } catch (error) {
       if (!mounted) {
         return;
@@ -114,11 +118,32 @@ class _CreateMeasurementPointScreenState
     if (!mounted) {
       return;
     }
+    await _reconcileCommitted();
+  }
+
+  Future<void> _reconcileCommitted() async {
+    try {
+      await retryAdminOverview(ref);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError =
+              'Measurement Point created, but the latest view could not be loaded.';
+        });
+      }
+      return;
+    }
+    if (mounted) context.pop(_committedName);
+  }
+
+  Future<void> _retryReconciliation() async {
+    if (!_isCommitted || _isSubmitting) return;
     setState(() {
-      _isSubmitting = false;
+      _isSubmitting = true;
+      _submissionError = null;
     });
-    await retryAdminOverview(ref);
-    if (mounted) context.pop(createdName);
+    await _reconcileCommitted();
   }
 
   @override
@@ -135,6 +160,7 @@ class _CreateMeasurementPointScreenState
 
     return PopScope(
       canPop: !_isSubmitting &&
+          !_isCommitted &&
           !hasPendingUnresolvedRequest &&
           _submissionError == null,
       child: Scaffold(
@@ -151,6 +177,7 @@ class _CreateMeasurementPointScreenState
                   key: const Key('measurement-point-name-field'),
                   controller: _nameController,
                   enabled: !_isSubmitting &&
+                      !_isCommitted &&
                       !hasPendingUnresolvedRequest &&
                       _submissionError == null,
                   decoration: const InputDecoration(
@@ -179,13 +206,39 @@ class _CreateMeasurementPointScreenState
                     style:
                         TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
+                  const SizedBox(height: 12),
+                ],
+                if (hasPendingUnresolvedRequest) ...[
+                  OutlinedButton(
+                    key: const Key('create-measurement-point-start-over'),
+                    onPressed: _isSubmitting || _isCommitted
+                        ? null
+                        : () {
+                            ref
+                                .read(
+                                  createMeasurementPointRequestIdentitySourceProvider,
+                                )
+                                .abandon();
+                            setState(() => _submissionError = null);
+                          },
+                    child: const Text('Start over'),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                if (_isCommitted && _submissionError != null) ...[
+                  OutlinedButton(
+                    key: const Key('create-measurement-point-refresh-retry'),
+                    onPressed: _isSubmitting ? null : _retryReconciliation,
+                    child: const Text('Retry refresh'),
+                  ),
                   const SizedBox(height: 16),
                 ],
                 FilledButton(
-                  onPressed:
-                      _isSubmitting || (authenticated && selectedShop == null)
-                          ? null
-                          : _submit,
+                  onPressed: _isSubmitting ||
+                          _isCommitted ||
+                          (authenticated && selectedShop == null)
+                      ? null
+                      : _submit,
                   child: _isSubmitting
                       ? const SizedBox.square(
                           dimension: 20,

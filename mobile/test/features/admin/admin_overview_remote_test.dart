@@ -36,7 +36,7 @@ class _Adapter implements HttpClientAdapter {
 }
 
 void main() {
-  test('admin overview falls back to the first authorized shop', () {
+  test('admin overview honors an authorized CurrentShopID preference', () {
     const first = Shop(
       id: '11',
       code: 'FIRST',
@@ -56,9 +56,33 @@ void main() {
     const state = ShopsState.success(
       ShopsSnapshot(shops: <Shop>[first, second], currentShopId: '22'),
     );
-    expect(selectedAdminShopId(state), '11');
-    expect(selectedAdminShop(state)?.name, 'First shop');
+    expect(selectedAdminShopId(state), '22');
+    expect(selectedAdminShop(state)?.name, 'Second shop');
     expect(selectedAdminShopId(state.withSelection('22')), '22');
+  });
+
+  test('admin overview falls back to first Shop when CurrentShopID is absent',
+      () {
+    const first = Shop(
+      id: '11',
+      code: 'FIRST',
+      name: 'First shop',
+      address: null,
+      phone: null,
+      isHead: false,
+    );
+    const second = Shop(
+      id: '22',
+      code: 'SECOND',
+      name: 'Second shop',
+      address: null,
+      phone: null,
+      isHead: false,
+    );
+    const state = ShopsState.success(
+      ShopsSnapshot(shops: <Shop>[first, second], currentShopId: '99'),
+    );
+    expect(selectedAdminShopId(state), '11');
   });
 
   test('remote Shop refresh preserves a still-authorized local selection',

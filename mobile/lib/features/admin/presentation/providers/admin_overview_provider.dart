@@ -25,8 +25,12 @@ Shop? selectedAdminShop(ShopsState state) {
       if (shop.id == selectedId) return shop;
     }
   }
-  // CurrentShopID is server metadata, not authorization or view-selection
-  // authority. When no local view choice survives, use a returned shop only.
+  // CurrentShopID is only a server-provided view preference. It may select a
+  // Shop for display when that Shop is present in the authorized snapshot, but
+  // it never grants authorization and is never sent as an authority value.
+  for (final shop in snapshot.shops) {
+    if (shop.id == snapshot.currentShopId) return shop;
+  }
   return snapshot.shops.isEmpty ? null : snapshot.shops.first;
 }
 
@@ -53,6 +57,14 @@ abstract interface class CreateMeasurementPointRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  /// Drops unresolved identity at an authentication-session boundary.
+  void resetForAuthEpoch();
+
+  /// Explicitly abandons the unresolved command. This is only called by a
+  /// deliberate user start-over action; failed delivery is never cleared
+  /// implicitly.
+  void abandon();
 }
 
 class PendingBindDeviceRequest {
@@ -76,6 +88,9 @@ abstract interface class BindDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  /// Drops unresolved identity at an authentication-session boundary.
+  void resetForAuthEpoch();
 }
 
 class MockCreateMeasurementPointRequestIdentitySource
@@ -117,12 +132,27 @@ class MockCreateMeasurementPointRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void abandon() {
+    _pending = null;
+  }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final createMeasurementPointRequestIdentitySourceProvider =
-    Provider<CreateMeasurementPointRequestIdentitySource>(
-  (ref) => MockCreateMeasurementPointRequestIdentitySource(),
-);
+    Provider<CreateMeasurementPointRequestIdentitySource>((ref) {
+  final source = MockCreateMeasurementPointRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class MockBindDeviceRequestIdentitySource
     implements BindDeviceRequestIdentitySource {
@@ -161,12 +191,22 @@ class MockBindDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final bindDeviceRequestIdentitySourceProvider =
-    Provider<BindDeviceRequestIdentitySource>(
-  (ref) => MockBindDeviceRequestIdentitySource(),
-);
+    Provider<BindDeviceRequestIdentitySource>((ref) {
+  final source = MockBindDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class PendingReplaceDeviceRequest {
   const PendingReplaceDeviceRequest({
@@ -189,6 +229,8 @@ abstract interface class ReplaceDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  void resetForAuthEpoch();
 }
 
 class MockReplaceDeviceRequestIdentitySource
@@ -228,12 +270,22 @@ class MockReplaceDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final replaceDeviceRequestIdentitySourceProvider =
-    Provider<ReplaceDeviceRequestIdentitySource>(
-  (ref) => MockReplaceDeviceRequestIdentitySource(),
-);
+    Provider<ReplaceDeviceRequestIdentitySource>((ref) {
+  final source = MockReplaceDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class PendingRelocateDeviceRequest {
   const PendingRelocateDeviceRequest({
@@ -256,6 +308,8 @@ abstract interface class RelocateDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  void resetForAuthEpoch();
 }
 
 class MockRelocateDeviceRequestIdentitySource
@@ -295,12 +349,22 @@ class MockRelocateDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final relocateDeviceRequestIdentitySourceProvider =
-    Provider<RelocateDeviceRequestIdentitySource>(
-  (ref) => MockRelocateDeviceRequestIdentitySource(),
-);
+    Provider<RelocateDeviceRequestIdentitySource>((ref) {
+  final source = MockRelocateDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 class PendingUnbindDeviceRequest {
   const PendingUnbindDeviceRequest({
@@ -323,6 +387,8 @@ abstract interface class UnbindDeviceRequestIdentitySource {
   });
 
   void complete(String requestIdentity);
+
+  void resetForAuthEpoch();
 }
 
 class MockUnbindDeviceRequestIdentitySource
@@ -364,12 +430,22 @@ class MockUnbindDeviceRequestIdentitySource
       _pending = null;
     }
   }
+
+  @override
+  void resetForAuthEpoch() {
+    _pending = null;
+  }
 }
 
 final unbindDeviceRequestIdentitySourceProvider =
-    Provider<UnbindDeviceRequestIdentitySource>(
-  (ref) => MockUnbindDeviceRequestIdentitySource(),
-);
+    Provider<UnbindDeviceRequestIdentitySource>((ref) {
+  final source = MockUnbindDeviceRequestIdentitySource();
+  final client = ref.read(authClientProvider);
+  void onAuthEpochChanged(int _) => source.resetForAuthEpoch();
+  client.addAuthEpochListener(onAuthEpochChanged);
+  ref.onDispose(() => client.removeAuthEpochListener(onAuthEpochChanged));
+  return source;
+});
 
 final adminOverviewRepositoryProvider =
     Provider<AdminOverviewRepository>((ref) {
@@ -405,7 +481,10 @@ Future<void> retryAdminOverview(WidgetRef ref) async {
     // stale after a revocation or shop membership change.
     await ref.read(shopsProvider.notifier).load();
   }
-  ref.invalidate(adminOverviewProvider);
+  // Await the replacement projection rather than merely invalidating it. A
+  // mutation screen remains locked until the authoritative refresh finishes.
+  final refreshedOverview = ref.refresh(adminOverviewProvider.future);
+  await refreshedOverview;
 }
 
 final adminOverviewProvider = FutureProvider<AdminOverview>((ref) {

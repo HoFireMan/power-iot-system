@@ -28,6 +28,7 @@ class _ReplaceDeviceScreenState extends ConsumerState<ReplaceDeviceScreen> {
   String? _selectedSerialNumber;
   String? _submissionError;
   bool _isSubmitting = false;
+  bool _isCommitted = false;
   final _formKey = GlobalKey<FormState>();
 
   @override
@@ -41,7 +42,7 @@ class _ReplaceDeviceScreenState extends ConsumerState<ReplaceDeviceScreen> {
   }
 
   Future<void> _submit(DeviceAssignment current) async {
-    if (_isSubmitting || !_formKey.currentState!.validate()) {
+    if (_isSubmitting || _isCommitted || !_formKey.currentState!.validate()) {
       return;
     }
 
@@ -76,16 +77,37 @@ class _ReplaceDeviceScreenState extends ConsumerState<ReplaceDeviceScreen> {
       return;
     }
 
-    if (!mounted) {
-      return;
-    }
-    setState(() => _isSubmitting = false);
     ref
         .read(replaceDeviceRequestIdentitySourceProvider)
         .complete(requestIdentity);
-    await retryAdminOverview(ref);
+    _isCommitted = true;
     if (!mounted) return;
-    context.pop(true);
+    await _reconcileCommitted();
+  }
+
+  Future<void> _reconcileCommitted() async {
+    try {
+      await retryAdminOverview(ref);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submissionError =
+              'Device replaced, but the latest view could not be loaded.';
+        });
+      }
+      return;
+    }
+    if (mounted) context.pop(true);
+  }
+
+  Future<void> _retryReconciliation() async {
+    if (!_isCommitted || _isSubmitting) return;
+    setState(() {
+      _isSubmitting = true;
+      _submissionError = null;
+    });
+    await _reconcileCommitted();
   }
 
   @override
@@ -93,27 +115,29 @@ class _ReplaceDeviceScreenState extends ConsumerState<ReplaceDeviceScreen> {
     final overview = ref.watch(adminOverviewProvider);
 
     return PopScope(
-      canPop: !_isSubmitting,
+      canPop: !_isSubmitting && !_isCommitted,
       child: Scaffold(
         appBar: AppBar(title: const Text('Replace Device')),
         body: SafeArea(
           child: overview.when(
             loading: () => const Center(child: Text('Loading admin overview…')),
-            error: (error, stackTrace) => Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(adminErrorMessage(
-                    error,
-                    'Unable to load admin overview. Please retry.',
-                  )),
-                  OutlinedButton(
-                    onPressed: () => retryAdminOverview(ref),
-                    child: const Text('Retry'),
+            error: (error, stackTrace) => _isCommitted
+                ? _reconciliationError(context)
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(adminErrorMessage(
+                          error,
+                          'Unable to load admin overview. Please retry.',
+                        )),
+                        OutlinedButton(
+                          onPressed: () => retryAdminOverview(ref),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
-            ),
             data: (data) => _buildData(context, data),
           ),
         ),
@@ -167,8 +191,29 @@ class _ReplaceDeviceScreenState extends ConsumerState<ReplaceDeviceScreen> {
       isSubmitting: _isSubmitting,
       onDeviceChanged: (value) => setState(() => _selectedSerialNumber = value),
       onSubmit: () => _submit(current!),
+      isCommitted: _isCommitted,
+      onRetryReconciliation: _retryReconciliation,
     );
   }
+
+  Widget _reconciliationError(BuildContext context) => Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _submissionError ??
+                  'Device replaced, but the latest view could not be loaded.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            OutlinedButton(
+              key: const Key('replace-refresh-retry-button'),
+              onPressed: _isSubmitting ? null : _retryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
+          ],
+        ),
+      );
 
   DeviceInventory? _findDevice(AdminOverview overview, String deviceId) {
     for (final device in overview.devices) {
@@ -204,6 +249,8 @@ class _ReplaceForm extends StatelessWidget {
     required this.isSubmitting,
     required this.onDeviceChanged,
     required this.onSubmit,
+    required this.isCommitted,
+    required this.onRetryReconciliation,
   });
 
   final DeviceAssignment current;
@@ -216,6 +263,8 @@ class _ReplaceForm extends StatelessWidget {
   final bool isSubmitting;
   final ValueChanged<String?> onDeviceChanged;
   final VoidCallback onSubmit;
+  final bool isCommitted;
+  final VoidCallback onRetryReconciliation;
 
   @override
   Widget build(BuildContext context) {
@@ -238,7 +287,7 @@ class _ReplaceForm extends StatelessWidget {
             key: const Key('replace-device-field'),
             value: selectedSerialNumber,
             options: replacementDevices,
-            enabled: !isSubmitting,
+            enabled: !isSubmitting && !isCommitted,
             onChanged: onDeviceChanged,
           ),
           const SizedBox(height: 16),
@@ -249,9 +298,15 @@ class _ReplaceForm extends StatelessWidget {
             ),
             const SizedBox(height: 16),
           ],
+          if (isCommitted && submissionError != null)
+            OutlinedButton(
+              key: const Key('replace-refresh-retry-button'),
+              onPressed: isSubmitting ? null : onRetryReconciliation,
+              child: const Text('Retry refresh'),
+            ),
           FilledButton(
             key: const Key('replace-submit-button'),
-            onPressed: isSubmitting ? null : onSubmit,
+            onPressed: isSubmitting || isCommitted ? null : onSubmit,
             child: isSubmitting
                 ? const SizedBox.square(
                     dimension: 20,
