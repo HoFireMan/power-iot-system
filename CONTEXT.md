@@ -46,11 +46,15 @@ for normal local Power-IoT operation.
 
 ## Current Accepted Product State
 
-Latest accepted source/product checkpoint before the Local Runtime Operator:
+Latest accepted product feature checkpoint:
 
-`5f62eef468fee0d896c496aab9be17906dc55f7f` (PR #24 merge).
+PR #27 = **ADMIN-BINDING-HTTP-01**
 
-PR #25 Local Runtime Operator merge:
+MERGE_COMMIT = `4c342b3197ace7dc7fcd13d568b984078d6dff33`
+
+Feature parent = `0fc4f2caf94fa7a9f1b1c5eea4fae785640f9a12`
+
+PR #25 Local Runtime Operator remains the accepted runtime/operator checkpoint:
 
 `43fc892478b44f898e8e3386650976aa69bfae06`
 
@@ -63,16 +67,22 @@ Current accepted development capability summary:
 - Shop tariff classification.
 - Billing V1 configuration, historical energy/coverage, and estimate support.
 - Local devseed scoped-admin fixture support.
+- Authenticated Shop-scoped Admin Device Binding HTTP API: Create Measurement
+  Point, Bind, Replace, Relocate, and Unbind.
+- Real Flutter Admin Binding integration with authoritative refresh after
+  mutation, retry-safe request identity, and double-submit serialization.
+- Local PostgreSQL and Android development runtime verification for Admin
+  Binding.
 - Local Runtime Operator accepted and ready for use.
 
 Current boundaries remain:
 
-- Public Admin Device Binding HTTP API and full Device Binding transport
-  integration are not complete.
-- Physical ESP8266/fleet validation and production deployment/hardening remain
-  pending.
-- BLE provisioning, QR flow, offline cache, and other unproven alert/reporting
+- Production deployment and hardening remain pending.
+- Physical ESP8266/fleet validation remains pending.
+- BLE provisioning, QR flow, offline cache, and unproven alert/reporting
   capabilities remain incomplete.
+- General Admin inventory/history and historical reporting beyond the bounded
+  Admin Binding workflow projection remain incomplete.
 
 Dashboard refresh contract:
 
