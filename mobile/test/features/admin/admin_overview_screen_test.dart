@@ -18,6 +18,8 @@ void main() {
 
     expect(find.text('Measurement Points'), findsOneWidget);
     expect(find.text('Devices / Inventory'), findsOneWidget);
+    expect(
+        find.byKey(const Key('assignment-history-navigation')), findsOneWidget);
   });
 
   testWidgets('mock repository success renders deterministic overview data',

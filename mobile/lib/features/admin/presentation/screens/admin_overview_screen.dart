@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../auth/auth_controller.dart';
+import '../../../profile/presentation/providers/profile_provider.dart';
+import '../../../shops/providers/remote_shop_provider.dart';
 import '../../domain/models/admin_overview.dart';
 import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
@@ -14,6 +17,10 @@ class AdminOverviewScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final overview = ref.watch(adminOverviewProvider);
+    final shops = ref.watch(shopsProvider);
+    final waitingForAuthorizedShop =
+        ref.watch(authControllerProvider).isAuthenticated &&
+            shops.status == RemoteStatus.loading;
     Future<void> retryOverview() => retryAdminOverview(ref);
 
     // Compatibility routes are used only when the current router explicitly
@@ -26,6 +33,10 @@ class AdminOverviewScreen extends ConsumerWidget {
       // No router state means no navigation has been requested yet.
     }
     final routePrefix = legacyMockRoute ? '/admin/mock' : '/admin';
+
+    void openAssignmentHistory() {
+      context.push('$routePrefix/assignment-history');
+    }
 
     Future<void> createMeasurementPoint() async {
       final createdName = await context.push<String>(
@@ -103,33 +114,36 @@ class AdminOverviewScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Overview')),
       body: SafeArea(
-        child: overview.when(
-          loading: () => const Center(
-            child: Text('Loading admin overview…'),
-          ),
-          error: (error, stackTrace) => Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(adminErrorMessage(
-                  error,
-                  'Unable to load admin overview. Please retry.',
-                )),
-                const SizedBox(height: 12),
-                OutlinedButton(
-                  onPressed: retryOverview,
-                  child: const Text('Retry'),
+        child: waitingForAuthorizedShop
+            ? const Center(child: Text('Loading admin overview…'))
+            : overview.when(
+                loading: () => const Center(
+                  child: Text('Loading admin overview…'),
                 ),
-              ],
-            ),
-          ),
-          data: (data) => _OverviewContent(
-            overview: data,
-            onReplace: replaceDevice,
-            onRelocate: relocateDevice,
-            onUnbind: unbindDevice,
-          ),
-        ),
+                error: (error, stackTrace) => Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(adminErrorMessage(
+                        error,
+                        'Unable to load admin overview. Please retry.',
+                      )),
+                      const SizedBox(height: 12),
+                      OutlinedButton(
+                        onPressed: retryOverview,
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                ),
+                data: (data) => _OverviewContent(
+                  overview: data,
+                  onOpenAssignmentHistory: openAssignmentHistory,
+                  onReplace: replaceDevice,
+                  onRelocate: relocateDevice,
+                  onUnbind: unbindDevice,
+                ),
+              ),
       ),
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
@@ -157,12 +171,14 @@ class AdminOverviewScreen extends ConsumerWidget {
 class _OverviewContent extends StatelessWidget {
   const _OverviewContent({
     required this.overview,
+    required this.onOpenAssignmentHistory,
     required this.onReplace,
     required this.onRelocate,
     required this.onUnbind,
   });
 
   final AdminOverview overview;
+  final VoidCallback onOpenAssignmentHistory;
   final ValueChanged<String> onReplace;
   final ValueChanged<String> onRelocate;
   final ValueChanged<String> onUnbind;
@@ -180,6 +196,17 @@ class _OverviewContent extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        Card(
+          child: ListTile(
+            key: const Key('assignment-history-navigation'),
+            leading: const Icon(Icons.history),
+            title: const Text('Assignment History'),
+            subtitle: const Text('View read-only Device assignment intervals'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: onOpenAssignmentHistory,
+          ),
+        ),
+        const SizedBox(height: 24),
         _Section(
           title: 'Measurement Points',
           emptyMessage: 'No measurement points available.',

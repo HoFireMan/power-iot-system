@@ -488,5 +488,8 @@ Future<void> retryAdminOverview(WidgetRef ref) async {
 }
 
 final adminOverviewProvider = FutureProvider<AdminOverview>((ref) {
+  // The repository provider watches the server-authorized Shop snapshot. A
+  // Shop selection therefore invalidates this FutureProvider, and Riverpod
+  // discards an older in-flight result instead of publishing stale rows.
   return ref.watch(adminOverviewRepositoryProvider).loadOverview();
 });

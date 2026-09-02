@@ -95,6 +95,7 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
       measurementPoints: List.unmodifiable(_measurementPoints),
       devices: List.unmodifiable(_devices),
       activeAssignments: List.unmodifiable(_activeAssignments),
+      assignmentHistory: List.unmodifiable(_assignmentHistory),
     );
   }
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/admin_overview_screen.dart';
+import 'package:power_iot_app/features/admin/presentation/screens/assignment_history_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/bind_device_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/create_measurement_point_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/relocate_device_screen.dart';
@@ -77,6 +78,10 @@ GoRouter createRouter(AuthController auth) => GoRouter(
           builder: (context, state) => const AdminOverviewScreen(),
         ),
         GoRoute(
+          path: '/admin/assignment-history',
+          builder: (context, state) => const AssignmentHistoryScreen(),
+        ),
+        GoRoute(
           path: '/admin/create-measurement-point',
           builder: (context, state) => const CreateMeasurementPointScreen(),
         ),
@@ -102,6 +107,10 @@ GoRouter createRouter(AuthController auth) => GoRouter(
         GoRoute(
           path: '/admin/mock',
           builder: (context, state) => const AdminOverviewScreen(),
+        ),
+        GoRoute(
+          path: '/admin/mock/assignment-history',
+          builder: (context, state) => const AssignmentHistoryScreen(),
         ),
         GoRoute(
           path: '/admin/mock/create-measurement-point',
