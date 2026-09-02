@@ -19,7 +19,6 @@ The first section contains stable task-execution rules such as:
 - repository/worktree safety;
 - PostgreSQL integration-test safety;
 - mutation and phase boundaries;
-- Task Report requirements; and
 - final evidence/output requirements.
 
 Detailed behavior remains owned by the relevant global Skills. Do not duplicate
@@ -53,21 +52,19 @@ The second section contains task-specific state such as:
 
 The Dynamic Task Suffix must never override the Immutable / Stable Contract.
 
-### Task Report Preservation
+### Task Timing
 
-For substantial mainline tasks, Task Report output is part of the acceptance
-evidence, not optional diagnostic decoration.
+For substantial tasks, record only the task start and finish timestamps from the
+system clock.
 
-Preserve, when emitted:
+Do not emit or preserve execution telemetry, aggregate totals, cache/cost data,
+or manually reconstructed execution statistics.
 
-- TIMING;
-- AGENT METRICS;
-- TOKEN METRICS;
-- TASK TOTAL; and
-- CACHE STATUS.
+Required final timing form:
 
-Do not manually reconstruct Task Report metrics. Detailed metric semantics
-remain owned by the global Task Report Skill.
+TIMING
+Started = <timestamp>
+Finished = <timestamp>
 
 ## Orchestration, Skills, and Model References
 
