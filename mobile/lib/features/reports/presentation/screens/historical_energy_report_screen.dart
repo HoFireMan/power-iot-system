@@ -24,8 +24,11 @@ class _HistoricalEnergyReportScreenState
   @override
   void initState() {
     super.initState();
-    final value = widget.initialMonth ?? DateTime.now();
-    _month = DateTime(value.year, value.month);
+    final now = DateTime.now();
+    final current = DateTime(now.year, now.month);
+    final value = widget.initialMonth ?? current;
+    final requested = DateTime(value.year, value.month);
+    _month = requested.isAfter(current) ? current : requested;
   }
 
   String get _monthKey =>
@@ -48,6 +51,14 @@ class _HistoricalEnergyReportScreenState
     }
     if (shops.status == RemoteStatus.unauthorized) {
       return const Scaffold(body: Center(child: Text('請重新登入')));
+    }
+    if (shops.status == RemoteStatus.error) {
+      return Scaffold(
+        body: _ReportMessage(
+          '目前無法取得店家資料',
+          onRetry: () => ref.read(shopsProvider.notifier).load(),
+        ),
+      );
     }
     if (shop == null) {
       return const Scaffold(body: Center(child: Text('尚未選擇店家')));

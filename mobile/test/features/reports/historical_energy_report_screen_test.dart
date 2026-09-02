@@ -28,6 +28,33 @@ class _ShopsRepository implements ShopsRepository {
       );
 }
 
+class _FlakyShopsRepository implements ShopsRepository {
+  int fetchCount = 0;
+  bool failNext = true;
+
+  @override
+  Future<ShopsSnapshot> fetchShops() async {
+    fetchCount++;
+    if (failNext) {
+      failNext = false;
+      throw StateError('temporary shop snapshot failure');
+    }
+    return const ShopsSnapshot(
+      shops: [
+        Shop(
+          id: '7',
+          code: 'SHOP-7',
+          name: 'Test Shop',
+          address: null,
+          phone: null,
+          isHead: false,
+        ),
+      ],
+      currentShopId: '7',
+    );
+  }
+}
+
 class _DelayedReportRepository implements HistoricalEnergyRepository {
   final requests = <String, Completer<HistoricalEnergyReport>>{};
 
@@ -90,7 +117,88 @@ HistoricalEnergyReport _report(String month) => HistoricalEnergyReport(
       warnings: const ['PARTIAL_MONITORING_DATA'],
     );
 
+String _monthKey(DateTime value) =>
+    '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}';
+
 void main() {
+  testWidgets('renders explicit shop snapshot failure with retry',
+      (tester) async {
+    final shops = _FlakyShopsRepository();
+    final currentMonth = _monthKey(DateTime.now());
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          shopsRepositoryProvider.overrideWithValue(shops),
+          historicalEnergyRepositoryProvider.overrideWithValue(
+            _ReportRepository({currentMonth: _report(currentMonth)}),
+          ),
+        ],
+        child: const MaterialApp(home: HistoricalEnergyReportScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('目前無法取得店家資料'), findsOneWidget);
+    expect(find.text('尚未選擇店家'), findsNothing);
+    expect(find.text('重試'), findsOneWidget);
+
+    await tester.tap(find.text('重試'));
+    await tester.pumpAndSettle();
+    expect(shops.fetchCount, 2);
+    expect(find.text('歷史用電報表'), findsOneWidget);
+  });
+
+  testWidgets('clamps a future initial month to the current month',
+      (tester) async {
+    final current = DateTime.now();
+    final currentKey = _monthKey(current);
+    final reports = _ReportRepository({currentKey: _report(currentKey)});
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          shopsRepositoryProvider.overrideWithValue(_ShopsRepository()),
+          historicalEnergyRepositoryProvider.overrideWithValue(reports),
+        ],
+        child: MaterialApp(
+          home: HistoricalEnergyReportScreen(
+            initialMonth: DateTime(current.year, current.month + 1),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+        find.text(
+            '${current.year} 年 ${current.month.toString().padLeft(2, '0')} 月'),
+        findsOneWidget);
+    expect(reports.requests, contains('7/$currentKey'));
+  });
+
+  testWidgets('preserves a past initial month', (tester) async {
+    final current = DateTime.now();
+    final past = DateTime(current.year, current.month - 2);
+    final pastKey = _monthKey(past);
+    final reports = _ReportRepository({pastKey: _report(pastKey)});
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          shopsRepositoryProvider.overrideWithValue(_ShopsRepository()),
+          historicalEnergyRepositoryProvider.overrideWithValue(reports),
+        ],
+        child: MaterialApp(
+          home: HistoricalEnergyReportScreen(initialMonth: past),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+        find.text('${past.year} 年 ${past.month.toString().padLeft(2, '0')} 月'),
+        findsOneWidget);
+    expect(reports.requests, contains('7/$pastKey'));
+  });
+
   testWidgets('renders zero, no-data, partial facts and changes month',
       (tester) async {
     final repository = _ReportRepository({
