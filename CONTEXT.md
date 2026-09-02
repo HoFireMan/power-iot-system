@@ -48,11 +48,22 @@ for normal local Power-IoT operation.
 
 Latest accepted product feature checkpoint:
 
+PR #29 = **HISTORICAL-MP-ENERGY-REPORT-01**
+
+MERGE_COMMIT = `d9fac309d92347514bdc4e5c6f07d24f2104fdeb`
+
+Feature parent = `271f413292fb1ea98680624bc325593bf9913dba`
+
+Earlier accepted product checkpoint retained for history:
+
 PR #27 = **ADMIN-BINDING-HTTP-01**
 
 MERGE_COMMIT = `4c342b3197ace7dc7fcd13d568b984078d6dff33`
 
 Feature parent = `0fc4f2caf94fa7a9f1b1c5eea4fae785640f9a12`
+
+PR #27 Admin Binding remains an accepted earlier capability; PR #29 is the
+newer accepted product feature checkpoint.
 
 PR #25 Local Runtime Operator remains the accepted runtime/operator checkpoint:
 
@@ -66,6 +77,17 @@ Current accepted development capability summary:
 - Dashboard daily/monthly energy and Carbon summary.
 - Shop tariff classification.
 - Billing V1 configuration, historical energy/coverage, and estimate support.
+- Authenticated Shop-scoped monthly Measurement Point historical energy report.
+- Shop aggregate and per-MeasurementPoint usage/coverage facts.
+- Asia/Taipei monthly semantics with accepted cutoff and snapshot boundaries.
+- Historical DeviceAssignment attribution, including Device replacement continuity
+  under the same MeasurementPoint and relocation attribution by assignment
+  interval.
+- Report status semantics preserve null versus valid zero and partial versus
+  complete data distinctions.
+- Real Flutter historical report screen with month navigation.
+- Local PostgreSQL and Android development runtime acceptance for the
+  historical report.
 - Local devseed scoped-admin fixture support.
 - Authenticated Shop-scoped Admin Device Binding HTTP API: Create Measurement
   Point, Bind, Replace, Relocate, and Unbind.
@@ -79,10 +101,14 @@ Current boundaries remain:
 
 - Production deployment and hardening remain pending.
 - Physical ESP8266/fleet validation remains pending.
-- BLE provisioning, QR flow, offline cache, and unproven alert/reporting
-  capabilities remain incomplete.
-- General Admin inventory/history and historical reporting beyond the bounded
-  Admin Binding workflow projection remain incomplete.
+- Monthly Measurement Point historical energy reporting is implemented and
+  development/runtime verified.
+- Broader historical reporting remains incomplete, including arbitrary date
+  ranges, exports, additional report types, and production reporting hardening.
+- General Admin inventory/history remains incomplete.
+- Alerts remain incomplete.
+- BLE/QR provisioning remains incomplete.
+- Offline cache remains incomplete.
 
 Dashboard refresh contract:
 
