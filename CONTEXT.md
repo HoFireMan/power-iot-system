@@ -76,8 +76,37 @@ legacy rows remain explicitly unresolved. DailyUsage was proven inactive
 legacy evidence and future authoritative uniqueness is
 `(date, measurement_point_id)`. Replacement, relocation, and half-open
 `valid_to` evidence passed. Device.ShopID and MAC remain non-authoritative.
-This resolves the IDENT-002 identity blocker only; Alerts API/settings/history,
-notifications, and Flutter Alerts integration remain incomplete.
+At the IDENT-002 checkpoint, Alerts API/settings/history, notifications, and
+Flutter Alerts integration remained incomplete; the later Alerts checkpoint
+below records the bounded V1 implementation.
+
+Latest accepted Alerts checkpoint:
+
+PR #39 = **MEASUREMENT_POINT_ALERTS_V1_01**
+
+MERGE_COMMIT = `2e6e542437087da027661da72a6512cec6a559a9`
+
+Alerts V1 is implemented and development-verified at the code/interface level.
+Alert settings and durable curfew lifecycle state are keyed by
+MeasurementPoint; Device remains provenance only. Replacement preserves policy
+and lifecycle state at the same MeasurementPoint, while relocation uses the
+target MeasurementPoint's own policy. Settings GET is Shop-member readable;
+settings PUT requires the existing scoped-admin capability plus Shop membership.
+Quiet hours use Asia/Taipei and `[start, end)` semantics. CURFEW_USAGE uses a
+validated per-MeasurementPoint threshold with a 10 W default and durable
+edge-triggered, out-of-order-guarded state. Alert History is authenticated,
+Shop-scoped, MeasurementPoint-filterable, newest-first, cursor-paginated, and
+read-only; unresolved legacy alerts are excluded. No mark-read, notification
+channel, or daily/monthly kWh evaluator is included.
+
+Dedicated PostgreSQL integration and backend runtime acceptance remain pending
+because the required disposable test source was unavailable (`TEST_DATABASE_URL`
+unset and port 55434 not provisioned). Device-level Flutter runtime acceptance
+remains pending an operator-owned emulator.
+
+Broader Alerts remain incomplete for daily kWh thresholds, monthly kWh
+thresholds, read/acknowledgement semantics, notification delivery, per-Shop
+timezones, retention policy, and broader production hardening.
 
 Earlier accepted product checkpoint retained for history:
 
@@ -165,7 +194,8 @@ Current boundaries remain:
   the only connected Android emulator is not operator-owned.
 - Admin operation audit history, including actor/reason/action events, remains
   not implemented.
-- Alerts remain incomplete.
+- Alerts V1 is implemented as the bounded development capability described in
+  PR #39; broader Alerts remain incomplete as documented above.
 - BLE/QR provisioning remains incomplete.
 - Dashboard read-only cache V1 is implemented and tested; broader
   offline/product caching remains incomplete.
