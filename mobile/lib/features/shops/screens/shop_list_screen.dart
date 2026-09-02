@@ -276,6 +276,11 @@ class ShopListScreen extends ConsumerWidget {
                     ),
                   ),
                   IconButton(
+                    tooltip: '警報紀錄',
+                    icon: const Icon(Icons.notifications_none_rounded),
+                    onPressed: () => context.push('/shops/${shop.id}/alerts'),
+                  ),
+                  IconButton(
                     tooltip: '電費方案設定',
                     icon: const Icon(Icons.receipt_long_rounded),
                     onPressed: () =>

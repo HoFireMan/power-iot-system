@@ -9,6 +9,8 @@ import 'package:power_iot_app/features/admin/presentation/screens/relocate_devic
 import 'package:power_iot_app/features/admin/presentation/screens/replace_device_screen.dart';
 import 'package:power_iot_app/features/admin/presentation/screens/unbind_device_screen.dart';
 import 'package:power_iot_app/features/auth/auth_controller.dart';
+import 'package:power_iot_app/features/alerts/presentation/screens/alert_history_screen.dart';
+import 'package:power_iot_app/features/alerts/presentation/screens/alert_settings_screen.dart';
 import 'package:power_iot_app/features/auth/screens/login_screen.dart';
 import 'package:power_iot_app/features/billing/presentation/screens/billing_estimate_screen.dart';
 import 'package:power_iot_app/features/dashboard/dashboard_route_observer.dart';
@@ -54,6 +56,20 @@ GoRouter createRouter(AuthController auth) => GoRouter(
         GoRoute(
           path: '/shops/:shopId/measurement-points/:measurementPointRef',
           builder: (context, state) => MeasurementPointDetailScreen(
+            shopId: state.pathParameters['shopId']!,
+            measurementPointRef: state.pathParameters['measurementPointRef']!,
+          ),
+        ),
+        GoRoute(
+          path: '/shops/:shopId/alerts',
+          builder: (context, state) => AlertHistoryScreen(
+            shopId: state.pathParameters['shopId']!,
+            measurementPointRef: state.uri.queryParameters['measurementPointRef'],
+          ),
+        ),
+        GoRoute(
+          path: '/shops/:shopId/measurement-points/:measurementPointRef/alert-settings',
+          builder: (context, state) => AlertSettingsScreen(
             shopId: state.pathParameters['shopId']!,
             measurementPointRef: state.pathParameters['measurementPointRef']!,
           ),
@@ -161,6 +177,8 @@ bool _isProtectedLocation(String location) =>
     location.startsWith('/shops/') &&
         location.contains('/measurement-points/') ||
     location == '/shops' ||
+    location.startsWith('/shops/') && location.endsWith('/alerts') ||
     location == '/admin' ||
+    location.startsWith('/admin/measurement-points/') ||
     location.startsWith('/admin/') ||
     location.startsWith('/admin/mock');

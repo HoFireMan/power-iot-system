@@ -236,21 +236,7 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 		if err := markDeviceSeen(tx, device.ID, receivedAt); err != nil {
 			return err
 		}
-		alertAt := recordedAt
-		alertMeasurementPointID := measurementPointID
-		if isCoverage {
-			alertAt = time.Unix(data.Timestamp, 0).UTC()
-			var alertAssignment domain.DeviceAssignment
-			if err := findAssignmentAt(tx, device.ID, alertAt, &alertAssignment); err != nil {
-				if !errors.Is(err, gorm.ErrRecordNotFound) {
-					return err
-				}
-				alertMeasurementPointID = uuid.Nil
-			} else {
-				alertMeasurementPointID = alertAssignment.MeasurementPointID
-			}
-		}
-		if err := checkTelemetryAlerts(tx, device, data, alertAt, &alertMeasurementPointID); err != nil {
+		if err := checkTelemetryAlerts(tx, device, data, recordedAt, &measurementPointID); err != nil {
 			return err
 		}
 		result.Status = IngestStored
@@ -289,7 +275,6 @@ func (i *TelemetryIngestor) loadCoverageMaxInterval(tx *gorm.DB) (int64, error) 
 
 func findDeviceForUpdate(tx *gorm.DB, mac string, device *domain.Device) error {
 	return tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Preload("AlertSettings").
 		Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ?", mac).
 		First(device).Error
 }
@@ -323,29 +308,77 @@ func markDeviceSeen(tx *gorm.DB, deviceID uint, receivedAt time.Time) error {
 }
 
 func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, eventTime time.Time, measurementPointID *uuid.UUID) error {
-	settings := device.AlertSettings
-	if settings.ID == 0 || !settings.IsEnabled || settings.NonUsageStartTime == "" || settings.NonUsageEndTime == "" {
-		return nil
-	}
-	currentHM := eventTime.Format("15:04")
-	inRange := false
-	if settings.NonUsageStartTime > settings.NonUsageEndTime {
-		inRange = currentHM >= settings.NonUsageStartTime || currentHM <= settings.NonUsageEndTime
-	} else {
-		inRange = currentHM >= settings.NonUsageStartTime && currentHM <= settings.NonUsageEndTime
-	}
-	if !inRange || data.Power <= 10.0 {
-		return nil
-	}
 	if measurementPointID == nil || *measurementPointID == uuid.Nil {
-		return errors.New("telemetry alert measurement point assignment is unavailable")
+		return nil
+	}
+	// Lock the permanent identity before reading/updating lifecycle state. This
+	// serializes different replacement devices serving the same MP as well as
+	// concurrent deliveries from one device.
+	var point domain.MeasurementPoint
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&point, "id = ?", *measurementPointID).Error; err != nil {
+		return err
+	}
+	var settings domain.MeasurementPointAlertSetting
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&settings, "measurement_point_id = ?", *measurementPointID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !settings.IsEnabled || settings.QuietHoursStart == "" || settings.QuietHoursEnd == "" {
+		return nil
+	}
+	active, err := curfewCondition(eventTime, settings.QuietHoursStart, settings.QuietHoursEnd, data.Power, settings.PowerThresholdW)
+	if err != nil {
+		return err
+	}
+
+	var state domain.MeasurementPointCurfewState
+	stateQuery := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&state, "measurement_point_id = ?", *measurementPointID)
+	if stateQuery.Error != nil && !errors.Is(stateQuery.Error, gorm.ErrRecordNotFound) {
+		return stateQuery.Error
+	}
+	if errors.Is(stateQuery.Error, gorm.ErrRecordNotFound) {
+		state = domain.MeasurementPointCurfewState{MeasurementPointID: *measurementPointID}
+	}
+	if state.LastEventAt != nil && !eventTime.After(*state.LastEventAt) {
+		return nil
+	}
+	previous := state.InCurfew
+	state.InCurfew = active
+	state.LastEventAt = &eventTime
+	if err := tx.Save(&state).Error; err != nil {
+		return err
+	}
+	if previous || !active {
+		return nil
 	}
 	alert := domain.AlertLog{
 		DeviceID: device.ID, MeasurementPointID: measurementPointID, LegacyUnresolved: false,
 		Type:    "CURFEW_USAGE",
 		Message: fmt.Sprintf("非營業時間異常運轉 (偵測功率: %.2f W)", data.Power),
 		Voltage: data.Voltage, Current: data.Current, Power: data.Power,
-		CreatedAt: eventTime, IsRead: false,
+		RecordedAt: eventTime, CreatedAt: eventTime, IsRead: false,
 	}
-	return tx.Create(&alert).Error
+	return createAlertLog(tx, alert)
+}
+
+func createAlertLog(tx *gorm.DB, alert domain.AlertLog) error { return tx.Create(&alert).Error }
+
+func curfewCondition(eventTime time.Time, start, end string, power, threshold float64) (bool, error) {
+	location, err := time.LoadLocation("Asia/Taipei")
+	if err != nil {
+		return false, err
+	}
+	return inCurfewWindow(eventTime.In(location).Format("15:04"), start, end) && power > threshold, nil
+}
+
+func inCurfewWindow(current, start, end string) bool {
+	if start == end {
+		return false
+	}
+	if start > end {
+		return current >= start || current < end
+	}
+	return current >= start && current < end
 }

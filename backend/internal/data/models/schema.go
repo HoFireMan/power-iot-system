@@ -172,8 +172,26 @@ type AlertLog struct {
 	Current float64 `gorm:"type:numeric(5,2)"`
 	Power   float64 `gorm:"type:numeric(8,2)"`
 
-	IsRead    bool      `gorm:"default:false"` // 是否已讀
-	CreatedAt time.Time `gorm:"index"`         // 發生時間
+	IsRead     bool      `gorm:"default:false"` // 是否已讀
+	RecordedAt time.Time `gorm:"column:recorded_at;not null;index"`
+	CreatedAt  time.Time `gorm:"index"` // 發生時間
+}
+
+// MeasurementPointAlertSetting is the authoritative MP-centered alert policy.
+type MeasurementPointAlertSetting struct {
+	MeasurementPointID uuid.UUID `gorm:"column:measurement_point_id;type:uuid;primaryKey"`
+	QuietHoursStart    string    `gorm:"column:quiet_hours_start"`
+	QuietHoursEnd      string    `gorm:"column:quiet_hours_end"`
+	PowerThresholdW    float64   `gorm:"column:power_threshold_w;not null;default:10"`
+	IsEnabled          bool      `gorm:"not null;default:true"`
+	UpdatedAt          time.Time `gorm:"column:updated_at"`
+}
+
+// MeasurementPointCurfewState is the durable edge-trigger lifecycle state.
+type MeasurementPointCurfewState struct {
+	MeasurementPointID uuid.UUID  `gorm:"column:measurement_point_id;type:uuid;primaryKey"`
+	InCurfew           bool       `gorm:"column:in_curfew;not null;default:false"`
+	LastEventAt        *time.Time `gorm:"column:last_event_at"`
 }
 
 // ==========================================

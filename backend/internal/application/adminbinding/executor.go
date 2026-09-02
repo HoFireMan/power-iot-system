@@ -565,6 +565,9 @@ func (e *Executor) createMeasurementPointInTransaction(ctx context.Context, tx *
 	if err := tx.Create(&point).Error; err != nil {
 		return domain.AdminBindingResult{}, err
 	}
+	if err := tx.Create(&domain.MeasurementPointAlertSetting{MeasurementPointID: point.ID, PowerThresholdW: 10, IsEnabled: true}).Error; err != nil {
+		return domain.AdminBindingResult{}, err
+	}
 	if err := e.afterMutation(); err != nil {
 		return domain.AdminBindingResult{}, err
 	}

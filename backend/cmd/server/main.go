@@ -18,6 +18,7 @@ import (
 	httpadapter "power-iot-backend/internal/adapters/http"
 	"power-iot-backend/internal/adapters/persistence"
 	applicationadminbinding "power-iot-backend/internal/application/adminbinding"
+	applicationalerts "power-iot-backend/internal/application/alerts"
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationbilling "power-iot-backend/internal/application/billing"
 	applicationbillingestimate "power-iot-backend/internal/application/billingestimate"
@@ -130,6 +131,9 @@ func main() {
 	httpadapter.RegisterDashboardRoute(r, authenticator, applicationdashboard.NewGormQueryRunner(db))
 	httpadapter.RegisterMeasurementPointDetailRoute(r, authenticator, applicationmeasurementpointdetail.NewGormQueryRunner(db))
 	httpadapter.RegisterAdminBindingRoutes(r, authenticator, httpadapter.AdminBindingHandlerConfig{Executor: applicationadminbinding.NewExecutor(db), DB: db})
+	alertService := applicationalerts.New(persistence.NewMeasurementPointAlertRepository(db))
+	httpadapter.RegisterAlertSettingsRoutes(r, authenticator, alertService)
+	httpadapter.RegisterAlertHistoryRoute(r, authenticator, alertService)
 	r.GET("/", func(c *gin.Context) {
 		mqttReady := mqttService.Ready()
 		status := "degraded"
