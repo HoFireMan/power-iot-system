@@ -39,8 +39,16 @@ void main() {
       request: Completer<void>(),
       result: Completer<AdminOverview>(),
     );
+    const aOverview = AdminOverview(
+      measurementPoints: [
+        MeasurementPoint(id: 'mp-a', shopId: 'shop-a', name: 'Shop A MP'),
+      ],
+      devices: [],
+    );
     const bOverview = AdminOverview(
-      measurementPoints: [],
+      measurementPoints: [
+        MeasurementPoint(id: 'mp-b', shopId: 'shop-b', name: 'Shop B MP'),
+      ],
       devices: [],
     );
     final container = ProviderContainer(
@@ -70,15 +78,14 @@ void main() {
     shopsNotifier.selectShop('shop-b');
     await shopB.request.future;
 
-    shopA.result.complete(const AdminOverview(
-      measurementPoints: [],
-      devices: [],
-    ));
+    shopA.result.complete(aOverview);
     await Future<void>.delayed(Duration.zero);
     shopB.result.complete(bOverview);
 
     final result = await container.read(adminOverviewProvider.future);
     expect(result, same(bOverview));
+    expect(shopA.loadCalls, 1);
+    expect(shopB.loadCalls, 1);
   });
 }
 
@@ -117,9 +124,11 @@ class _DeferredAdminOverviewRepository implements AdminOverviewRepository {
 
   final Completer<void> request;
   final Completer<AdminOverview> result;
+  var loadCalls = 0;
 
   @override
   Future<AdminOverview> loadOverview() {
+    loadCalls++;
     if (!request.isCompleted) request.complete();
     return result.future;
   }
