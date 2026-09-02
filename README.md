@@ -31,6 +31,7 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | User authentication/session/JWT | ✅ Development implemented / verified |
 | Scoped-admin Shop/Billing/Device Binding authorization | ✅ Development implemented / verified |
 | Authenticated Admin Device Binding HTTP API | ✅ Development implemented / verified |
+| Measurement Point Alerts V1 | ✅ Development/local PostgreSQL and Backend runtime accepted; device runtime pending |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
 | Local Runtime Operator | ✅ Accepted / merged / ready for use |
 | Physical ESP8266 / fleet validation | ⚠️ External / pending |
@@ -82,6 +83,13 @@ MeasurementPoint 是持續存在的邏輯量測位置；Device 可被替換、�
 - authenticated scoped Admin read-only assignment history with Device ↔ MeasurementPoint interval timeline, human-readable Device/MP resolution, Active/Ended filtering, and real Flutter integration
 - Dashboard-only durable last-successful snapshot cache using a separate SharedPreferences boundary, scoped by authenticated User and authorized Shop; transient stale-read fallback only, with no offline authorization or mutation queue
 - Device Simulator，支援無實體設備時的系統端驗證
+
+Measurement Point Alerts V1 passed disposable PostgreSQL migration/replay,
+authorization, lifecycle concurrency, out-of-order, replacement/relocation, and
+isolated Backend runtime acceptance in recovery PR #41. The accepted scope does
+not include production readiness, physical hardware validation, notifications,
+read/acknowledgement semantics, daily/monthly kWh alerts, or per-Shop
+timezones; device runtime remains pending an operator-owned emulator.
 
 The Assignment History implementation is Flutter-tested and its Backend contract
 has been verified against isolated local PostgreSQL. Device-level runtime

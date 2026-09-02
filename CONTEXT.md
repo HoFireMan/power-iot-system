@@ -82,27 +82,36 @@ below records the bounded V1 implementation.
 
 Latest accepted Alerts checkpoint:
 
-PR #39 = **MEASUREMENT_POINT_ALERTS_V1_01**
+PR #39 = **MEASUREMENT_POINT_ALERTS_V1_01** (implementation)
 
 MERGE_COMMIT = `2e6e542437087da027661da72a6512cec6a559a9`
 
-Alerts V1 is implemented and development-verified at the code/interface level.
-Alert settings and durable curfew lifecycle state are keyed by
-MeasurementPoint; Device remains provenance only. Replacement preserves policy
-and lifecycle state at the same MeasurementPoint, while relocation uses the
-target MeasurementPoint's own policy. Settings GET is Shop-member readable;
-settings PUT requires the existing scoped-admin capability plus Shop membership.
-Quiet hours use Asia/Taipei and `[start, end)` semantics. CURFEW_USAGE uses a
-validated per-MeasurementPoint threshold with a 10 W default and durable
-edge-triggered, out-of-order-guarded state. Alert History is authenticated,
-Shop-scoped, MeasurementPoint-filterable, newest-first, cursor-paginated, and
-read-only; unresolved legacy alerts are excluded. No mark-read, notification
-channel, or daily/monthly kWh evaluator is included.
+PR #40 = **MEASUREMENT_POINT_ALERTS_V1_01** (documentation)
 
-Dedicated PostgreSQL integration and backend runtime acceptance remain pending
-because the required disposable test source was unavailable (`TEST_DATABASE_URL`
-unset and port 55434 not provisioned). Device-level Flutter runtime acceptance
-remains pending an operator-owned emulator.
+MERGE_COMMIT = `79e0c610cba3e65aedb03ec6c6075f99acddfcee`
+
+PR #41 = **ALERTS_V1_POST_MERGE_ACCEPTANCE_RECOVERY_01**
+
+MERGE_COMMIT = `2daa0823690ad88849110fbef669a50d68c0ac7b`
+
+Alerts V1 is accepted for development/local system integration after the
+recovery PostgreSQL and isolated Backend runtime gates. Migration 000011 was
+applied and replay-checked against disposable PostgreSQL; authorization,
+history filtering and same-timestamp cursor pagination, durable edge-triggered
+lifecycle, PostgreSQL concurrency deduplication, replacement/relocation, and
+out-of-order behavior were exercised. Settings updates reset the active edge
+without erasing the monotonic `last_event_at` watermark. Alert settings and
+durable curfew lifecycle state are keyed by MeasurementPoint; Device remains
+provenance only. Settings GET is Shop-member readable; settings PUT requires
+the existing scoped-admin capability plus Shop membership. Quiet hours use
+Asia/Taipei and `[start, end)` semantics. CURFEW_USAGE uses a validated
+per-MeasurementPoint threshold with a 10 W default. Alert History is
+authenticated, Shop-scoped, MeasurementPoint-filterable, newest-first,
+cursor-paginated, and read-only; unresolved legacy alerts are excluded. No
+mark-read, notification channel, or daily/monthly kWh evaluator is included.
+
+Device-level Flutter runtime acceptance remains pending an operator-owned
+emulator.
 
 Broader Alerts remain incomplete for daily kWh thresholds, monthly kWh
 thresholds, read/acknowledgement semantics, notification delivery, per-Shop
