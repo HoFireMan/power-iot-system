@@ -202,18 +202,12 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 				return errors.New("coverage assignment is ambiguous")
 			}
 			assignment = assignments[0]
-		} else {
-			query := tx.Where(
-				"device_id = ? AND valid_from <= ? AND (valid_to IS NULL OR ? < valid_to)",
-				device.ID, recordedAt, recordedAt,
-			).Order("valid_from DESC").First(&assignment)
-			if errors.Is(query.Error, gorm.ErrRecordNotFound) {
+		} else if err := findAssignmentAt(tx, device.ID, recordedAt, &assignment); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				result.Status = IngestUnknownAssignment
 				return errCoverageAssignmentRollback
 			}
-			if query.Error != nil {
-				return query.Error
-			}
+			return err
 		}
 
 		measurementPointID := assignment.MeasurementPointID
@@ -243,10 +237,20 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 			return err
 		}
 		alertAt := recordedAt
+		alertMeasurementPointID := measurementPointID
 		if isCoverage {
 			alertAt = time.Unix(data.Timestamp, 0).UTC()
+			var alertAssignment domain.DeviceAssignment
+			if err := findAssignmentAt(tx, device.ID, alertAt, &alertAssignment); err != nil {
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+				alertMeasurementPointID = uuid.Nil
+			} else {
+				alertMeasurementPointID = alertAssignment.MeasurementPointID
+			}
 		}
-		if err := checkTelemetryAlerts(tx, device, data, alertAt); err != nil {
+		if err := checkTelemetryAlerts(tx, device, data, alertAt, &alertMeasurementPointID); err != nil {
 			return err
 		}
 		result.Status = IngestStored
@@ -290,6 +294,25 @@ func findDeviceForUpdate(tx *gorm.DB, mac string, device *domain.Device) error {
 		First(device).Error
 }
 
+func findAssignmentAt(tx *gorm.DB, deviceID uint, eventTime time.Time, assignment *domain.DeviceAssignment) error {
+	var assignments []domain.DeviceAssignment
+	query := tx.Where(
+		"device_id = ? AND valid_from <= ? AND (valid_to IS NULL OR ? < valid_to)",
+		deviceID, eventTime, eventTime,
+	).Limit(2).Find(&assignments)
+	if query.Error != nil {
+		return query.Error
+	}
+	if len(assignments) == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	if len(assignments) != 1 {
+		return errors.New("assignment at event time is ambiguous")
+	}
+	*assignment = assignments[0]
+	return nil
+}
+
 func markDeviceSeen(tx *gorm.DB, deviceID uint, receivedAt time.Time) error {
 	if err := tx.Model(&domain.Device{}).Where("id = ?", deviceID).Update("is_online", true).Error; err != nil {
 		return err
@@ -299,7 +322,7 @@ func markDeviceSeen(tx *gorm.DB, deviceID uint, receivedAt time.Time) error {
 		Update("last_seen", receivedAt).Error
 }
 
-func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, eventTime time.Time) error {
+func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, eventTime time.Time, measurementPointID *uuid.UUID) error {
 	settings := device.AlertSettings
 	if settings.ID == 0 || !settings.IsEnabled || settings.NonUsageStartTime == "" || settings.NonUsageEndTime == "" {
 		return nil
@@ -314,8 +337,12 @@ func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, e
 	if !inRange || data.Power <= 10.0 {
 		return nil
 	}
+	if measurementPointID == nil || *measurementPointID == uuid.Nil {
+		return errors.New("telemetry alert measurement point assignment is unavailable")
+	}
 	alert := domain.AlertLog{
-		DeviceID: device.ID, Type: "CURFEW_USAGE",
+		DeviceID: device.ID, MeasurementPointID: measurementPointID, LegacyUnresolved: false,
+		Type:    "CURFEW_USAGE",
 		Message: fmt.Sprintf("非營業時間異常運轉 (偵測功率: %.2f W)", data.Power),
 		Voltage: data.Voltage, Current: data.Current, Power: data.Power,
 		CreatedAt: eventTime, IsRead: false,

@@ -20,25 +20,27 @@ import (
 type ProtectedMigrationState string
 
 const (
-	ProtectedStateCleanV5       ProtectedMigrationState = "CLEAN_V5"
-	ProtectedStateDirtyV5       ProtectedMigrationState = "DIRTY_V5"
-	ProtectedStateTransitionV6  ProtectedMigrationState = "TRANSITION_DIRTY_V6"
-	ProtectedStateCleanV6       ProtectedMigrationState = "CLEAN_V6"
-	ProtectedStateTransitionB02 ProtectedMigrationState = "TRANSITION_DIRTY_B02"
-	ProtectedStateCleanB02      ProtectedMigrationState = "CLEAN_B02"
-	ProtectedStateBootstrap     ProtectedMigrationState = "SUPPORTED_BOOTSTRAP"
-	ProtectedStateAmbiguous     ProtectedMigrationState = "AMBIGUOUS"
-	ProtectedStateFuture        ProtectedMigrationState = "UNSUPPORTED_FUTURE"
+	ProtectedStateCleanV5                  ProtectedMigrationState = "CLEAN_V5"
+	ProtectedStateDirtyV5                  ProtectedMigrationState = "DIRTY_V5"
+	ProtectedStateTransitionV6             ProtectedMigrationState = "TRANSITION_DIRTY_V6"
+	ProtectedStateCleanV6                  ProtectedMigrationState = "CLEAN_V6"
+	ProtectedStateTransitionB02            ProtectedMigrationState = "TRANSITION_DIRTY_B02"
+	ProtectedStateCleanB02                 ProtectedMigrationState = "CLEAN_B02"
+	ProtectedStateCleanB02IdentityRequired ProtectedMigrationState = "CLEAN_B02_IDENTITY_REQUIRED"
+	ProtectedStateBootstrap                ProtectedMigrationState = "SUPPORTED_BOOTSTRAP"
+	ProtectedStateAmbiguous                ProtectedMigrationState = "AMBIGUOUS"
+	ProtectedStateFuture                   ProtectedMigrationState = "UNSUPPORTED_FUTURE"
 )
 
 type ProtectedCatalogState string
 
 const (
-	ProtectedCatalogExactV5 ProtectedCatalogState = "EXACT_V5"
-	ProtectedCatalogExactV6 ProtectedCatalogState = "EXACT_V6"
-	ProtectedCatalogPartial ProtectedCatalogState = "PARTIAL_OR_MIXED"
-	ProtectedCatalogEmpty   ProtectedCatalogState = "EMPTY"
-	ProtectedCatalogUnknown ProtectedCatalogState = "UNKNOWN"
+	ProtectedCatalogExactV5          ProtectedCatalogState = "EXACT_V5"
+	ProtectedCatalogExactV6          ProtectedCatalogState = "EXACT_V6"
+	ProtectedCatalogIdentityRequired ProtectedCatalogState = "EXACT_V6_IDENTITY_REQUIRED"
+	ProtectedCatalogPartial          ProtectedCatalogState = "PARTIAL_OR_MIXED"
+	ProtectedCatalogEmpty            ProtectedCatalogState = "EMPTY"
+	ProtectedCatalogUnknown          ProtectedCatalogState = "UNKNOWN"
 )
 
 type ProtectedMigrationOutcome string
@@ -221,7 +223,7 @@ func InspectProtectedMigration(ctx context.Context, databaseURL string, spec Pro
 	}
 	report = fillProtectedReport(report, inspection)
 	switch inspection.State {
-	case ProtectedStateCleanV5, ProtectedStateCleanV6, ProtectedStateCleanB02:
+	case ProtectedStateCleanV5, ProtectedStateCleanV6, ProtectedStateCleanB02, ProtectedStateCleanB02IdentityRequired:
 		return report, nil
 	case ProtectedStateDirtyV5, ProtectedStateTransitionV6, ProtectedStateTransitionB02:
 		return report, protectedError(&report, ProtectedNotCommitted, ProtectedPhaseInspection, ErrProtectedMigrationRecoveryRequired)
@@ -683,6 +685,11 @@ func inspectProtectedOn(ctx context.Context, q ProtectedMigrationQueryer, config
 		if catalog == ProtectedCatalogExactV6 && metadata.Version == 7 {
 			if err := verifyB02Catalog(ctx, q); err != nil {
 				catalog = ProtectedCatalogPartial
+			} else if err := verifyMeasurementPointIdentityCatalog(ctx, q); err != nil {
+				// A pre-IDENT-002 B-02 database is a known repairable state,
+				// not a clean serving catalog. The protected B-02 operator can
+				// apply the identity migration after external writer drain.
+				catalog = ProtectedCatalogIdentityRequired
 			}
 		}
 	}
@@ -821,8 +828,11 @@ func classifyProtectedState(metadata MigrationMetadataSnapshot, catalog Protecte
 		if metadata.Dirty {
 			return ProtectedStateTransitionB02
 		}
-		if catalog == ProtectedCatalogExactV6 {
+		switch catalog {
+		case ProtectedCatalogExactV6:
 			return ProtectedStateCleanB02
+		case ProtectedCatalogIdentityRequired:
+			return ProtectedStateCleanB02IdentityRequired
 		}
 	default:
 		if metadata.Version > 6 {

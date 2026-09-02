@@ -40,6 +40,13 @@ func openTelemetryIntegrationDB(t *testing.T) *gorm.DB {
 	if err := db.Exec(string(body)).Error; err != nil {
 		t.Fatal(err)
 	}
+	identityBody, err := fs.ReadFile(migrations.Files, "sql/000010_measurement_point_identity.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(identityBody)).Error; err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 
@@ -306,6 +313,55 @@ func TestTelemetryIngestUsesHalfOpenAssignmentsForReplacementAndRelocation(t *te
 				t.Fatalf("want point %s, got %v", tc.pointID, reading.MeasurementPointID)
 			}
 		})
+	}
+}
+
+func TestTelemetryAlertsUseMeasurementPointAtEventBoundary(t *testing.T) {
+	db := openTelemetryIntegrationDB(t)
+	fixture := newTelemetryFixture(t, db)
+	boundary := time.Date(2026, 8, 8, 10, 30, 0, 0, time.UTC)
+	before := boundary.Add(-time.Minute)
+	addAssignment(t, db, fixture.first.ID, fixture.point.ID, before.Add(-time.Hour), &boundary)
+	addAssignment(t, db, fixture.first.ID, fixture.other.ID, boundary, nil)
+	if err := db.Create(&domain.DeviceAlertSetting{DeviceID: fixture.first.ID, NonUsageStartTime: "10:00", NonUsageEndTime: "11:00", IsEnabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	addAssignment(t, db, fixture.second.ID, fixture.point.ID, boundary, nil)
+	if err := db.Create(&domain.DeviceAlertSetting{DeviceID: fixture.second.ID, NonUsageStartTime: "10:00", NonUsageEndTime: "11:00", IsEnabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	ingestor := NewTelemetryIngestor(db)
+	for sequence, recorded := range map[int64]time.Time{1: before, 2: boundary} {
+		result, err := ingestor.Ingest(testPayload(fixture.first.MacAddress, recorded.Unix(), 1, sequence), recorded.Add(time.Minute))
+		if err != nil || result.Status != IngestStored {
+			t.Fatalf("boundary ingest sequence=%d result=%+v err=%v", sequence, result, err)
+		}
+	}
+	result, err := ingestor.Ingest(testPayload(fixture.second.MacAddress, boundary.Add(time.Minute).Unix(), 1, 1), boundary.Add(2*time.Minute))
+	if err != nil || result.Status != IngestStored {
+		t.Fatalf("replacement ingest result=%+v err=%v", result, err)
+	}
+	var alerts []domain.AlertLog
+	if err := db.Where("device_id IN (?, ?)", fixture.first.ID, fixture.second.ID).Order("created_at").Find(&alerts).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 3 {
+		t.Fatalf("alert count=%d, want 3", len(alerts))
+	}
+	if alerts[0].MeasurementPointID == nil || *alerts[0].MeasurementPointID != fixture.point.ID {
+		t.Fatalf("pre-boundary alert MP=%v, want %s", alerts[0].MeasurementPointID, fixture.point.ID)
+	}
+	if alerts[1].MeasurementPointID == nil || *alerts[1].MeasurementPointID != fixture.other.ID {
+		t.Fatalf("at-boundary alert MP=%v, want %s", alerts[1].MeasurementPointID, fixture.other.ID)
+	}
+	if alerts[2].MeasurementPointID == nil || *alerts[2].MeasurementPointID != fixture.point.ID {
+		t.Fatalf("replacement alert MP=%v, want %s", alerts[2].MeasurementPointID, fixture.point.ID)
+	}
+	for _, alert := range alerts {
+		if alert.LegacyUnresolved {
+			t.Fatalf("runtime alert marked legacy: %+v", alert)
+		}
 	}
 }
 

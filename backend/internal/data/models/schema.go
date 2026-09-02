@@ -159,8 +159,10 @@ type DeviceAlertSetting struct {
 // AlertLog 警報紀錄 (對應 basic.warn)
 // 這裡我們雖然正規化了，但為了保留「案發當下」的數據，還是會存 Voltage/Current
 type AlertLog struct {
-	ID       uint64 `gorm:"primaryKey"`
-	DeviceID uint   `gorm:"index;not null"`
+	ID                 uint64     `gorm:"primaryKey"`
+	DeviceID           uint       `gorm:"index;not null"`
+	MeasurementPointID *uuid.UUID `gorm:"column:measurement_point_id;index"`
+	LegacyUnresolved   bool       `gorm:"column:legacy_unresolved;not null;default:false"`
 
 	Type    string `gorm:"size:50"` // 警報類型 (e.g., OVER_USAGE, CURFEW)
 	Message string // 備註/訊息 (memo)
@@ -243,11 +245,15 @@ type TelemetryIngestKey struct {
 }
 
 // DailyUsage 每日用電統計 (對應 basic.report)
-// 這是透過排程計算出來的結果，查詢速度快
+// This is currently a legacy compatibility model with no active writer or
+// reader. Future authoritative facts are keyed by date + MeasurementPointID;
+// existing device-day rows remain explicitly unresolved unless proven.
 type DailyUsage struct {
-	ID       uint64 `gorm:"primaryKey"`
-	Date     string `gorm:"index;size:10"`                      // YYYY-MM-DD
-	DeviceID uint   `gorm:"index;uniqueIndex:idx_daily_device"` // 複合唯一索引: 每天每設備只有一筆
+	ID                 uint64     `gorm:"primaryKey"`
+	Date               string     `gorm:"index;size:10"` // YYYY-MM-DD
+	MeasurementPointID *uuid.UUID `gorm:"column:measurement_point_id;index"`
+	DeviceID           *uint      `gorm:"column:device_id;index"`
+	LegacyUnresolved   bool       `gorm:"column:legacy_unresolved;not null;default:false"`
 
 	KwhUsage float64 `gorm:"type:numeric(10,3)"` // 當日用電量 (degree)
 	CarbonKg float64 `gorm:"type:numeric(10,3)"` // 當日碳排
