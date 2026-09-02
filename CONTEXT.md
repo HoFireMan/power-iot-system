@@ -60,6 +60,25 @@ fallback. It does not provide offline login, offline authorization, mutation
 queues, or broader product caching. Device persistence runtime remains pending
 an operator-owned Android emulator.
 
+Latest accepted identity/data-integrity checkpoint:
+
+PR #36 = **IDENT_002_RESOLUTION**
+
+MERGE_COMMIT = `49529edf06b2d6d063b260d61cc9a88becaaf60d`
+
+Feature head = `3b3088bb8bbccd458a8c4cc561635575e4a6428f`
+
+Schema migration `000010_measurement_point_identity` establishes
+MeasurementPoint-centered derived identity. AlertLog backfills only an exact
+historical DeviceAssignment match at CreatedAt; unattributable or ambiguous
+legacy rows remain explicitly unresolved. DailyUsage was proven inactive
+(no runtime writer or reader), so existing device-day rows remain quarantined
+legacy evidence and future authoritative uniqueness is
+`(date, measurement_point_id)`. Replacement, relocation, and half-open
+`valid_to` evidence passed. Device.ShopID and MAC remain non-authoritative.
+This resolves the IDENT-002 identity blocker only; Alerts API/settings/history,
+notifications, and Flutter Alerts integration remain incomplete.
+
 Earlier accepted product checkpoint retained for history:
 
 PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
