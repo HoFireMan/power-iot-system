@@ -48,11 +48,21 @@ for normal local Power-IoT operation.
 
 Latest accepted product feature checkpoint:
 
+PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
+
+MERGE_COMMIT = `a48ed2112166c5b2d26167d9cdcafbdde847cd8c`
+
+Feature parent = `527b9014ff642fafdf92e28a2b3598fe3f642a43`
+
+Earlier accepted product checkpoint retained for history:
+
 PR #29 = **HISTORICAL-MP-ENERGY-REPORT-01**
 
 MERGE_COMMIT = `d9fac309d92347514bdc4e5c6f07d24f2104fdeb`
 
 Feature parent = `271f413292fb1ea98680624bc325593bf9913dba`
+
+PR #29 historical MP report remains an accepted earlier capability.
 
 Earlier accepted product checkpoint retained for history:
 
@@ -62,7 +72,7 @@ MERGE_COMMIT = `4c342b3197ace7dc7fcd13d568b984078d6dff33`
 
 Feature parent = `0fc4f2caf94fa7a9f1b1c5eea4fae785640f9a12`
 
-PR #27 Admin Binding remains an accepted earlier capability; PR #29 is the
+PR #27 Admin Binding remains an accepted earlier capability; PR #31 is the
 newer accepted product feature checkpoint.
 
 PR #25 Local Runtime Operator remains the accepted runtime/operator checkpoint:
@@ -95,6 +105,13 @@ Current accepted development capability summary:
   mutation, retry-safe request identity, and double-submit serialization.
 - Local PostgreSQL and Android development runtime verification for Admin
   Binding.
+- Authenticated scoped Admin read-only Assignment History view implemented /
+  development-runtime verified.
+- Device ↔ MeasurementPoint interval timeline from the same authorized
+  AdminOverview snapshot with human-readable entity resolution.
+- Newest-first Active/Ended, Measurement Point, and Device filters with AND
+  semantics and safe selected-Shop transition handling.
+- Real Flutter Assignment History route and Admin Overview entry.
 - Local Runtime Operator accepted and ready for use.
 
 Current boundaries remain:
@@ -105,7 +122,10 @@ Current boundaries remain:
   development/runtime verified.
 - Broader historical reporting remains incomplete, including arbitrary date
   ranges, exports, additional report types, and production reporting hardening.
-- General Admin inventory/history remains incomplete.
+- General Admin inventory/history remains incomplete beyond the bounded
+  Assignment History view.
+- Admin operation audit history, including actor/reason/action events, remains
+  not implemented.
 - Alerts remain incomplete.
 - BLE/QR provisioning remains incomplete.
 - Offline cache remains incomplete.
