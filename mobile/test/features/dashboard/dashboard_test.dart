@@ -100,6 +100,7 @@ Map<String, Object?> _payload({
     };
 
 Dashboard _dashboard({
+  String shopId = '7',
   double? power = 0,
   double? dailyKwh,
   double? monthlyKwh,
@@ -107,7 +108,7 @@ Dashboard _dashboard({
   double? monthlyKg,
 }) =>
     Dashboard(
-      shop: const DashboardShop(id: '7', code: 'S7', name: 'Remote Shop'),
+      shop: DashboardShop(id: shopId, code: 'S$shopId', name: 'Remote Shop'),
       generatedAt: DateTime.utc(2026, 1, 2),
       currentPowerW: power,
       dailyKwh: dailyKwh,
@@ -612,7 +613,7 @@ void main() {
     final second = _notifier(secondRepository, shopId: 'second');
     first.dispose();
     firstRepository.completeNext(_dashboard(power: 1));
-    secondRepository.completeNext(_dashboard(power: 2));
+    secondRepository.completeNext(_dashboard(shopId: 'second', power: 2));
     await Future<void>.delayed(Duration.zero);
     expect(second.state.data?.currentPowerW, 2);
     expect(firstRepository.shopIds, ['first']);
