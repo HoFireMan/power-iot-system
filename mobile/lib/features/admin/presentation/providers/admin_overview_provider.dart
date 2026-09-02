@@ -487,6 +487,33 @@ Future<void> retryAdminOverview(WidgetRef ref) async {
   await refreshedOverview;
 }
 
-final adminOverviewProvider = FutureProvider<AdminOverview>((ref) {
-  return ref.watch(adminOverviewRepositoryProvider).loadOverview();
+final adminOverviewProvider = FutureProvider<AdminOverview>((ref) async {
+  final auth = ref.watch(authControllerProvider);
+  if (!auth.isAuthenticated) {
+    return ref.read(adminOverviewRepositoryProvider).loadOverview();
+  }
+
+  // The AdminOverview depends on the server-authorized Shop snapshot. Wait
+  // for that snapshot instead of turning its normal initial loading state into
+  // a misleading "no authorized Shop" error.
+  while (true) {
+    final shops = ref.watch(shopsProvider);
+    if (shops.status == RemoteStatus.loading) {
+      await ref.read(shopsProvider.notifier).stream.firstWhere(
+            (state) => state.status != RemoteStatus.loading,
+          );
+      continue;
+    }
+
+    final shopId = selectedAdminShopId(shops);
+    final overview =
+        await ref.read(adminOverviewRepositoryProvider).loadOverview();
+
+    // A Shop selection may change while the request is in flight. Never
+    // publish the old Shop's rows; Riverpod will also invalidate this
+    // provider because it watches shopsProvider.
+    if (shopId == selectedAdminShopId(ref.read(shopsProvider))) {
+      return overview;
+    }
+  }
 });

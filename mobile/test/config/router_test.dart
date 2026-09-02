@@ -42,6 +42,8 @@ void main() {
       '/shops',
       '/admin/mock',
       '/admin/mock/bind-device',
+      '/admin/assignment-history',
+      '/admin/mock/assignment-history',
     ]) {
       expect(authRedirect(auth, location), '/login');
     }
