@@ -48,6 +48,20 @@ for normal local Power-IoT operation.
 
 Latest accepted product feature checkpoint:
 
+PR #34 = **READ_ONLY_FLUTTER_CACHE_01**
+
+MERGE_COMMIT = `8df2a67dd41b52c3beb0d84673a1004a930b2968`
+
+Feature parent = `cd503b66f8f52a608f801f453d1da076c5b4a383`
+
+Dashboard-only durable last-successful snapshot cache is implemented and tested
+with authenticated User + authorized Shop scoping and transient stale-read
+fallback. It does not provide offline login, offline authorization, mutation
+queues, or broader product caching. Device persistence runtime remains pending
+an operator-owned Android emulator.
+
+Earlier accepted product checkpoint retained for history:
+
 PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
 
 MERGE_COMMIT = `a48ed2112166c5b2d26167d9cdcafbdde847cd8c`
@@ -113,6 +127,9 @@ Current accepted development capability summary:
 - Newest-first Active/Ended, Measurement Point, and Device filters with AND
   semantics and safe selected-Shop transition handling.
 - Real Flutter Assignment History route and Admin Overview entry.
+- Dashboard-only durable read-only cache V1 using a separate SharedPreferences
+  boundary, with strict envelope validation, stale presentation, and
+  auth/Shop isolation tests.
 - Local Runtime Operator accepted and ready for use.
 
 Current boundaries remain:
@@ -131,7 +148,8 @@ Current boundaries remain:
   not implemented.
 - Alerts remain incomplete.
 - BLE/QR provisioning remains incomplete.
-- Offline cache remains incomplete.
+- Dashboard read-only cache V1 is implemented and tested; broader
+  offline/product caching remains incomplete.
 
 Dashboard refresh contract:
 
