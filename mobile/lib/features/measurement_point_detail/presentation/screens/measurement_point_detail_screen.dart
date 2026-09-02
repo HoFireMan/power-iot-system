@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:power_iot_app/config/theme.dart';
 import '../providers/measurement_point_detail_provider.dart';
@@ -59,6 +60,14 @@ class _Content extends StatelessWidget {
               style: const TextStyle(color: AppTheme.textSecondary)),
           const SizedBox(height: 8),
           _Status(status: detail.measurementPoint.status),
+          if (detail.technicalInfo != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => context.push('/admin/measurement-points/${detail.technicalInfo!.measurementPointId}/alert-settings'),
+              icon: const Icon(Icons.tune),
+              label: const Text('警報設定'),
+            ),
+          ],
           const SizedBox(height: 20),
           _EnergyHero(window: detail.todayEnergy),
           const SizedBox(height: 16),

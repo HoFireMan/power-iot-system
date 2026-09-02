@@ -419,7 +419,7 @@ func (s *MqttService) storeLegacyTelemetry(data MqttPayload, receivedAt time.Tim
 }
 
 func findDevice(tx *gorm.DB, mac string, device *domain.Device) error {
-	return tx.Preload("AlertSettings").Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ?", mac).First(device).Error
+	return tx.Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ?", mac).First(device).Error
 }
 
 func telemetryTime(timestamp int64) time.Time {

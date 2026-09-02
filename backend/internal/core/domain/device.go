@@ -42,6 +42,8 @@ type Device struct {
 	TimeSynced      bool   `gorm:"column:time_synced;default:false"`
 	CreatedAt       time.Time
 
+	// AlertSettings is retained for legacy schema compatibility. Runtime alert
+	// evaluation is MeasurementPoint-centered and does not read this relation.
 	AlertSettings DeviceAlertSetting `gorm:"foreignKey:DeviceID;constraint:OnDelete:CASCADE"`
 }
 

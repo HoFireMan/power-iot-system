@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"power-iot-backend/internal/adapters/persistence"
+	applicationalerts "power-iot-backend/internal/application/alerts"
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationbilling "power-iot-backend/internal/application/billing"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
@@ -121,8 +122,12 @@ func MapPublicError(err error, requestID string) PublicErrorMapping {
 		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusBadRequest
 	case errors.Is(err, applicationshops.ErrBillingHistoryConflict), errors.Is(err, corebilling.ErrBillingHistoryConflict):
 		code, message, status = "BILLING_CONFIGURATION_CONFLICT", "billing configuration conflict", http.StatusConflict
-	case errors.Is(err, applicationmeasurementpointdetail.ErrMeasurementPointNotFound):
+	case errors.Is(err, applicationmeasurementpointdetail.ErrMeasurementPointNotFound), errors.Is(err, applicationalerts.ErrSettingsNotFound):
 		code, message, status = "MEASUREMENT_POINT_NOT_FOUND", "measurement point not found", http.StatusNotFound
+	case errors.Is(err, applicationalerts.ErrHistoryNotFound):
+		code, message, status = "SHOP_NOT_FOUND", "shop not found", http.StatusNotFound
+	case errors.Is(err, applicationalerts.ErrInvalidSettings), errors.Is(err, applicationalerts.ErrInvalidCursor):
+		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusBadRequest
 	case errors.Is(err, persistence.ErrAdminBindingOverviewAuthenticationRequired):
 		code, message, status = "AUTHENTICATION_REQUIRED", "authentication required", http.StatusUnauthorized
 	case errors.Is(err, persistence.ErrAdminBindingOverviewNotFound), domainCode == domain.ErrShopNotFound:

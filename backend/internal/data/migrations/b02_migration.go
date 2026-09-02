@@ -30,6 +30,9 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 		if err := RunBillingV1Migration(ctx, databaseURL, admission); err != nil {
 			return report, err
 		}
+		if err := RunMeasurementPointAlertsMigration(ctx, databaseURL, admission); err != nil {
+			return report, err
+		}
 		report.State = ProtectedStateCleanB02
 		report.PostCommitState = ProtectedStateCleanB02
 		report.Outcome = ProtectedAlreadyComplete
@@ -140,6 +143,21 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	}
 	if err := identityTx.Commit(); err != nil {
 		return report, fmt.Errorf("measurement point identity body commit outcome unknown: %w", err)
+	}
+	alertsBody, err := fs.ReadFile(Files, "sql/000011_measurement_point_alerts.up.sql")
+	if err != nil {
+		return report, err
+	}
+	alertsTx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	if _, err := alertsTx.ExecContext(ctx, string(alertsBody)); err != nil {
+		_ = alertsTx.Rollback()
+		return report, fmt.Errorf("measurement point alerts body: %w", err)
+	}
+	if err := alertsTx.Commit(); err != nil {
+		return report, fmt.Errorf("measurement point alerts body commit outcome unknown: %w", err)
 	}
 
 	final, err := fence.Conn().BeginTx(ctx, nil)

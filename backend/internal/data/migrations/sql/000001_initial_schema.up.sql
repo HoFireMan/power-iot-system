@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS alert_logs (
     current NUMERIC(5,2),
     power NUMERIC(8,2),
     is_read BOOLEAN NOT NULL DEFAULT false,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

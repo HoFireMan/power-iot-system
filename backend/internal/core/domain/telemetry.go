@@ -15,11 +15,44 @@ type AlertLog struct {
 	LegacyUnresolved   bool       `gorm:"column:legacy_unresolved;not null;default:false"`
 	Type               string     `gorm:"size:50"`
 	Message            string
-	Voltage            float64   `gorm:"type:numeric(5,2)"`
-	Current            float64   `gorm:"type:numeric(5,2)"`
-	Power              float64   `gorm:"type:numeric(8,2)"`
-	IsRead             bool      `gorm:"default:false"`
-	CreatedAt          time.Time `gorm:"index"`
+	Voltage            float64 `gorm:"type:numeric(5,2)"`
+	Current            float64 `gorm:"type:numeric(5,2)"`
+	Power              float64 `gorm:"type:numeric(8,2)"`
+	IsRead             bool    `gorm:"default:false"`
+	// RecordedAt is the telemetry event instant. CreatedAt remains populated for
+	// legacy consumers, but alert ordering and lifecycle semantics use RecordedAt.
+	RecordedAt time.Time `gorm:"column:recorded_at;not null;index"`
+	CreatedAt  time.Time `gorm:"index"`
+}
+
+// MeasurementPointAlertSetting is the authoritative MP-centered alert policy.
+type MeasurementPointAlertSetting struct {
+	MeasurementPointID uuid.UUID `gorm:"column:measurement_point_id;type:uuid;primaryKey"`
+	DailyLimitKwh      *float64
+	MonthlyLimitKwh    *float64
+	NonUsageStartTime  string
+	NonUsageEndTime    string
+	IsEnabled          bool `gorm:"not null;default:true"`
+	UpdatedAt          time.Time
+}
+
+// MeasurementPointCurfewState stores the last accepted edge state. It is
+// serialized in the telemetry transaction so duplicate/out-of-order delivery
+// cannot produce duplicate rising-edge alerts.
+type MeasurementPointCurfewState struct {
+	MeasurementPointID uuid.UUID  `gorm:"column:measurement_point_id;type:uuid;primaryKey"`
+	InCurfew           bool       `gorm:"column:in_curfew;not null;default:false"`
+	LastEventAt        *time.Time `gorm:"column:last_event_at"`
+}
+
+func (a *AlertLog) BeforeCreate(_ *gorm.DB) error {
+	if a.RecordedAt.IsZero() {
+		a.RecordedAt = a.CreatedAt
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = a.RecordedAt
+	}
+	return nil
 }
 
 // PowerReading is the canonical persisted telemetry model. The domain package
