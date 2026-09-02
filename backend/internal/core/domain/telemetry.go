@@ -20,7 +20,7 @@ type AlertLog struct {
 	Power              float64 `gorm:"type:numeric(8,2)"`
 	IsRead             bool    `gorm:"default:false"`
 	// RecordedAt is the telemetry event instant. CreatedAt remains populated for
-	// legacy consumers, but alert ordering and lifecycle semantics use RecordedAt.
+	// legacy consumers and is the Alert History ordering instant.
 	RecordedAt time.Time `gorm:"column:recorded_at;not null;index"`
 	CreatedAt  time.Time `gorm:"index"`
 }
@@ -28,12 +28,11 @@ type AlertLog struct {
 // MeasurementPointAlertSetting is the authoritative MP-centered alert policy.
 type MeasurementPointAlertSetting struct {
 	MeasurementPointID uuid.UUID `gorm:"column:measurement_point_id;type:uuid;primaryKey"`
-	DailyLimitKwh      *float64
-	MonthlyLimitKwh    *float64
-	NonUsageStartTime  string
-	NonUsageEndTime    string
-	IsEnabled          bool `gorm:"not null;default:true"`
-	UpdatedAt          time.Time
+	QuietHoursStart    string    `gorm:"column:quiet_hours_start"`
+	QuietHoursEnd      string    `gorm:"column:quiet_hours_end"`
+	PowerThresholdW    float64   `gorm:"column:power_threshold_w;not null;default:10"`
+	IsEnabled          bool      `gorm:"not null;default:true"`
+	UpdatedAt          time.Time `gorm:"column:updated_at"`
 }
 
 // MeasurementPointCurfewState stores the last accepted edge state. It is

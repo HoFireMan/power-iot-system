@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"errors"
+	"math"
 	"regexp"
 	"strconv"
 	"time"
@@ -21,22 +22,23 @@ var (
 
 type Settings struct {
 	MeasurementPointID string
-	DailyLimitKwh      *float64
-	MonthlyLimitKwh    *float64
-	NonUsageStartTime  string
-	NonUsageEndTime    string
 	IsEnabled          bool
+	QuietHoursStart    string
+	QuietHoursEnd      string
+	PowerThresholdW    float64
 	UpdatedAt          time.Time
 }
 type SettingsUpdate struct {
-	DailyLimitKwh     *float64
-	MonthlyLimitKwh   *float64
-	NonUsageStartTime string
-	NonUsageEndTime   string
-	IsEnabled         bool
+	IsEnabled       bool
+	QuietHoursStart string
+	QuietHoursEnd   string
+	PowerThresholdW float64
 }
 type Alert struct {
 	ID                   string
+	DeviceID             uint
+	DeviceName           string
+	SerialNumber         *string
 	MeasurementPointID   string
 	MeasurementPointName string
 	Type                 string
@@ -44,8 +46,7 @@ type Alert struct {
 	Voltage              float64
 	Current              float64
 	Power                float64
-	IsRead               bool
-	RecordedAt           time.Time
+	CreatedAt            time.Time
 }
 type HistoryPage struct {
 	Items      []Alert
@@ -53,50 +54,57 @@ type HistoryPage struct {
 }
 
 type Repository interface {
-	FindMeasurementPointAlertSettings(context.Context, uint, uuid.UUID) (persistence.MeasurementPointAlertSettingsProjection, error)
-	SetMeasurementPointAlertSettings(context.Context, uint, uuid.UUID, *float64, *float64, string, string, bool) error
-	FindAlertHistory(context.Context, uint, uint, int, string) (persistence.AlertHistoryPage, error)
+	FindMeasurementPointAlertSettings(context.Context, uint, uint, uuid.UUID) (persistence.MeasurementPointAlertSettingsProjection, error)
+	SetMeasurementPointAlertSettings(context.Context, uint, uint, uuid.UUID, string, string, float64, bool) error
+	FindAlertHistory(context.Context, uint, uint, *uuid.UUID, int, string) (persistence.AlertHistoryPage, error)
 }
 type Service struct{ repository Repository }
 
 func New(repository Repository) *Service { return &Service{repository: repository} }
 
-func (s *Service) GetSettings(ctx context.Context, userID uint, pointID string) (Settings, error) {
+func (s *Service) GetSettings(ctx context.Context, userID, shopID uint, pointID string) (Settings, error) {
 	id, err := parseUUID(pointID)
-	if err != nil || userID == 0 {
+	if err != nil || userID == 0 || shopID == 0 || s == nil || s.repository == nil {
 		return Settings{}, ErrSettingsNotFound
 	}
-	if s == nil || s.repository == nil {
-		return Settings{}, ErrSettingsNotFound
-	}
-	row, err := s.repository.FindMeasurementPointAlertSettings(ctx, userID, id)
+	row, err := s.repository.FindMeasurementPointAlertSettings(ctx, userID, shopID, id)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Settings{}, ErrSettingsNotFound
 	}
 	if err != nil {
 		return Settings{}, err
 	}
-	return Settings{MeasurementPointID: row.MeasurementPointID.String(), DailyLimitKwh: row.DailyLimitKwh, MonthlyLimitKwh: row.MonthlyLimitKwh, NonUsageStartTime: row.NonUsageStartTime, NonUsageEndTime: row.NonUsageEndTime, IsEnabled: row.IsEnabled, UpdatedAt: row.UpdatedAt}, nil
+	return Settings{MeasurementPointID: row.MeasurementPointID.String(), IsEnabled: row.IsEnabled, QuietHoursStart: row.QuietHoursStart, QuietHoursEnd: row.QuietHoursEnd, PowerThresholdW: row.PowerThresholdW, UpdatedAt: row.UpdatedAt}, nil
 }
-func (s *Service) UpdateSettings(ctx context.Context, userID uint, pointID string, update SettingsUpdate) error {
+
+func (s *Service) UpdateSettings(ctx context.Context, userID, shopID uint, pointID string, update SettingsUpdate) error {
 	id, err := parseUUID(pointID)
-	if err != nil || userID == 0 || !validUpdate(update) {
+	if err != nil || userID == 0 || shopID == 0 || !validUpdate(update) {
 		return ErrInvalidSettings
 	}
 	if s == nil || s.repository == nil {
 		return errors.New("alert settings repository unavailable")
 	}
-	err = s.repository.SetMeasurementPointAlertSettings(ctx, userID, id, update.DailyLimitKwh, update.MonthlyLimitKwh, update.NonUsageStartTime, update.NonUsageEndTime, update.IsEnabled)
+	err = s.repository.SetMeasurementPointAlertSettings(ctx, userID, shopID, id, update.QuietHoursStart, update.QuietHoursEnd, update.PowerThresholdW, update.IsEnabled)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return ErrSettingsNotFound
 	}
 	return err
 }
-func (s *Service) History(ctx context.Context, userID, shopID uint, limit int, cursor string) (HistoryPage, error) {
+
+func (s *Service) History(ctx context.Context, userID, shopID uint, pointRef string, limit int, cursor string) (HistoryPage, error) {
 	if s == nil || s.repository == nil || userID == 0 || shopID == 0 {
 		return HistoryPage{}, ErrHistoryNotFound
 	}
-	row, err := s.repository.FindAlertHistory(ctx, userID, shopID, limit, cursor)
+	var pointID *uuid.UUID
+	if pointRef != "" {
+		id, err := parseUUID(pointRef)
+		if err != nil {
+			return HistoryPage{}, ErrInvalidCursor
+		}
+		pointID = &id
+	}
+	row, err := s.repository.FindAlertHistory(ctx, userID, shopID, pointID, limit, cursor)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return HistoryPage{}, ErrHistoryNotFound
 	}
@@ -108,10 +116,11 @@ func (s *Service) History(ctx context.Context, userID, shopID uint, limit int, c
 	}
 	out := HistoryPage{NextCursor: row.NextCursor, Items: make([]Alert, 0, len(row.Items))}
 	for _, item := range row.Items {
-		out.Items = append(out.Items, Alert{ID: strconv.FormatUint(item.ID, 10), MeasurementPointID: item.MeasurementPointID.String(), MeasurementPointName: item.MeasurementPointName, Type: item.Type, Message: item.Message, Voltage: item.Voltage, Current: item.Current, Power: item.Power, IsRead: item.IsRead, RecordedAt: item.RecordedAt})
+		out.Items = append(out.Items, Alert{ID: strconv.FormatUint(item.ID, 10), DeviceID: item.DeviceID, DeviceName: item.DeviceName, SerialNumber: item.SerialNumber, MeasurementPointID: item.MeasurementPointID.String(), MeasurementPointName: item.MeasurementPointName, Type: item.Type, Message: item.Message, Voltage: item.Voltage, Current: item.Current, Power: item.Power, CreatedAt: item.CreatedAt})
 	}
 	return out, nil
 }
+
 func parseUUID(raw string) (uuid.UUID, error) {
 	if raw != stringTrim(raw) {
 		return uuid.Nil, errors.New("invalid uuid")
@@ -122,6 +131,7 @@ func parseUUID(raw string) (uuid.UUID, error) {
 	}
 	return id, nil
 }
+
 func stringTrim(s string) string {
 	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') {
 		s = s[1:]
@@ -135,14 +145,14 @@ func stringTrim(s string) string {
 var clockPattern = regexp.MustCompile(`^(?:[01][0-9]|2[0-3]):[0-5][0-9]$`)
 
 func validUpdate(update SettingsUpdate) bool {
-	if update.DailyLimitKwh != nil && (*update.DailyLimitKwh < 0 || *update.DailyLimitKwh > 1e9) {
+	if math.IsNaN(update.PowerThresholdW) || math.IsInf(update.PowerThresholdW, 0) || update.PowerThresholdW <= 0 {
 		return false
 	}
-	if update.MonthlyLimitKwh != nil && (*update.MonthlyLimitKwh < 0 || *update.MonthlyLimitKwh > 1e9) {
+	if (update.QuietHoursStart == "") != (update.QuietHoursEnd == "") {
 		return false
 	}
-	if (update.NonUsageStartTime == "") != (update.NonUsageEndTime == "") {
+	if update.QuietHoursStart != "" && update.QuietHoursStart == update.QuietHoursEnd {
 		return false
 	}
-	return (update.NonUsageStartTime == "" || clockPattern.MatchString(update.NonUsageStartTime)) && (update.NonUsageEndTime == "" || clockPattern.MatchString(update.NonUsageEndTime))
+	return (update.QuietHoursStart == "" || clockPattern.MatchString(update.QuietHoursStart)) && (update.QuietHoursEnd == "" || clockPattern.MatchString(update.QuietHoursEnd))
 }

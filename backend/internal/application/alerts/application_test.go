@@ -2,13 +2,19 @@ package alerts
 
 import "testing"
 
-func TestAlertSettingsValidationRequiresCompleteHHMMWindow(t *testing.T) {
-	if !validUpdate(SettingsUpdate{NonUsageStartTime: "22:00", NonUsageEndTime: "06:00", IsEnabled: true}) {
-		t.Fatal("valid overnight window rejected")
+func TestAlertSettingsValidationUsesV1Policy(t *testing.T) {
+	valid := SettingsUpdate{IsEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "06:00", PowerThresholdW: 10}
+	if !validUpdate(valid) {
+		t.Fatal("valid overnight policy rejected")
 	}
-	for _, value := range []SettingsUpdate{{NonUsageStartTime: "22:00"}, {NonUsageStartTime: "2:00", NonUsageEndTime: "06:00"}, {NonUsageStartTime: "22:00", NonUsageEndTime: "60:00"}} {
+	for _, value := range []SettingsUpdate{
+		{PowerThresholdW: 10, QuietHoursStart: "22:00"},
+		{PowerThresholdW: 10, QuietHoursStart: "2:00", QuietHoursEnd: "06:00"},
+		{PowerThresholdW: 10, QuietHoursStart: "22:00", QuietHoursEnd: "22:00"},
+		{PowerThresholdW: 0, QuietHoursStart: "22:00", QuietHoursEnd: "06:00"},
+	} {
 		if validUpdate(value) {
-			t.Fatalf("invalid window accepted: %+v", value)
+			t.Fatalf("invalid policy accepted: %+v", value)
 		}
 	}
 }

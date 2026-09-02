@@ -13,16 +13,18 @@ import (
 
 type MeasurementPointAlertSettingsProjection struct {
 	MeasurementPointID uuid.UUID
-	DailyLimitKwh      *float64
-	MonthlyLimitKwh    *float64
-	NonUsageStartTime  string
-	NonUsageEndTime    string
+	QuietHoursStart    string
+	QuietHoursEnd      string
+	PowerThresholdW    float64
 	IsEnabled          bool
 	UpdatedAt          time.Time
 }
 
 type AlertHistoryProjection struct {
 	ID                   uint64
+	DeviceID             uint
+	DeviceName           string
+	SerialNumber         *string
 	MeasurementPointID   uuid.UUID
 	MeasurementPointName string
 	Type                 string
@@ -30,10 +32,8 @@ type AlertHistoryProjection struct {
 	Voltage              float64
 	Current              float64
 	Power                float64
-	IsRead               bool
-	RecordedAt           time.Time
+	CreatedAt            time.Time
 }
-
 type AlertHistoryPage struct {
 	Items      []AlertHistoryProjection
 	NextCursor string
@@ -48,40 +48,40 @@ func NewMeasurementPointAlertRepository(db *gorm.DB) *MeasurementPointAlertRepos
 }
 
 type measurementPointAlertCursor struct {
-	RecordedAt time.Time `json:"recordedAt"`
-	ID         uint64    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	ID        uint64    `json:"id"`
 }
 
 func encodeAlertCursor(at time.Time, id uint64) string {
-	body, _ := json.Marshal(measurementPointAlertCursor{RecordedAt: at.UTC(), ID: id})
+	body, _ := json.Marshal(measurementPointAlertCursor{CreatedAt: at.UTC(), ID: id})
 	return base64.RawURLEncoding.EncodeToString(body)
 }
 func decodeAlertCursor(raw string) (measurementPointAlertCursor, error) {
-	var cursor measurementPointAlertCursor
+	var c measurementPointAlertCursor
 	body, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return cursor, ErrInvalidAlertCursor
+		return c, ErrInvalidAlertCursor
 	}
-	if err := json.Unmarshal(body, &cursor); err != nil || cursor.ID == 0 || cursor.RecordedAt.IsZero() {
-		return cursor, ErrInvalidAlertCursor
+	if err := json.Unmarshal(body, &c); err != nil || c.ID == 0 || c.CreatedAt.IsZero() {
+		return c, ErrInvalidAlertCursor
 	}
-	return cursor, nil
+	return c, nil
 }
 
-func (r *MeasurementPointAlertRepository) FindMeasurementPointAlertSettings(ctx context.Context, userID uint, pointID uuid.UUID) (MeasurementPointAlertSettingsProjection, error) {
-	if r == nil || r.db == nil || userID == 0 || pointID == uuid.Nil {
+func (r *MeasurementPointAlertRepository) FindMeasurementPointAlertSettings(ctx context.Context, userID, shopID uint, pointID uuid.UUID) (MeasurementPointAlertSettingsProjection, error) {
+	if r == nil || r.db == nil || userID == 0 || shopID == 0 || pointID == uuid.Nil {
 		return MeasurementPointAlertSettingsProjection{}, gorm.ErrRecordNotFound
 	}
 	var row MeasurementPointAlertSettingsProjection
 	query := r.db.WithContext(queryContext(ctx)).Raw(`
-SELECT p.id AS measurement_point_id, s.daily_limit_kwh, s.monthly_limit_kwh,
-       COALESCE(s.non_usage_start_time, ''), COALESCE(s.non_usage_end_time, ''), COALESCE(s.is_enabled, TRUE), COALESCE(s.updated_at, now())
+SELECT p.id AS measurement_point_id,
+       COALESCE(s.quiet_hours_start, ''), COALESCE(s.quiet_hours_end, ''),
+       COALESCE(s.power_threshold_w, 10.0), COALESCE(s.is_enabled, TRUE), COALESCE(s.updated_at, now())
 FROM measurement_points p
 JOIN shops sh ON sh.id=p.shop_id AND sh.is_active=TRUE
 JOIN user_shop_relations rel ON rel.shop_id=sh.id AND rel.user_id=?
-JOIN users u ON u.id=rel.user_id AND u.is_admin=TRUE AND u.auth_enabled=TRUE
 LEFT JOIN measurement_point_alert_settings s ON s.measurement_point_id=p.id
-WHERE p.id=?`, userID, pointID).Scan(&row)
+WHERE p.id=? AND p.shop_id=?`, userID, pointID, shopID).Scan(&row)
 	if query.Error != nil {
 		return row, query.Error
 	}
@@ -92,34 +92,32 @@ WHERE p.id=?`, userID, pointID).Scan(&row)
 	return row, nil
 }
 
-func (r *MeasurementPointAlertRepository) SetMeasurementPointAlertSettings(ctx context.Context, userID uint, pointID uuid.UUID, daily, monthly *float64, start, end string, enabled bool) error {
-	if r == nil || r.db == nil || userID == 0 || pointID == uuid.Nil {
+func (r *MeasurementPointAlertRepository) SetMeasurementPointAlertSettings(ctx context.Context, userID, shopID uint, pointID uuid.UUID, start, end string, threshold float64, enabled bool) error {
+	if r == nil || r.db == nil || userID == 0 || shopID == 0 || pointID == uuid.Nil {
 		return gorm.ErrInvalidDB
 	}
 	return r.db.WithContext(queryContext(ctx)).Transaction(func(tx *gorm.DB) error {
 		var allowed struct{ ID uuid.UUID }
-		q := tx.Raw(`SELECT p.id FROM measurement_points p JOIN shops sh ON sh.id=p.shop_id AND sh.is_active=TRUE JOIN user_shop_relations rel ON rel.shop_id=sh.id AND rel.user_id=? JOIN users u ON u.id=rel.user_id AND u.is_admin=TRUE AND u.auth_enabled=TRUE WHERE p.id=? FOR UPDATE OF p`, userID, pointID).Scan(&allowed)
+		q := tx.Raw(`SELECT p.id FROM measurement_points p JOIN shops sh ON sh.id=p.shop_id AND sh.is_active=TRUE JOIN user_shop_relations rel ON rel.shop_id=sh.id AND rel.user_id=? JOIN users u ON u.id=rel.user_id AND u.is_admin=TRUE AND u.auth_enabled=TRUE WHERE p.id=? AND p.shop_id=? FOR UPDATE OF p`, userID, pointID, shopID).Scan(&allowed)
 		if q.Error != nil {
 			return q.Error
 		}
 		if q.RowsAffected != 1 {
 			return gorm.ErrRecordNotFound
 		}
-		if err := tx.Exec(`INSERT INTO measurement_point_alert_settings (measurement_point_id,daily_limit_kwh,monthly_limit_kwh,non_usage_start_time,non_usage_end_time,is_enabled,updated_at) VALUES (?,?,?,?,?,?,now()) ON CONFLICT (measurement_point_id) DO UPDATE SET daily_limit_kwh=EXCLUDED.daily_limit_kwh, monthly_limit_kwh=EXCLUDED.monthly_limit_kwh, non_usage_start_time=EXCLUDED.non_usage_start_time, non_usage_end_time=EXCLUDED.non_usage_end_time, is_enabled=EXCLUDED.is_enabled, updated_at=now()`, pointID, daily, monthly, start, end, enabled).Error; err != nil {
+		if err := tx.Exec(`INSERT INTO measurement_point_alert_settings (measurement_point_id,quiet_hours_start,quiet_hours_end,power_threshold_w,is_enabled,updated_at) VALUES (?,?,?,?,?,now()) ON CONFLICT (measurement_point_id) DO UPDATE SET quiet_hours_start=EXCLUDED.quiet_hours_start, quiet_hours_end=EXCLUDED.quiet_hours_end, power_threshold_w=EXCLUDED.power_threshold_w, is_enabled=EXCLUDED.is_enabled, updated_at=now()`, pointID, start, end, threshold, enabled).Error; err != nil {
 			return err
 		}
-		// A policy edit starts a fresh lifecycle; stale active state must not
-		// suppress the first edge under the new policy.
 		return tx.Exec(`UPDATE measurement_point_curfew_states SET in_curfew=FALSE, last_event_at=NULL WHERE measurement_point_id=?`, pointID).Error
 	})
 }
 
-func (r *MeasurementPointAlertRepository) FindAlertHistory(ctx context.Context, userID, shopID uint, limit int, cursor string) (AlertHistoryPage, error) {
+func (r *MeasurementPointAlertRepository) FindAlertHistory(ctx context.Context, userID, shopID uint, pointID *uuid.UUID, limit int, cursor string) (AlertHistoryPage, error) {
 	if r == nil || r.db == nil || userID == 0 || shopID == 0 {
 		return AlertHistoryPage{}, gorm.ErrRecordNotFound
 	}
 	if limit < 1 {
-		limit = 20
+		limit = 50
 	}
 	if limit > 100 {
 		limit = 100
@@ -137,22 +135,25 @@ func (r *MeasurementPointAlertRepository) FindAlertHistory(ctx context.Context, 
 	if cursor != "" {
 		decoded, err = decodeAlertCursor(cursor)
 		if err != nil {
-			return AlertHistoryPage{}, ErrInvalidAlertCursor
+			return AlertHistoryPage{}, err
 		}
 	}
-	query := r.db.WithContext(queryContext(ctx)).Table("alert_logs a").Select(`a.id, a.measurement_point_id, p.name AS measurement_point_name, a.type, a.message, a.voltage, a.current, a.power, a.is_read, a.recorded_at`).Joins("JOIN measurement_points p ON p.id=a.measurement_point_id").Where("p.shop_id=? AND a.measurement_point_id IS NOT NULL AND a.legacy_unresolved=FALSE", shopID)
+	query := r.db.WithContext(queryContext(ctx)).Table("alert_logs a").Select(`a.id, a.device_id, d.name AS device_name, d.serial_number, a.measurement_point_id, p.name AS measurement_point_name, a.type, a.message, a.voltage, a.current, a.power, a.created_at`).Joins("JOIN measurement_points p ON p.id=a.measurement_point_id").Joins("LEFT JOIN devices d ON d.id=a.device_id").Where("p.shop_id=? AND a.measurement_point_id IS NOT NULL AND a.legacy_unresolved=FALSE", shopID)
+	if pointID != nil {
+		query = query.Where("a.measurement_point_id=?", *pointID)
+	}
 	if cursor != "" {
-		query = query.Where("(a.recorded_at, a.id) < (?, ?)", decoded.RecordedAt, decoded.ID)
+		query = query.Where("(a.created_at, a.id) < (?, ?)", decoded.CreatedAt, decoded.ID)
 	}
 	var rows []AlertHistoryProjection
-	if err := query.Order("a.recorded_at DESC, a.id DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
+	if err := query.Order("a.created_at DESC, a.id DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
 		return AlertHistoryPage{}, err
 	}
 	page := AlertHistoryPage{Items: rows}
 	if len(rows) > limit {
 		page.Items = rows[:limit]
 		last := page.Items[len(page.Items)-1]
-		page.NextCursor = encodeAlertCursor(last.RecordedAt, last.ID)
+		page.NextCursor = encodeAlertCursor(last.CreatedAt, last.ID)
 	}
 	return page, nil
 }

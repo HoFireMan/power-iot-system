@@ -54,20 +54,22 @@ GoRouter createRouter(AuthController auth) => GoRouter(
           builder: (context, state) => const DeviceListScreen(),
         ),
         GoRoute(
+          path: '/shops/:shopId/measurement-points/:measurementPointRef',
+          builder: (context, state) => MeasurementPointDetailScreen(
+            shopId: state.pathParameters['shopId']!,
+            measurementPointRef: state.pathParameters['measurementPointRef']!,
+          ),
+        ),
+        GoRoute(
           path: '/shops/:shopId/alerts',
           builder: (context, state) => AlertHistoryScreen(
             shopId: state.pathParameters['shopId']!,
+            measurementPointRef: state.uri.queryParameters['measurementPointRef'],
           ),
         ),
         GoRoute(
-          path: '/admin/measurement-points/:measurementPointId/alert-settings',
+          path: '/shops/:shopId/measurement-points/:measurementPointRef/alert-settings',
           builder: (context, state) => AlertSettingsScreen(
-            measurementPointId: state.pathParameters['measurementPointId']!,
-          ),
-        ),
-        GoRoute(
-          path: '/shops/:shopId/measurement-points/:measurementPointRef',
-          builder: (context, state) => MeasurementPointDetailScreen(
             shopId: state.pathParameters['shopId']!,
             measurementPointRef: state.pathParameters['measurementPointRef']!,
           ),

@@ -32,7 +32,7 @@ class MeasurementPointDetailScreen extends ConsumerWidget {
         body = _RetryMessage(onRetry: () => ref.read(provider.notifier).load());
         break;
       case MeasurementPointDetailStatus.success:
-        body = _Content(detail: state.data!);
+        body = _Content(detail: state.data!, shopId: shopId, measurementPointRef: measurementPointRef);
         break;
     }
     return Scaffold(
@@ -43,8 +43,10 @@ class MeasurementPointDetailScreen extends ConsumerWidget {
 }
 
 class _Content extends StatelessWidget {
-  const _Content({required this.detail});
+  const _Content({required this.detail, required this.shopId, required this.measurementPointRef});
   final MeasurementPointDetail detail;
+  final String shopId;
+  final String measurementPointRef;
 
   @override
   Widget build(BuildContext context) => ListView(
@@ -60,10 +62,16 @@ class _Content extends StatelessWidget {
               style: const TextStyle(color: AppTheme.textSecondary)),
           const SizedBox(height: 8),
           _Status(status: detail.measurementPoint.status),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () => context.push('/shops/$shopId/alerts?measurementPointRef=$measurementPointRef'),
+            icon: const Icon(Icons.notifications_none),
+            label: const Text('警報紀錄'),
+          ),
           if (detail.technicalInfo != null) ...[
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: () => context.push('/admin/measurement-points/${detail.technicalInfo!.measurementPointId}/alert-settings'),
+              onPressed: () => context.push('/shops/$shopId/measurement-points/$measurementPointRef/alert-settings'),
               icon: const Icon(Icons.tune),
               label: const Text('警報設定'),
             ),

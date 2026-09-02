@@ -47,6 +47,13 @@ func openTelemetryIntegrationDB(t *testing.T) *gorm.DB {
 	if err := db.Exec(string(identityBody)).Error; err != nil {
 		t.Fatal(err)
 	}
+	alertsBody, err := fs.ReadFile(migrations.Files, "sql/000011_measurement_point_alerts.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(alertsBody)).Error; err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 
@@ -116,6 +123,14 @@ func addAssignment(t *testing.T, db *gorm.DB, deviceID uint, pointID uuid.UUID, 
 	t.Helper()
 	assignment := domain.DeviceAssignment{ID: uuid.New(), DeviceID: deviceID, MeasurementPointID: pointID, ValidFrom: from, ValidTo: to}
 	if err := db.Create(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func addMPAlertSetting(t *testing.T, db *gorm.DB, pointID uuid.UUID, start, end string, threshold float64) {
+	t.Helper()
+	setting := domain.MeasurementPointAlertSetting{MeasurementPointID: pointID, QuietHoursStart: start, QuietHoursEnd: end, PowerThresholdW: threshold, IsEnabled: true}
+	if err := db.Create(&setting).Error; err != nil {
 		t.Fatal(err)
 	}
 }
@@ -323,13 +338,9 @@ func TestTelemetryAlertsUseMeasurementPointAtEventBoundary(t *testing.T) {
 	before := boundary.Add(-time.Minute)
 	addAssignment(t, db, fixture.first.ID, fixture.point.ID, before.Add(-time.Hour), &boundary)
 	addAssignment(t, db, fixture.first.ID, fixture.other.ID, boundary, nil)
-	if err := db.Create(&domain.DeviceAlertSetting{DeviceID: fixture.first.ID, NonUsageStartTime: "10:00", NonUsageEndTime: "11:00", IsEnabled: true}).Error; err != nil {
-		t.Fatal(err)
-	}
+	addMPAlertSetting(t, db, fixture.point.ID, "18:30", "19:30", 10)
+	addMPAlertSetting(t, db, fixture.other.ID, "18:30", "19:30", 10)
 	addAssignment(t, db, fixture.second.ID, fixture.point.ID, boundary, nil)
-	if err := db.Create(&domain.DeviceAlertSetting{DeviceID: fixture.second.ID, NonUsageStartTime: "10:00", NonUsageEndTime: "11:00", IsEnabled: true}).Error; err != nil {
-		t.Fatal(err)
-	}
 
 	ingestor := NewTelemetryIngestor(db)
 	for sequence, recorded := range map[int64]time.Time{1: before, 2: boundary} {
@@ -346,17 +357,14 @@ func TestTelemetryAlertsUseMeasurementPointAtEventBoundary(t *testing.T) {
 	if err := db.Where("device_id IN (?, ?)", fixture.first.ID, fixture.second.ID).Order("created_at").Find(&alerts).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 3 {
-		t.Fatalf("alert count=%d, want 3", len(alerts))
+	if len(alerts) != 2 {
+		t.Fatalf("alert count=%d, want 2", len(alerts))
 	}
-	if alerts[0].MeasurementPointID == nil || *alerts[0].MeasurementPointID != fixture.point.ID {
-		t.Fatalf("pre-boundary alert MP=%v, want %s", alerts[0].MeasurementPointID, fixture.point.ID)
+	if alerts[0].MeasurementPointID == nil || *alerts[0].MeasurementPointID != fixture.other.ID {
+		t.Fatalf("at-boundary alert MP=%v, want %s", alerts[0].MeasurementPointID, fixture.other.ID)
 	}
-	if alerts[1].MeasurementPointID == nil || *alerts[1].MeasurementPointID != fixture.other.ID {
-		t.Fatalf("at-boundary alert MP=%v, want %s", alerts[1].MeasurementPointID, fixture.other.ID)
-	}
-	if alerts[2].MeasurementPointID == nil || *alerts[2].MeasurementPointID != fixture.point.ID {
-		t.Fatalf("replacement alert MP=%v, want %s", alerts[2].MeasurementPointID, fixture.point.ID)
+	if alerts[1].MeasurementPointID == nil || *alerts[1].MeasurementPointID != fixture.point.ID {
+		t.Fatalf("replacement alert MP=%v, want %s", alerts[1].MeasurementPointID, fixture.point.ID)
 	}
 	for _, alert := range alerts {
 		if alert.LegacyUnresolved {

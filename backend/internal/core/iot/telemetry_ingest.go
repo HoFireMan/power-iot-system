@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -237,21 +236,7 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 		if err := markDeviceSeen(tx, device.ID, receivedAt); err != nil {
 			return err
 		}
-		alertAt := recordedAt
-		alertMeasurementPointID := measurementPointID
-		if isCoverage {
-			alertAt = time.Unix(data.Timestamp, 0).UTC()
-			var alertAssignment domain.DeviceAssignment
-			if err := findAssignmentAt(tx, device.ID, alertAt, &alertAssignment); err != nil {
-				if !errors.Is(err, gorm.ErrRecordNotFound) {
-					return err
-				}
-				alertMeasurementPointID = uuid.Nil
-			} else {
-				alertMeasurementPointID = alertAssignment.MeasurementPointID
-			}
-		}
-		if err := checkTelemetryAlerts(tx, device, data, alertAt, &alertMeasurementPointID); err != nil {
+		if err := checkTelemetryAlerts(tx, device, data, recordedAt, &measurementPointID); err != nil {
 			return err
 		}
 		result.Status = IngestStored
@@ -324,12 +309,6 @@ func markDeviceSeen(tx *gorm.DB, deviceID uint, receivedAt time.Time) error {
 
 func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, eventTime time.Time, measurementPointID *uuid.UUID) error {
 	if measurementPointID == nil || *measurementPointID == uuid.Nil {
-		// An active legacy policy without an assignment must fail closed rather
-		// than fabricate a Device-centered alert identity.
-		var legacy domain.DeviceAlertSetting
-		if err := tx.First(&legacy, "device_id = ?", device.ID).Error; err == nil && legacy.IsEnabled && legacy.NonUsageStartTime != "" && legacy.NonUsageEndTime != "" && data.Power > 10 {
-			return errors.New("telemetry alert measurement point assignment is unavailable")
-		}
 		return nil
 	}
 	// Lock the permanent identity before reading/updating lifecycle state. This
@@ -340,29 +319,19 @@ func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, e
 		return err
 	}
 	var settings domain.MeasurementPointAlertSetting
-	settingQuery := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&settings, "measurement_point_id = ?", *measurementPointID)
-	if settingQuery.Error != nil {
-		// Older isolated compatibility tests predate the protected alert schema.
-		// Production always has the MP table after MEASUREMENT_POINT_ALERTS is
-		// admitted; this fallback is intentionally unavailable once it exists.
-		if isMissingRelation(settingQuery.Error) {
-			return checkLegacyTelemetryAlert(tx, device, data, eventTime, measurementPointID)
-		}
-		if errors.Is(settingQuery.Error, gorm.ErrRecordNotFound) {
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&settings, "measurement_point_id = ?", *measurementPointID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
-		return settingQuery.Error
+		return err
 	}
-	if !settings.IsEnabled || settings.NonUsageStartTime == "" || settings.NonUsageEndTime == "" {
+	if !settings.IsEnabled || settings.QuietHoursStart == "" || settings.QuietHoursEnd == "" {
 		return nil
 	}
-	location, err := time.LoadLocation("Asia/Taipei")
+	active, err := curfewCondition(eventTime, settings.QuietHoursStart, settings.QuietHoursEnd, data.Power, settings.PowerThresholdW)
 	if err != nil {
 		return err
 	}
-	currentHM := eventTime.In(location).Format("15:04")
-	inWindow := inCurfewWindow(currentHM, settings.NonUsageStartTime, settings.NonUsageEndTime)
-	active := inWindow && data.Power > 10.0
 
 	var state domain.MeasurementPointCurfewState
 	stateQuery := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&state, "measurement_point_id = ?", *measurementPointID)
@@ -394,45 +363,22 @@ func checkTelemetryAlerts(tx *gorm.DB, device domain.Device, data MqttPayload, e
 	return createAlertLog(tx, alert)
 }
 
-func createAlertLog(tx *gorm.DB, alert domain.AlertLog) error {
-	if err := tx.Create(&alert).Error; err != nil {
-		var pgErr *pq.Error
-		if errors.As(err, &pgErr) && string(pgErr.Code) == "42703" {
-			return tx.Exec(`INSERT INTO alert_logs (device_id, measurement_point_id, legacy_unresolved, type, message, voltage, current, power, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, alert.DeviceID, alert.MeasurementPointID, alert.LegacyUnresolved, alert.Type, alert.Message, alert.Voltage, alert.Current, alert.Power, alert.IsRead, alert.CreatedAt).Error
-		}
-		return err
+func createAlertLog(tx *gorm.DB, alert domain.AlertLog) error { return tx.Create(&alert).Error }
+
+func curfewCondition(eventTime time.Time, start, end string, power, threshold float64) (bool, error) {
+	location, err := time.LoadLocation("Asia/Taipei")
+	if err != nil {
+		return false, err
 	}
-	return nil
+	return inCurfewWindow(eventTime.In(location).Format("15:04"), start, end) && power > threshold, nil
 }
 
 func inCurfewWindow(current, start, end string) bool {
+	if start == end {
+		return false
+	}
 	if start > end {
-		return current >= start || current <= end
+		return current >= start || current < end
 	}
-	return current >= start && current <= end
-}
-
-// isMissingRelation keeps pre-feature test schemas usable without masking
-// ordinary query failures. PostgreSQL's undefined_table is 42P01.
-func isMissingRelation(err error) bool {
-	var pgErr *pq.Error
-	return errors.As(err, &pgErr) && string(pgErr.Code) == "42P01"
-}
-
-func checkLegacyTelemetryAlert(tx *gorm.DB, device domain.Device, data MqttPayload, eventTime time.Time, measurementPointID *uuid.UUID) error {
-	var settings domain.DeviceAlertSetting
-	if err := tx.First(&settings, "device_id = ?", device.ID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-	if !settings.IsEnabled || settings.NonUsageStartTime == "" || settings.NonUsageEndTime == "" {
-		return nil
-	}
-	if !inCurfewWindow(eventTime.Format("15:04"), settings.NonUsageStartTime, settings.NonUsageEndTime) || data.Power <= 10 {
-		return nil
-	}
-	alert := domain.AlertLog{DeviceID: device.ID, MeasurementPointID: measurementPointID, LegacyUnresolved: false, Type: "CURFEW_USAGE", Message: fmt.Sprintf("非營業時間異常運轉 (偵測功率: %.2f W)", data.Power), Voltage: data.Voltage, Current: data.Current, Power: data.Power, RecordedAt: eventTime, CreatedAt: eventTime}
-	return createAlertLog(tx, alert)
+	return current >= start && current < end
 }
