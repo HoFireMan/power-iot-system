@@ -105,8 +105,9 @@ Current accepted development capability summary:
   mutation, retry-safe request identity, and double-submit serialization.
 - Local PostgreSQL and Android development runtime verification for Admin
   Binding.
-- Authenticated scoped Admin read-only Assignment History view implemented /
-  development-runtime verified.
+- Authenticated scoped Admin read-only Assignment History view implemented and
+  Flutter-tested; isolated Backend runtime verified, while device-level runtime
+  verification remains pending an operator-owned Android emulator.
 - Device ↔ MeasurementPoint interval timeline from the same authorized
   AdminOverview snapshot with human-readable entity resolution.
 - Newest-first Active/Ended, Measurement Point, and Device filters with AND
@@ -124,6 +125,8 @@ Current boundaries remain:
   ranges, exports, additional report types, and production reporting hardening.
 - General Admin inventory/history remains incomplete beyond the bounded
   Assignment History view.
+- Assignment History device-level runtime acceptance remains pending because
+  the only connected Android emulator is not operator-owned.
 - Admin operation audit history, including actor/reason/action events, remains
   not implemented.
 - Alerts remain incomplete.

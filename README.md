@@ -25,7 +25,7 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | Billing Energy / coverage | ✅ Development implemented / verified |
 | Billing estimate | ✅ Development implemented / verified |
 | Monthly Measurement Point historical energy report | ✅ Development/runtime verified |
-| Admin Assignment History | ✅ Development/runtime verified |
+| Admin Assignment History | ✅ Development implemented / tested; device runtime pending |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | User authentication/session/JWT | ✅ Development implemented / verified |
 | Scoped-admin Shop/Billing/Device Binding authorization | ✅ Development implemented / verified |
@@ -78,6 +78,11 @@ MeasurementPoint 是持續存在的邏輯量測位置；Device 可被替換、�
 - authenticated Shop-scoped monthly Measurement Point historical energy report with Shop aggregate, per-MP usage/coverage, historical assignment attribution, and real Flutter integration
 - authenticated scoped Admin read-only assignment history with Device ↔ MeasurementPoint interval timeline, human-readable Device/MP resolution, Active/Ended filtering, and real Flutter integration
 - Device Simulator，支援無實體設備時的系統端驗證
+
+The Assignment History implementation is Flutter-tested and its Backend contract
+has been verified against isolated local PostgreSQL. Device-level runtime
+verification remains pending an operator-owned Android emulator; no production
+or unowned runtime was used for acceptance.
 
 ## Technology Stack
 
