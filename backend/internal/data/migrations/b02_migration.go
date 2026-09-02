@@ -20,7 +20,10 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	if err != nil {
 		return report, err
 	}
-	if inspection.State == ProtectedStateCleanB02 {
+	if inspection.State == ProtectedStateCleanB02 || inspection.State == ProtectedStateCleanB02IdentityRequired {
+		if err := RunMeasurementPointIdentityMigration(ctx, databaseURL, admission); err != nil {
+			return report, err
+		}
 		if err := RunDashboardCarbonMigration(ctx, databaseURL, admission); err != nil {
 			return report, err
 		}
@@ -122,6 +125,21 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	}
 	if err := billingTx.Commit(); err != nil {
 		return report, fmt.Errorf("billing V1 body commit outcome unknown: %w", err)
+	}
+	identityBody, err := fs.ReadFile(Files, "sql/000010_measurement_point_identity.up.sql")
+	if err != nil {
+		return report, err
+	}
+	identityTx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	if _, err := identityTx.ExecContext(ctx, string(identityBody)); err != nil {
+		_ = identityTx.Rollback()
+		return report, fmt.Errorf("measurement point identity body: %w", err)
+	}
+	if err := identityTx.Commit(); err != nil {
+		return report, fmt.Errorf("measurement point identity body commit outcome unknown: %w", err)
 	}
 
 	final, err := fence.Conn().BeginTx(ctx, nil)

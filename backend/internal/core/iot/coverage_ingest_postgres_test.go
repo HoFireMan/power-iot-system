@@ -86,10 +86,12 @@ func TestCoverageIngestFullIntervalBoundariesAndAlertEventTime(t *testing.T) {
 	if err != nil || result.Status != IngestStored {
 		t.Fatalf("full boundary=%+v err=%v", result, err)
 	}
-	var alerts int64
-	db.Model(&domain.AlertLog{}).Where("device_id=? AND created_at=?", fixture.first.ID, start.Add(90*time.Minute)).Count(&alerts)
-	if alerts != 1 {
-		t.Fatalf("alert event-time count=%d", alerts)
+	var alerts domain.AlertLog
+	if err := db.Where("device_id=? AND created_at=?", fixture.first.ID, start.Add(90*time.Minute)).First(&alerts).Error; err != nil {
+		t.Fatal(err)
+	}
+	if alerts.MeasurementPointID == nil || *alerts.MeasurementPointID != fixture.point.ID || alerts.LegacyUnresolved {
+		t.Fatalf("alert identity=%v unresolved=%t", alerts.MeasurementPointID, alerts.LegacyUnresolved)
 	}
 
 	straddle := coverageTestPayload(fixture.first.MacAddress, end.Add(-30*time.Minute), end.Add(30*time.Minute), 1, 11, 0.001, end)

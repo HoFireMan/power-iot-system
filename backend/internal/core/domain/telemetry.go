@@ -9,15 +9,17 @@ import (
 
 // AlertLog records a notification generated from a telemetry reading.
 type AlertLog struct {
-	ID        uint64 `gorm:"primaryKey"`
-	DeviceID  uint   `gorm:"index;not null"`
-	Type      string `gorm:"size:50"`
-	Message   string
-	Voltage   float64   `gorm:"type:numeric(5,2)"`
-	Current   float64   `gorm:"type:numeric(5,2)"`
-	Power     float64   `gorm:"type:numeric(8,2)"`
-	IsRead    bool      `gorm:"default:false"`
-	CreatedAt time.Time `gorm:"index"`
+	ID                 uint64     `gorm:"primaryKey"`
+	DeviceID           uint       `gorm:"index;not null"`
+	MeasurementPointID *uuid.UUID `gorm:"column:measurement_point_id;index"`
+	LegacyUnresolved   bool       `gorm:"column:legacy_unresolved;not null;default:false"`
+	Type               string     `gorm:"size:50"`
+	Message            string
+	Voltage            float64   `gorm:"type:numeric(5,2)"`
+	Current            float64   `gorm:"type:numeric(5,2)"`
+	Power              float64   `gorm:"type:numeric(8,2)"`
+	IsRead             bool      `gorm:"default:false"`
+	CreatedAt          time.Time `gorm:"index"`
 }
 
 // PowerReading is the canonical persisted telemetry model. The domain package
@@ -109,11 +111,16 @@ type TelemetryIngestKey struct {
 	ConflictDetected        bool   `gorm:"column:conflict_detected;not null;default:false"`
 }
 
-// DailyUsage is a derived daily aggregate.
+// DailyUsage is a legacy compatibility representation. There is currently no
+// active writer or reader; any future authoritative row must be keyed by
+// Date + MeasurementPointID. Existing device-day rows remain explicitly
+// unresolved unless an approved source can prove their MP identity.
 type DailyUsage struct {
-	ID       uint64 `gorm:"primaryKey"`
-	Date     string `gorm:"index;size:10"`
-	DeviceID uint   `gorm:"index;uniqueIndex:idx_daily_device"`
+	ID                 uint64     `gorm:"primaryKey"`
+	Date               string     `gorm:"index;size:10"`
+	MeasurementPointID *uuid.UUID `gorm:"column:measurement_point_id;index"`
+	DeviceID           *uint      `gorm:"column:device_id;index"`
+	LegacyUnresolved   bool       `gorm:"column:legacy_unresolved;not null;default:false"`
 
 	KwhUsage float64 `gorm:"type:numeric(10,3)"`
 	CarbonKg float64 `gorm:"type:numeric(10,3)"`

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"power-iot-backend/internal/core/domain"
@@ -398,11 +399,19 @@ func (s *MqttService) storeLegacyTelemetry(data MqttPayload, receivedAt time.Tim
 			Update("last_seen", receivedAt).Error; err != nil {
 			return err
 		}
-		reading := domain.PowerReading{Time: recordTime, RecordedAt: recordTime, ReceivedAt: receivedAt, DeviceID: device.ID, Voltage: data.Voltage, Current: data.Current, Power: data.Power, ActivePower: data.Power, KwhTotal: data.KwhTotal}
+		var measurementPointID *uuid.UUID
+		var assignment domain.DeviceAssignment
+		if err := findAssignmentAt(tx, device.ID, recordTime, &assignment); err == nil {
+			pointID := assignment.MeasurementPointID
+			measurementPointID = &pointID
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		reading := domain.PowerReading{Time: recordTime, RecordedAt: recordTime, ReceivedAt: receivedAt, MeasurementPointID: measurementPointID, DeviceID: device.ID, Voltage: data.Voltage, Current: data.Current, Power: data.Power, ActivePower: data.Power, KwhTotal: data.KwhTotal}
 		if err := tx.Create(&reading).Error; err != nil {
 			return err
 		}
-		if err := checkTelemetryAlerts(tx, device, data, recordTime); err != nil {
+		if err := checkTelemetryAlerts(tx, device, data, recordTime, measurementPointID); err != nil {
 			return err
 		}
 		return nil
