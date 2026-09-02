@@ -37,7 +37,7 @@ func openExecutorDB(t *testing.T) *gorm.DB {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not set; Admin Binding PostgreSQL integration test not run")
 	}
-	if err := migrations.Up(dsn); err != nil {
+	if err := ensureAlertsSchema(dsn); err != nil {
 		t.Fatal(err)
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})

@@ -7,6 +7,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,6 +170,19 @@ func newAdminBindingHTTPFixture(t *testing.T) *adminBindingHTTPFixture {
 	db, err := gorm.Open(postgres.Open(isolated.DSN()), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("database open failed (%T)", err)
+	}
+	for _, name := range []string{
+		"sql/000007_b02_coverage_foundation.up.sql",
+		"sql/000010_measurement_point_identity.up.sql",
+		"sql/000011_measurement_point_alerts.up.sql",
+	} {
+		body, err := fs.ReadFile(migrations.Files, name)
+		if err != nil {
+			t.Fatalf("alerts schema read failed (%T)", err)
+		}
+		if err := db.Exec(string(body)).Error; err != nil {
+			t.Fatalf("alerts schema apply failed (%T)", err)
+		}
 	}
 	sqlDB, err := db.DB()
 	if err != nil {

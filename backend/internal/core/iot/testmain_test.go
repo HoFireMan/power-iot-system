@@ -16,6 +16,24 @@ func TestMain(m *testing.M) {
 	))
 }
 
+func ensureAlertsSchema(databaseURL string) error {
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	for _, name := range []string{"sql/000010_measurement_point_identity.up.sql", "sql/000011_measurement_point_alerts.up.sql"} {
+		body, err := fs.ReadFile(migrations.Files, name)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func migrateB02TestSchema(databaseURL string) error {
 	if err := migrations.Up(databaseURL); err != nil {
 		return err

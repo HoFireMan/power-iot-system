@@ -77,9 +77,7 @@ func TestCoverageIngestFullIntervalBoundariesAndAlertEventTime(t *testing.T) {
 	start := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
 	end := start.Add(2 * time.Hour)
 	addAssignment(t, db, fixture.first.ID, fixture.point.ID, start, &end)
-	if err := db.Create(&domain.DeviceAlertSetting{DeviceID: fixture.first.ID, NonUsageStartTime: "10:00", NonUsageEndTime: "11:00", IsEnabled: true}).Error; err != nil {
-		t.Fatal(err)
-	}
+	addMPAlertSetting(t, db, fixture.point.ID, "17:00", "19:00", 10)
 	ingestor := coverageTestIngestor(db)
 	payload := coverageTestPayload(fixture.first.MacAddress, start, end, 1, 10, 0.001, start.Add(90*time.Minute))
 	result, err := ingestor.Ingest(payload, start.Add(2*time.Hour))
@@ -87,7 +85,7 @@ func TestCoverageIngestFullIntervalBoundariesAndAlertEventTime(t *testing.T) {
 		t.Fatalf("full boundary=%+v err=%v", result, err)
 	}
 	var alerts domain.AlertLog
-	if err := db.Where("device_id=? AND created_at=?", fixture.first.ID, start.Add(90*time.Minute)).First(&alerts).Error; err != nil {
+	if err := db.Where("device_id=? AND created_at=?", fixture.first.ID, start).First(&alerts).Error; err != nil {
 		t.Fatal(err)
 	}
 	if alerts.MeasurementPointID == nil || *alerts.MeasurementPointID != fixture.point.ID || alerts.LegacyUnresolved {

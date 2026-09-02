@@ -406,6 +406,13 @@ func (s *MqttService) storeLegacyTelemetry(data MqttPayload, receivedAt time.Tim
 			measurementPointID = &pointID
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
+		} else {
+			var legacySetting domain.DeviceAlertSetting
+			if settingErr := tx.Where("device_id = ?", device.ID).First(&legacySetting).Error; settingErr == nil {
+				return errors.New("legacy alert setting requires an assignment")
+			} else if !errors.Is(settingErr, gorm.ErrRecordNotFound) {
+				return settingErr
+			}
 		}
 		reading := domain.PowerReading{Time: recordTime, RecordedAt: recordTime, ReceivedAt: receivedAt, MeasurementPointID: measurementPointID, DeviceID: device.ID, Voltage: data.Voltage, Current: data.Current, Power: data.Power, ActivePower: data.Power, KwhTotal: data.KwhTotal}
 		if err := tx.Create(&reading).Error; err != nil {
