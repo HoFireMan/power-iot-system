@@ -25,6 +25,19 @@ The first section contains stable task-execution rules such as:
 Detailed behavior remains owned by the relevant global Skills. Do not duplicate
 their full policies in this file.
 
+For substantial tasks, read `CONTEXT.md` first, then load only authoritative
+documents relevant to the changed surface. PRD owns product behavior, domain
+semantics, user capability, and product guarantees; SDLC owns implementation,
+TDD/testing, milestones, review, delivery, and maturity; Architecture, Protocol,
+specialized Contracts, and the Technical Debt Register apply when their domains
+are touched. Trivial tasks need not reread every project document. Current
+state/maturity comes from `CONTEXT.md` plus source/Git evidence; newer accepted
+evidence overrides stale PRD/SDLC maturity wording.
+
+Implementation work should preserve the accepted engineering method and design
+preferences in current SDLC/context, including TDD-oriented RED → GREEN →
+REFACTOR and cohesive Deep Module design where applicable.
+
 ### Dynamic Task Suffix
 
 The second section contains task-specific state such as:
