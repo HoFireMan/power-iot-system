@@ -39,7 +39,7 @@ class _BillingEstimateScreenState extends ConsumerState<BillingEstimateScreen> {
   @override
   Widget build(BuildContext context) {
     final shops = ref.watch(shopsProvider);
-    final shopId = shops.selectedShopId ?? shops.data?.currentShopId;
+    final shopId = authorizedShopId(shops);
     if (shopId == null || shopId.isEmpty) {
       return const Scaffold(
         body: SafeArea(child: Center(child: Text('尚未選擇店家'))),

@@ -94,8 +94,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen>
   @override
   Widget build(BuildContext context) {
     final shopsState = ref.watch(shopsProvider);
-    final snapshot = shopsState.data;
-    final shopId = shopsState.selectedShopId ?? snapshot?.currentShopId;
+    final shopId = authorizedShopId(shopsState);
 
     if (shopsState.status == RemoteStatus.loading) {
       return _scaffold(
@@ -157,6 +156,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen>
         final dashboard = state.data!;
         return _DashboardContent(
           dashboard: dashboard,
+          isCached: state.isDurableCache,
+          cachedAt: state.cachedAt,
           onSwitchShop: () => context.push('/shops'),
         );
     }
@@ -173,10 +174,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen>
 class _DashboardContent extends StatelessWidget {
   const _DashboardContent({
     required this.dashboard,
+    required this.isCached,
+    required this.cachedAt,
     required this.onSwitchShop,
   });
 
   final Dashboard dashboard;
+  final bool isCached;
+  final DateTime? cachedAt;
   final VoidCallback onSwitchShop;
 
   @override
@@ -233,6 +238,10 @@ class _DashboardContent extends StatelessWidget {
               ),
             ],
           ),
+          if (isCached && cachedAt != null) ...[
+            _StaleDashboardBanner(cachedAt: cachedAt!),
+            const SizedBox(height: 16),
+          ],
           const SizedBox(height: 24),
           _PowerCard(powerW: dashboard.currentPowerW),
           const SizedBox(height: 16),
@@ -262,6 +271,36 @@ class _DashboardContent extends StatelessWidget {
   }
 }
 
+class _StaleDashboardBanner extends StatelessWidget {
+  const _StaleDashboardBanner({required this.cachedAt});
+
+  final DateTime cachedAt;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Saved data. Last updated ${_formatDate(cachedAt)}. '
+          'Live refresh unavailable.',
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.amber.shade50,
+          border: Border.all(color: Colors.amber.shade700),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          '已儲存資料｜最後更新 ${_formatDate(cachedAt)}｜即時更新暫時無法取得',
+          style: TextStyle(
+            color: Colors.amber.shade900,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _BillingEstimateEntry extends ConsumerWidget {
   const _BillingEstimateEntry({required this.shopId});
   final String shopId;
@@ -271,8 +310,9 @@ class _BillingEstimateEntry extends ConsumerWidget {
     final now = DateTime.now();
     final month =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}';
-    final state =
-        ref.watch(billingEstimateProvider((shopId: shopId, month: month)));
+    final state = ref.watch(
+      billingEstimateProvider((shopId: shopId, month: month)),
+    );
     final label = state.when(
       loading: () => '查看本月預估電費',
       error: (_, __) => '查看本月預估電費',

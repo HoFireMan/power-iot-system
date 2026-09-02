@@ -15,8 +15,7 @@ class DeviceListScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final shopsState = ref.watch(shopsProvider);
-    final snapshot = shopsState.data;
-    final shopId = shopsState.selectedShopId ?? snapshot?.currentShopId;
+    final shopId = authorizedShopId(shopsState);
 
     Widget body;
     if (shopsState.status == RemoteStatus.loading) {

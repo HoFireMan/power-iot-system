@@ -44,6 +44,17 @@ final shopsRepositoryProvider = Provider<ShopsRepository>((ref) {
   return RemoteShopsRepository(ref.watch(authClientProvider));
 });
 
+/// Returns only a Shop already present in the current server-authorized
+/// snapshot. `currentShopId` is a navigation preference, never authority.
+String? authorizedShopId(ShopsState state) {
+  if (state.status != RemoteStatus.success || state.data == null) return null;
+  final requested = state.selectedShopId ?? state.data!.currentShopId;
+  if (requested == null || requested.trim().isEmpty) return null;
+  return state.data!.shops.any((shop) => shop.id == requested)
+      ? requested
+      : null;
+}
+
 class ShopsNotifier extends StateNotifier<ShopsState> {
   ShopsNotifier(this.repository, this.authClient)
       : super(const ShopsState.loading()) {
