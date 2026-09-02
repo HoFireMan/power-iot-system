@@ -288,6 +288,60 @@ func Aggregate(shopID uint, month string, points []PointFacts) Facts {
 	return result
 }
 
+// FormatDecimal renders energy and coverage ratios without binary floating
+// point. Finite decimal values are rendered without insignificant zeroes;
+// non-terminating ratios use the established 12-place representation.
+func FormatDecimal(value *big.Rat) string {
+	if value == nil {
+		return ""
+	}
+	if value.Sign() == 0 {
+		return "0"
+	}
+	negative := value.Sign() < 0
+	numerator := new(big.Int).Abs(value.Num())
+	denominator := new(big.Int).Set(value.Denom())
+	integer, remainder := new(big.Int).QuoRem(numerator, denominator, new(big.Int))
+	if remainder.Sign() == 0 {
+		if negative {
+			return "-" + integer.String()
+		}
+		return integer.String()
+	}
+	factorTwo, factorFive := 0, 0
+	for new(big.Int).Mod(denominator, big.NewInt(2)).Sign() == 0 {
+		denominator.Quo(denominator, big.NewInt(2))
+		factorTwo++
+	}
+	for new(big.Int).Mod(denominator, big.NewInt(5)).Sign() == 0 {
+		denominator.Quo(denominator, big.NewInt(5))
+		factorFive++
+	}
+	if denominator.Cmp(big.NewInt(1)) != 0 {
+		return value.FloatString(12)
+	}
+	scale := factorTwo
+	if factorFive > scale {
+		scale = factorFive
+	}
+	multiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
+	scaled := new(big.Int).Quo(new(big.Int).Mul(numerator, multiplier), value.Denom())
+	digits := scaled.String()
+	if len(digits) <= scale {
+		digits = strings.Repeat("0", scale-len(digits)+1) + digits
+	}
+	point := len(digits) - scale
+	fraction := strings.TrimRight(digits[point:], "0")
+	result := digits[:point]
+	if fraction != "" {
+		result += "." + fraction
+	}
+	if negative {
+		return "-" + result
+	}
+	return result
+}
+
 func mustLocation() *time.Location {
 	location, err := time.LoadLocation(BusinessTimezone)
 	if err != nil {

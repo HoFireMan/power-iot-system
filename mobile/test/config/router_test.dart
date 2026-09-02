@@ -34,6 +34,7 @@ void main() {
 
     for (final location in <String>[
       '/dashboard',
+      '/reports/energy',
       '/profile',
       '/devices',
       '/devices/device-1/alert',

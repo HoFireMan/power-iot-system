@@ -22,6 +22,7 @@ import (
 	applicationbilling "power-iot-backend/internal/application/billing"
 	applicationbillingestimate "power-iot-backend/internal/application/billingestimate"
 	applicationdashboard "power-iot-backend/internal/application/dashboard"
+	applicationhistoricalreport "power-iot-backend/internal/application/historicalreport"
 	applicationme "power-iot-backend/internal/application/me"
 	applicationmeasurementpointdetail "power-iot-backend/internal/application/measurementpointdetail"
 	applicationshops "power-iot-backend/internal/application/shops"
@@ -124,6 +125,8 @@ func main() {
 	httpadapter.RegisterBillingConfigurationRoutes(r, authenticator, billingService, billingService)
 	estimateService := applicationbillingestimate.New(persistence.NewBillingEstimateQueryRepository(db), time.Now)
 	httpadapter.RegisterBillingEstimateRoute(r, authenticator, estimateService)
+	historicalReportService := applicationhistoricalreport.New(persistence.NewBillingEnergyQueryRepository(db), time.Now)
+	httpadapter.RegisterHistoricalReportRoute(r, authenticator, historicalReportService)
 	httpadapter.RegisterDashboardRoute(r, authenticator, applicationdashboard.NewGormQueryRunner(db))
 	httpadapter.RegisterMeasurementPointDetailRoute(r, authenticator, applicationmeasurementpointdetail.NewGormQueryRunner(db))
 	httpadapter.RegisterAdminBindingRoutes(r, authenticator, httpadapter.AdminBindingHandlerConfig{Executor: applicationadminbinding.NewExecutor(db), DB: db})

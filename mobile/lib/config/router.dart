@@ -15,6 +15,7 @@ import 'package:power_iot_app/features/dashboard/dashboard_screen.dart';
 import 'package:power_iot_app/features/devices/presentation/screens/device_alert_screen.dart';
 import 'package:power_iot_app/features/devices/presentation/screens/device_list_screen.dart';
 import 'package:power_iot_app/features/profile/screens/profile_screen.dart';
+import 'package:power_iot_app/features/reports/presentation/screens/historical_energy_report_screen.dart';
 import 'package:power_iot_app/features/shops/screens/shop_list_screen.dart';
 import 'package:power_iot_app/features/measurement_point_detail/presentation/screens/measurement_point_detail_screen.dart';
 
@@ -40,6 +41,10 @@ GoRouter createRouter(AuthController auth) => GoRouter(
         GoRoute(
           path: '/billing/estimate',
           builder: (context, state) => const BillingEstimateScreen(),
+        ),
+        GoRoute(
+          path: '/reports/energy',
+          builder: (context, state) => const HistoricalEnergyReportScreen(),
         ),
         GoRoute(
           path: '/devices',
@@ -140,6 +145,7 @@ String? authRedirect(AuthController auth, String location) {
 bool _isProtectedLocation(String location) =>
     location == '/dashboard' ||
     location == '/billing/estimate' ||
+    location == '/reports/energy' ||
     location == '/profile' ||
     location == '/devices' ||
     location.startsWith('/devices/') ||
