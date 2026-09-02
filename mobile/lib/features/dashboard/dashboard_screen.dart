@@ -244,6 +244,8 @@ class _DashboardContent extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           _BillingEstimateEntry(shopId: dashboard.shop.id),
+          const SizedBox(height: 12),
+          const _HistoricalEnergyReportEntry(),
           const SizedBox(height: 24),
           const Text(
             '設備狀態',
@@ -294,6 +296,21 @@ class _BillingEstimateEntry extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _HistoricalEnergyReportEntry extends StatelessWidget {
+  const _HistoricalEnergyReportEntry();
+
+  @override
+  Widget build(BuildContext context) => Card(
+        child: ListTile(
+          leading: const Icon(Icons.bar_chart_rounded),
+          title: const Text('查看歷史用電報表'),
+          subtitle: const Text('依 Measurement Point 檢視每月用電與完整度'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => context.push('/reports/energy'),
+        ),
+      );
 }
 
 class _PowerCard extends StatelessWidget {
