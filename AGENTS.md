@@ -25,6 +25,19 @@ The first section contains stable task-execution rules such as:
 Detailed behavior remains owned by the relevant global Skills. Do not duplicate
 their full policies in this file.
 
+For substantial tasks, read `CONTEXT.md` first, then load only authoritative
+documents relevant to the changed surface. PRD owns product behavior, domain
+semantics, user capability, and product guarantees; SDLC owns implementation,
+TDD/testing, milestones, review, delivery, and maturity; Architecture, Protocol,
+specialized Contracts, and the Technical Debt Register apply when their domains
+are touched. Trivial tasks need not reread every project document. Current
+state/maturity comes from `CONTEXT.md` plus source/Git evidence; newer accepted
+evidence overrides stale PRD/SDLC maturity wording.
+
+Implementation work should preserve the accepted engineering method and design
+preferences in current SDLC/context, including TDD-oriented RED → GREEN →
+REFACTOR and cohesive Deep Module design where applicable.
+
 ### Dynamic Task Suffix
 
 The second section contains task-specific state such as:
@@ -56,14 +69,36 @@ Preserve, when emitted:
 Do not manually reconstruct Task Report metrics. Detailed metric semantics
 remain owned by the global Task Report Skill.
 
-## Orchestration and Model References
+## Orchestration, Skills, and Model References
 
-Supported Orchestration Profiles are A, C, and D. Explicit user profile
-selection is authoritative. Session topology is owned by the global
-Orchestration Profiles Skill; logical responsibility decomposition is owned by
-Agent Orchestration; and model family, effort, and escalation are owned by
-Model Escalation. Profile B is not supported. Trivial tasks do not require
-unnecessary profile selection.
+Use applicable installed/global Skills when they materially improve correctness,
+decomposition, review independence, or efficiency, including Skills installed
+from `mattpocock/skills`. Installed definitions are authoritative; historical
+names do not establish that a Skill exists. Keep detailed Skill policies in the
+Skills, not here.
+
+Subagents are optional: simple/trivial/mechanical/low-risk tasks may be done
+directly; medium tasks use Skills/subagents only when decomposition helps; large,
+cross-domain, or high-risk tasks normally use orchestration/subagents.
+Substantial/high-risk schema, security, concurrency, attribution, identity,
+data-integrity, or cross-domain contract work normally receives independent
+review; small deterministic changes may use parent self-review.
+
+Roles: `scout` = fast reconnaissance; `researcher` = deeper contract/architecture/
+governance investigation; `worker` = bounded implementation; `delegate` = bounded
+parallel work; `reviewer` = independent review; `oracle` = exceptional escalation
+for unresolved high-risk architecture, root-cause, authority-conflict, or
+correctness decisions. Do not require every role or invoke Oracle routinely.
+
+The parent decides whether decomposition is worthwhile, selects an applicable
+profile, evaluates findings, resolves authority conflicts, makes final
+acceptance/rejection decisions, and writes the final user-facing report.
+
+Supported Orchestration Profiles are A, C, and D; explicit user profile selection
+is authoritative. Session topology, responsibility decomposition, and model
+family/effort/escalation remain owned by the global Orchestration Profiles,
+Agent Orchestration, and Model Escalation Skills. Profile B is not supported;
+model/effort configuration inherits project/global defaults unless overridden.
 
 ## Repository Safety
 
