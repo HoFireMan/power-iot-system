@@ -112,7 +112,7 @@ func TestPostgresLegacyTelemetryWriteCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Up(dsn); err != nil {
+	if err := ensureAlertsSchema(dsn); err != nil {
 		t.Fatal(err)
 	}
 	mac := "A1B2C3D4E5F6"
@@ -168,7 +168,7 @@ func TestUnknownDeviceDoesNotReturnTerminalStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Up(dsn); err != nil {
+	if err := ensureAlertsSchema(dsn); err != nil {
 		t.Fatal(err)
 	}
 	publisher := &testPublisher{}

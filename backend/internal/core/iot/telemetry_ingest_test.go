@@ -16,6 +16,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"power-iot-backend/internal/adapters/persistence"
 	"power-iot-backend/internal/core/domain"
 	"power-iot-backend/internal/data/migrations"
 )
@@ -25,9 +26,6 @@ func openTelemetryIntegrationDB(t *testing.T) *gorm.DB {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not set; telemetry integration test not run")
-	}
-	if err := migrations.Up(dsn); err != nil {
-		t.Fatal(err)
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
@@ -328,6 +326,56 @@ func TestTelemetryIngestUsesHalfOpenAssignmentsForReplacementAndRelocation(t *te
 				t.Fatalf("want point %s, got %v", tc.pointID, reading.MeasurementPointID)
 			}
 		})
+	}
+}
+
+func TestTelemetryAlertsSettingsChangePreservesWatermarkAgainstDelayedEvent(t *testing.T) {
+	db := openTelemetryIntegrationDB(t)
+	fixture := newTelemetryFixture(t, db)
+	recordedT2 := time.Date(2026, 8, 8, 15, 0, 0, 0, time.UTC) // 23:00 Asia/Taipei
+	recordedT1 := recordedT2.Add(-time.Hour)
+	addAssignment(t, db, fixture.first.ID, fixture.point.ID, recordedT1.Add(-time.Hour), nil)
+	addMPAlertSetting(t, db, fixture.point.ID, "23:00", "01:00", 10)
+	user := domain.User{Account: "alerts-admin-" + uuid.NewString()[:8], PasswordHash: "test-hash", Name: "Alerts Admin", IsAdmin: true, AuthEnabled: true}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		db.Where("user_id = ? AND shop_id = ?", user.ID, fixture.shop.ID).Delete(&domain.UserShopRelation{})
+		db.Unscoped().Delete(&domain.User{}, user.ID)
+	}()
+	if err := db.Create(&domain.UserShopRelation{UserID: user.ID, ShopID: fixture.shop.ID, ShopRole: "staff"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	ingestor := NewTelemetryIngestor(db)
+	result, err := ingestor.Ingest(testPayload(fixture.first.MacAddress, recordedT2.Unix(), 1, 1), recordedT2.Add(time.Minute))
+	if err != nil || result.Status != IngestStored {
+		t.Fatalf("newer telemetry result=%+v err=%v", result, err)
+	}
+
+	repository := persistence.NewMeasurementPointAlertRepository(db)
+	if err := repository.SetMeasurementPointAlertSettings(context.Background(), user.ID, fixture.shop.ID, fixture.point.ID, "22:00", "02:00", 10, true); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err = ingestor.Ingest(testPayload(fixture.first.MacAddress, recordedT1.Unix(), 1, 2), recordedT1.Add(2*time.Hour))
+	if err != nil || result.Status != IngestStored {
+		t.Fatalf("delayed telemetry result=%+v err=%v", result, err)
+	}
+	var state domain.MeasurementPointCurfewState
+	if err := db.First(&state, "measurement_point_id = ?", fixture.point.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.InCurfew || state.LastEventAt == nil || !state.LastEventAt.Equal(recordedT2) {
+		t.Fatalf("stale event rewound lifecycle: %+v", state)
+	}
+	var alertCount int64
+	if err := db.Model(&domain.AlertLog{}).Where("measurement_point_id = ?", fixture.point.ID).Count(&alertCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if alertCount != 1 {
+		t.Fatalf("stale event created an alert or lost the opening alert: count=%d", alertCount)
 	}
 }
 

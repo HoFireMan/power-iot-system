@@ -75,11 +75,15 @@ func (r *MeasurementPointAlertRepository) FindMeasurementPointAlertSettings(ctx 
 	var row MeasurementPointAlertSettingsProjection
 	query := r.db.WithContext(queryContext(ctx)).Raw(`
 SELECT p.id AS measurement_point_id,
-       COALESCE(s.quiet_hours_start, ''), COALESCE(s.quiet_hours_end, ''),
-       COALESCE(s.power_threshold_w, 10.0), COALESCE(s.is_enabled, TRUE), COALESCE(s.updated_at, now())
+       COALESCE(s.quiet_hours_start, '') AS quiet_hours_start,
+       COALESCE(s.quiet_hours_end, '') AS quiet_hours_end,
+       COALESCE(s.power_threshold_w, 10.0) AS power_threshold_w,
+       COALESCE(s.is_enabled, TRUE) AS is_enabled,
+       COALESCE(s.updated_at, now()) AS updated_at
 FROM measurement_points p
 JOIN shops sh ON sh.id=p.shop_id AND sh.is_active=TRUE
 JOIN user_shop_relations rel ON rel.shop_id=sh.id AND rel.user_id=?
+JOIN users u ON u.id=rel.user_id AND u.auth_enabled=TRUE
 LEFT JOIN measurement_point_alert_settings s ON s.measurement_point_id=p.id
 WHERE p.id=? AND p.shop_id=?`, userID, pointID, shopID).Scan(&row)
 	if query.Error != nil {
@@ -108,7 +112,7 @@ func (r *MeasurementPointAlertRepository) SetMeasurementPointAlertSettings(ctx c
 		if err := tx.Exec(`INSERT INTO measurement_point_alert_settings (measurement_point_id,quiet_hours_start,quiet_hours_end,power_threshold_w,is_enabled,updated_at) VALUES (?,?,?,?,?,now()) ON CONFLICT (measurement_point_id) DO UPDATE SET quiet_hours_start=EXCLUDED.quiet_hours_start, quiet_hours_end=EXCLUDED.quiet_hours_end, power_threshold_w=EXCLUDED.power_threshold_w, is_enabled=EXCLUDED.is_enabled, updated_at=now()`, pointID, start, end, threshold, enabled).Error; err != nil {
 			return err
 		}
-		return tx.Exec(`UPDATE measurement_point_curfew_states SET in_curfew=FALSE, last_event_at=NULL WHERE measurement_point_id=?`, pointID).Error
+		return tx.Exec(`UPDATE measurement_point_curfew_states SET in_curfew=FALSE WHERE measurement_point_id=?`, pointID).Error
 	})
 }
 
