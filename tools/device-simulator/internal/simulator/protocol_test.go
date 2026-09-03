@@ -57,14 +57,22 @@ func TestAckTerminalClassification(t *testing.T) {
 }
 
 func TestParseCommand(t *testing.T) {
+	for _, action := range []string{"diagnostics", "report_diagnostics"} {
+		t.Run(action, func(t *testing.T) {
+			command, err := ParseCommand([]byte(`{"command_id":"cmd-1","action":"` + action + `","expires_at":1786107600}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if command.CommandID != "cmd-1" || command.Action != action {
+				t.Fatalf("unexpected command: %+v", command)
+			}
+			if err := command.Validate(time.Unix(1786000000, 0)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 	command, err := ParseCommand([]byte(`{"command_id":"cmd-1","action":"diagnostics","expires_at":1786107600}`))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if command.CommandID != "cmd-1" || command.Action != "diagnostics" {
-		t.Fatalf("unexpected command: %+v", command)
-	}
-	if err := command.Validate(time.Unix(1786000000, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ParseCommand([]byte(`{"command_id":"cmd-1","action":"reboot","expires_at":0}`)); err == nil {
@@ -75,5 +83,15 @@ func TestParseCommand(t *testing.T) {
 		if command.Validate(time.Unix(1786000000, 0)) == nil {
 			t.Fatalf("accepted destructive action %s", action)
 		}
+	}
+}
+
+func TestReportDiagnosticsAliasNeedsNoReportFields(t *testing.T) {
+	command, err := ParseCommand([]byte(`{"command_id":"cmd-1","action":"report_diagnostics","expires_at":1786107600}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Validate(time.Unix(1786000000, 0)); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -71,6 +71,33 @@ func TestQueueFullDropsWithoutUnboundedGoroutine(t *testing.T) {
 	}
 }
 
+func TestPublishCommandSupportsDiagnosticsAlias(t *testing.T) {
+	for _, action := range []string{"diagnostics", "report_diagnostics"} {
+		t.Run(action, func(t *testing.T) {
+			publisher := &testPublisher{}
+			service := &MqttService{ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
+			command := CommandEnvelope{CommandID: "cmd-unique", Action: action, ExpiresAt: time.Now().Add(time.Minute).Unix()}
+			if err := service.PublishCommand("AABBCCDDEEFF", command); err != nil {
+				t.Fatal(err)
+			}
+			if got := publisher.count(); got != 1 {
+				t.Fatalf("published %d commands, want 1", got)
+			}
+			published := publisher.last()
+			if published.topic != "device/AABBCCDDEEFF/command" {
+				t.Fatalf("published topic %q", published.topic)
+			}
+			var got CommandEnvelope
+			if err := json.Unmarshal(published.payload.([]byte), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Action != action || got.CommandID != command.CommandID || got.ExpiresAt != command.ExpiresAt {
+				t.Fatalf("published command = %+v, want %+v", got, command)
+			}
+		})
+	}
+}
+
 func TestTransactionFailureDoesNotPublishTerminalAck(t *testing.T) {
 	publisher := &testPublisher{}
 	service := &MqttService{db: nil, ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
