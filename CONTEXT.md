@@ -12,11 +12,9 @@ Canonical repository:
 Live canonical Git HEAD is authoritative in Git. Obtain it from the canonical
 repository with `git rev-parse main`.
 
-Current accepted synchronization point:
+DOCUMENTATION_RECONCILED_THROUGH = **PR #52**
 
-- `main` and `origin/main`: `02e8a75ecdd9d3d570e9e5f3bb4757f985dc589f`
-- PR #52: BUG-004 documentation reconciliation
-- Status: **ACCEPTED / MERGED / DOCS_RECONCILED / DEVICE_RUNTIME_PENDING**
+Current documentation status: **ACCEPTED / MERGED / DOCS_RECONCILED / DEVICE_RUNTIME_PENDING**
 
 The accepted mainline through PR #52 includes the earlier Admin Binding,
 IDENT-002, Alerts V1, Assignment History, Audit History, BUG-006, and BUG-004
@@ -143,7 +141,7 @@ claimed. Future diagnostic reporting remains separate scope:
 ### BUG-004 — unsafe legacy MQTT constructor
 
 - PR #51 implementation: `a54cb09e1f6d781e33967ca7bd6f4c8961713571`
-- PR #52 documentation reconciliation: `02e8a75ecdd9d3d570e9e5f3bb4757f985dc589f`
+- PR #52 documentation reconciliation: merged
 
 The unused `NewMqttService(brokerURL, db)` constructor was removed. All
 repository Backend/tool construction remains:
