@@ -27,6 +27,7 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | Billing estimate | ✅ Development implemented / verified |
 | Monthly Measurement Point historical energy report | ✅ Development/runtime verified |
 | Admin Assignment History | ✅ Development implemented / tested; device runtime pending |
+| Admin Binding Audit History | ✅ Read-only development implemented / tested; device runtime pending |
 | Admin Binding transaction/concurrency | ✅ Backend implemented / verified |
 | User authentication/session/JWT | ✅ Development implemented / verified |
 | Scoped-admin Shop/Billing/Device Binding authorization | ✅ Development implemented / verified |
@@ -81,6 +82,7 @@ MeasurementPoint 是持續存在的邏輯量測位置；Device 可被替換、�
 - authenticated Shop-scoped, read-only Alert History with MeasurementPoint filtering, stable cursor pagination, and durable edge-triggered CURFEW_USAGE generation
 - authenticated Shop-scoped monthly Measurement Point historical energy report with Shop aggregate, per-MP usage/coverage, historical assignment attribution, and real Flutter integration
 - authenticated scoped Admin read-only assignment history with Device ↔ MeasurementPoint interval timeline, human-readable Device/MP resolution, Active/Ended filtering, and real Flutter integration
+- authenticated scoped Admin Binding Audit History for Create Measurement Point, Bind, Replace, Relocate, and Unbind, with Action/MeasurementPoint/Device filters and stable cursor pagination
 - Dashboard-only durable last-successful snapshot cache using a separate SharedPreferences boundary, scoped by authenticated User and authorized Shop; transient stale-read fallback only, with no offline authorization or mutation queue
 - Device Simulator，支援無實體設備時的系統端驗證
 
@@ -95,6 +97,16 @@ The Assignment History implementation is Flutter-tested and its Backend contract
 has been verified against isolated local PostgreSQL. Device-level runtime
 verification remains pending an operator-owned Android emulator; no production
 or unowned runtime was used for acceptance.
+
+Admin Binding Audit History is read-only and exposes the five persisted binding
+operations through scoped-admin plus active Shop authorization. It uses
+Action/MeasurementPoint/Device filters and stable `(occurred_at, id)` cursor
+pagination. The API adds exactly one route, `GET /api/v1/shops/:shopId/admin/binding-audits`, bringing the versioned route count to 23. Historical IDs and Device serial/MAC values are preserved; Actor,
+Device, and MeasurementPoint names are current enrichment only. Relocate rows
+are target-Shop owned and require current authorization to both source and
+target Shops; unauthorized full rows are excluded. No audit mutation, actor
+filter, or schema migration is included; device runtime remains pending an
+operator-owned emulator.
 
 ## Technology Stack
 

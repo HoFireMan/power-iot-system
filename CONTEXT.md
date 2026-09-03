@@ -117,6 +117,23 @@ Broader Alerts remain incomplete for daily kWh thresholds, monthly kWh
 thresholds, read/acknowledgement semantics, notification delivery, per-Shop
 timezones, retention policy, and broader production hardening.
 
+Latest accepted Admin Binding audit history checkpoint:
+
+PR #44 = **ADMIN_BINDING_AUDIT_HISTORY_READ_01**
+
+MERGE_COMMIT = `8f7a36f27380a1143ddd0da14799878eb59f4931`
+
+The read-only Admin Binding Audit History slice exposes the five persisted
+operations (`create_measurement_point`, `bind`, `replace`, `relocate`, and
+`unbind`) through scoped-admin plus active Shop authorization. It supports
+Action/MeasurementPoint/Device filters and stable `(occurred_at, id)` cursor
+pagination. Historical IDs and Device serial/MAC snapshots remain authoritative;
+Actor, Device, and MeasurementPoint names are current enrichment only. Relocate
+rows are target-Shop owned and require current authorization to both source and
+target Shops; otherwise the full row is excluded. No audit mutation, actor
+filter, schema migration, or audit writer change is included. Device-level
+Flutter runtime acceptance remains pending an operator-owned emulator.
+
 Earlier accepted product checkpoint retained for history:
 
 PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
@@ -184,6 +201,12 @@ Current accepted development capability summary:
 - Newest-first Active/Ended, Measurement Point, and Device filters with AND
   semantics and safe selected-Shop transition handling.
 - Real Flutter Assignment History route and Admin Overview entry.
+- Authenticated, read-only Admin Binding Audit History for the five binding
+  operations, with scoped-admin + Shop authorization, Action/MeasurementPoint/
+  Device filters, stable cursor pagination, current-name enrichment, and
+  fail-closed cross-Shop relocation visibility.
+- Real Flutter Admin Audit History route and Admin Overview entry; no actor
+  filter or audit mutation is included.
 - Dashboard-only durable read-only cache V1 using a separate SharedPreferences
   boundary, with strict envelope validation, stale presentation, and
   auth/Shop isolation tests.
@@ -201,8 +224,9 @@ Current boundaries remain:
   Assignment History view.
 - Assignment History device-level runtime acceptance remains pending because
   the only connected Android emulator is not operator-owned.
-- Admin operation audit history, including actor/reason/action events, remains
-  not implemented.
+- The bounded Admin Binding Audit History read slice is accepted for the five
+  binding operations; a general Admin audit platform, actor filter/directory,
+  audit mutation, and broader audit domains remain incomplete.
 - Alerts V1 is implemented as the bounded development capability described in
   PR #39; broader Alerts remain incomplete as documented above.
 - BLE/QR provisioning remains incomplete.
