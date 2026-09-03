@@ -26,29 +26,48 @@ class AdminAuditHistoryScreen extends ConsumerStatefulWidget {
 class _AdminAuditHistoryScreenState
     extends ConsumerState<AdminAuditHistoryScreen> {
   String _action = '';
-  String _measurementPointId = '';
-  String _deviceId = '';
+  String _draftMeasurementPointId = '';
+  String _draftDeviceId = '';
+  String _appliedMeasurementPointId = '';
+  String _appliedDeviceId = '';
   String? _shopKey;
   String? _cursor;
+  int? _cursorGeneration;
   final List<AdminBindingAudit> _more = [];
   bool _loadingMore = false;
+  int _paginationGeneration = 0;
 
   AdminAuditHistoryQuery _query(String shopId) => AdminAuditHistoryQuery(
         shopId,
         _action,
-        _measurementPointId.trim(),
-        _deviceId.trim(),
+        _appliedMeasurementPointId,
+        _appliedDeviceId,
       );
 
   void _resetPagination() {
     setState(() {
+      _paginationGeneration++;
       _more.clear();
       _cursor = null;
+      _loadingMore = false;
+    });
+  }
+
+  void _applyFilters() {
+    setState(() {
+      _paginationGeneration++;
+      _appliedMeasurementPointId = _draftMeasurementPointId.trim();
+      _appliedDeviceId = _draftDeviceId.trim();
+      _more.clear();
+      _cursor = null;
+      _loadingMore = false;
     });
   }
 
   Future<void> _loadMore(AdminAuditHistoryQuery query) async {
     if (_loadingMore || _cursor == null) return;
+    final generation = _paginationGeneration;
+    final cursor = _cursor;
     setState(() => _loadingMore = true);
     try {
       final page = await RemoteAdminBindingAuditRepository(
@@ -58,24 +77,32 @@ class _AdminAuditHistoryScreenState
         action: query.action,
         measurementPointId: query.measurementPointId,
         deviceId: query.deviceId,
-        cursor: _cursor,
+        cursor: cursor,
       );
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
       // The request is only applied while the same Shop/filter query remains
       // visible. This prevents a late page from leaking into a switched view.
-      if (_shopKey != query.shopId || query != _query(query.shopId)) return;
+      if (_paginationGeneration != generation ||
+          _shopKey != query.shopId ||
+          query != _query(query.shopId)) {
+        return;
+      }
       setState(() {
         _more.addAll(page.items);
         _cursor = page.nextCursor;
       });
     } catch (_) {
-      if (mounted) {
+      if (mounted && _paginationGeneration == generation) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Unable to load more audit history.')),
         );
       }
     } finally {
-      if (mounted) setState(() => _loadingMore = false);
+      if (mounted && _paginationGeneration == generation) {
+        setState(() => _loadingMore = false);
+      }
     }
   }
 
@@ -87,8 +114,10 @@ class _AdminAuditHistoryScreenState
       // This is deliberately local presentation state. The provider family
       // below owns request identity, so old in-flight results are discarded.
       _shopKey = shopId;
+      _paginationGeneration++;
       _cursor = null;
       _more.clear();
+      _loadingMore = false;
     }
     if (!ref.watch(authControllerProvider).isAuthenticated || shopId == null) {
       return const Scaffold(
@@ -116,22 +145,25 @@ class _AdminAuditHistoryScreenState
           ),
         ),
         data: (page) {
-          _cursor ??= page.nextCursor;
+          if (_cursorGeneration != _paginationGeneration) {
+            _cursorGeneration = _paginationGeneration;
+            _cursor = page.nextCursor;
+          }
           final items = [...page.items, ..._more];
           return Column(
             children: [
               _AuditFilters(
                 action: _action,
-                measurementPointId: _measurementPointId,
-                deviceId: _deviceId,
+                measurementPointId: _draftMeasurementPointId,
+                deviceId: _draftDeviceId,
                 onAction: (value) {
                   setState(() => _action = value ?? '');
                   _resetPagination();
                 },
                 onMeasurementPointId: (value) =>
-                    setState(() => _measurementPointId = value),
-                onDeviceId: (value) => setState(() => _deviceId = value),
-                onApply: _resetPagination,
+                    setState(() => _draftMeasurementPointId = value),
+                onDeviceId: (value) => setState(() => _draftDeviceId = value),
+                onApply: _applyFilters,
               ),
               Expanded(
                 child: items.isEmpty
@@ -226,7 +258,9 @@ class _AuditTile extends StatelessWidget {
   final AdminBindingAudit audit;
 
   String _label(String? currentName, String id) =>
-      currentName == null || currentName.trim().isEmpty ? id : '$currentName (current)';
+      currentName == null || currentName.trim().isEmpty
+          ? id
+          : '$currentName (current)';
 
   @override
   Widget build(BuildContext context) {
@@ -241,11 +275,14 @@ class _AuditTile extends StatelessWidget {
         subtitle: Text(
           [
             'Occurred: ${audit.occurredAt.toLocal()}',
-            if (audit.effectiveAt != null) 'Effective: ${audit.effectiveAt!.toLocal()}',
+            if (audit.effectiveAt != null)
+              'Effective: ${audit.effectiveAt!.toLocal()}',
             'Actor: ${_label(audit.actor.currentDisplayName, audit.actor.id)}',
             if (audit.action != 'relocate' && contextPoint != null)
               'Measurement Point: ${_label(contextPoint.currentDisplayName, contextPoint.id)}',
-            if (audit.action == 'relocate' && oldPoint != null && newPoint != null)
+            if (audit.action == 'relocate' &&
+                oldPoint != null &&
+                newPoint != null)
               'Relocation: ${_label(oldPoint.currentDisplayName, oldPoint.id)} → ${_label(newPoint.currentDisplayName, newPoint.id)}',
             if (device != null)
               'Device: ${_label(device.currentDisplayName, device.id)}',
