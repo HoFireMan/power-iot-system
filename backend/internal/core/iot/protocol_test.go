@@ -114,21 +114,88 @@ func TestServerTimeFallback(t *testing.T) {
 }
 
 func TestCommandPayloadGeneration(t *testing.T) {
-	command := CommandEnvelope{CommandID: "cmd-unique", Action: "diagnostics", ExpiresAt: time.Now().Add(time.Minute).Unix()}
-	if err := command.Validate(time.Now()); err != nil {
-		t.Fatal(err)
+	for _, action := range []string{"diagnostics", "report_diagnostics"} {
+		t.Run(action, func(t *testing.T) {
+			command := CommandEnvelope{CommandID: "cmd-unique", Action: action, ExpiresAt: time.Now().Add(time.Minute).Unix()}
+			if err := command.Validate(time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) == "" || !strings.Contains(string(body), "command_id") || !strings.Contains(string(body), "expires_at") {
+				t.Fatalf("missing command envelope fields: %s", body)
+			}
+		})
 	}
-	body, err := json.Marshal(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) == "" || !strings.Contains(string(body), "command_id") || !strings.Contains(string(body), "expires_at") {
-		t.Fatalf("missing command envelope fields: %s", body)
-	}
-	for _, action := range []string{"factory_reset", "clear_telemetry_queue"} {
-		command.Action = action
+	for _, action := range []string{"factory_reset", "clear_telemetry_queue", "unsupported"} {
+		command := CommandEnvelope{CommandID: "cmd-unique", Action: action, ExpiresAt: time.Now().Add(time.Minute).Unix()}
 		if command.Validate(time.Now()) == nil {
-			t.Fatalf("destructive action accepted: %s", action)
+			t.Fatalf("unsupported action accepted: %s", action)
+		}
+	}
+}
+
+func TestCommandValidationPreservesOTARequirements(t *testing.T) {
+	now := time.Unix(1786100000, 0)
+	valid := CommandEnvelope{
+		CommandID: "ota-unique", Action: "ota", ExpiresAt: now.Add(time.Minute).Unix(), Version: "1.0.1",
+		URL: "https://example.test/firmware.bin", SHA256: strings.Repeat("a", 64), Size: 1,
+	}
+	if err := valid.Validate(now); err != nil {
+		t.Fatalf("valid OTA rejected: %v", err)
+	}
+	for _, command := range []CommandEnvelope{
+		valid,
+		{CommandID: valid.CommandID, Action: valid.Action, ExpiresAt: valid.ExpiresAt, Version: valid.Version, URL: "http://example.test/firmware.bin", SHA256: valid.SHA256, Size: valid.Size},
+		{CommandID: valid.CommandID, Action: valid.Action, ExpiresAt: valid.ExpiresAt, Version: valid.Version, URL: valid.URL, SHA256: "invalid", Size: valid.Size},
+		{CommandID: valid.CommandID, Action: valid.Action, ExpiresAt: valid.ExpiresAt, Version: valid.Version, URL: valid.URL, SHA256: valid.SHA256, Size: 0},
+	} {
+		if command == valid {
+			continue
+		}
+		if err := command.Validate(now); err == nil {
+			t.Fatalf("invalid OTA accepted: %+v", command)
+		}
+	}
+}
+
+func TestDiagnosticsAliasHasIdenticalValidation(t *testing.T) {
+	now := time.Unix(1786100000, 0)
+	base := CommandEnvelope{CommandID: "cmd-unique", ExpiresAt: now.Add(time.Minute).Unix()}
+	for _, test := range []struct {
+		name   string
+		action string
+		mutate func(*CommandEnvelope)
+	}{
+		{name: "valid canonical", action: "diagnostics"},
+		{name: "valid alias", action: "report_diagnostics"},
+		{name: "expired canonical", action: "diagnostics", mutate: func(c *CommandEnvelope) { c.ExpiresAt = now.Unix() }},
+		{name: "expired alias", action: "report_diagnostics", mutate: func(c *CommandEnvelope) { c.ExpiresAt = now.Unix() }},
+		{name: "malformed canonical", action: "diagnostics", mutate: func(c *CommandEnvelope) { c.CommandID = "" }},
+		{name: "malformed alias", action: "report_diagnostics", mutate: func(c *CommandEnvelope) { c.CommandID = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := base
+			command.Action = test.action
+			if test.mutate != nil {
+				test.mutate(&command)
+			}
+			got := command.Validate(now)
+			wantValid := strings.HasPrefix(test.name, "valid")
+			if (got == nil) != wantValid {
+				t.Fatalf("Validate() error = %v, wantValid=%v", got, wantValid)
+			}
+		})
+	}
+}
+
+func TestSupportedCommandActionsIncludeDiagnosticsAlias(t *testing.T) {
+	got := strings.Join(SupportedCommandActions(), "|")
+	for _, action := range []string{"diagnostics", "report_diagnostics", "reboot", "ota"} {
+		if !strings.Contains(got, action) {
+			t.Fatalf("supported action list %q does not contain %q", got, action)
 		}
 	}
 }

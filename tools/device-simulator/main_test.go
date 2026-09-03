@@ -298,24 +298,28 @@ func TestTwoDeviceOfflineReplayAndGeneratorIsolation(t *testing.T) {
 }
 
 func TestTwoDeviceCommandRoutingIsolation(t *testing.T) {
-	a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
-	b := newLifecycleDeviceWithMAC(t, "112233445566")
-	clientA := newLifecycleFakeClient()
-	clientB := newLifecycleFakeClient()
-	establishReady(t, a, clientA)
-	establishReady(t, b, clientB)
-	payload := []byte(`{"command_id":"cmd-1","action":"diagnostics","expires_at":4102444800}`)
-	b.onMessage(clientB, testMQTTMessage{topic: a.commandTopic(), payload: payload})
-	if got := clientB.countPublished("device/112233445566/command/ack"); got != 0 {
-		t.Fatalf("wrong-topic command reached B handler: %d", got)
-	}
-	a.onMessage(clientA, testMQTTMessage{topic: a.commandTopic(), payload: payload})
-	b.onMessage(clientB, testMQTTMessage{topic: b.commandTopic(), payload: payload})
-	if got := clientA.countPublished("device/AABBCCDDEEFF/command/ack"); got != 1 {
-		t.Fatalf("A command ACK count=%d, want 1", got)
-	}
-	if got := clientB.countPublished("device/112233445566/command/ack"); got != 1 {
-		t.Fatalf("B command ACK count=%d, want 1", got)
+	for _, action := range []string{"diagnostics", "report_diagnostics"} {
+		t.Run(action, func(t *testing.T) {
+			a := newLifecycleDeviceWithMAC(t, "AABBCCDDEEFF")
+			b := newLifecycleDeviceWithMAC(t, "112233445566")
+			clientA := newLifecycleFakeClient()
+			clientB := newLifecycleFakeClient()
+			establishReady(t, a, clientA)
+			establishReady(t, b, clientB)
+			payload := []byte(`{"command_id":"cmd-1","action":"` + action + `","expires_at":4102444800}`)
+			b.onMessage(clientB, testMQTTMessage{topic: a.commandTopic(), payload: payload})
+			if got := clientB.countPublished("device/112233445566/command/ack"); got != 0 {
+				t.Fatalf("wrong-topic command reached B handler: %d", got)
+			}
+			a.onMessage(clientA, testMQTTMessage{topic: a.commandTopic(), payload: payload})
+			b.onMessage(clientB, testMQTTMessage{topic: b.commandTopic(), payload: payload})
+			if got := clientA.countPublished("device/AABBCCDDEEFF/command/ack"); got != 1 {
+				t.Fatalf("A command ACK count=%d, want 1", got)
+			}
+			if got := clientB.countPublished("device/112233445566/command/ack"); got != 1 {
+				t.Fatalf("B command ACK count=%d, want 1", got)
+			}
+		})
 	}
 }
 

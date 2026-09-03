@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,9 +13,13 @@ import (
 	"power-iot-backend/internal/core/iot"
 )
 
+func supportedActionUsage() string {
+	return strings.Join(iot.SupportedCommandActions(), "|")
+}
+
 func main() {
 	mac := flag.String("device-mac", "", "device MAC")
-	action := flag.String("action", "diagnostics", "diagnostics|reboot|open_config_portal|reconnect_wifi|reconnect_mqtt|ota")
+	action := flag.String("action", iot.DiagnosticsAction, supportedActionUsage())
 	expiresIn := flag.Duration("expires-in", 5*time.Minute, "command lifetime")
 	version := flag.String("version", "", "OTA version")
 	url := flag.String("url", "", "OTA HTTPS URL")

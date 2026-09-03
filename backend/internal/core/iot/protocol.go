@@ -252,9 +252,33 @@ type CommandEnvelope struct {
 	Force     bool   `json:"force,omitempty"`
 }
 
-var supportedActions = map[string]bool{
-	"diagnostics": true, "reboot": true, "open_config_portal": true,
-	"reconnect_wifi": true, "reconnect_mqtt": true, "ota": true,
+const (
+	DiagnosticsAction       = "diagnostics"
+	ReportDiagnosticsAction = "report_diagnostics"
+)
+
+var supportedCommandActions = []string{
+	DiagnosticsAction,
+	ReportDiagnosticsAction,
+	"reboot",
+	"open_config_portal",
+	"reconnect_wifi",
+	"reconnect_mqtt",
+	"ota",
+}
+
+var supportedActions = func() map[string]bool {
+	actions := make(map[string]bool, len(supportedCommandActions))
+	for _, action := range supportedCommandActions {
+		actions[action] = true
+	}
+	return actions
+}()
+
+// SupportedCommandActions returns the accepted command actions in stable
+// presentation order for tooling help and validation parity.
+func SupportedCommandActions() []string {
+	return append([]string(nil), supportedCommandActions...)
 }
 
 func (c CommandEnvelope) Validate(now time.Time) error {
