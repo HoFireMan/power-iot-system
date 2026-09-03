@@ -47,21 +47,6 @@ type MqttService struct {
 	inFlight           sync.WaitGroup
 }
 
-// NewMqttService is retained for callers that used the old constructor. New
-// deployments should use NewMqttServiceWithConfig and a tls:// broker URL.
-func NewMqttService(brokerURL string, db *gorm.DB) *MqttService {
-	config := MqttConfig{BrokerURL: brokerURL, ClientID: "power-iot-backend-" + time.Now().UTC().Format("20060102150405.000000000"), TelemetryTopic: TelemetryTopic, CommandPrefix: CommandPrefix, ConnectTimeout: 10 * time.Second, WorkerCount: 4, QueueSize: 64}
-	s := &MqttService{db: db, ingestor: NewTelemetryIngestor(db), config: config, work: make(chan queuedMessage, config.QueueSize), clock: func() time.Time { return time.Now().UTC() }, ingestionBlocked: false}
-	client, err := newMQTTClient(config, s.onConnect, s.onConnectionLost)
-	if err != nil {
-		log.Printf("MQTT client setup failed: %v", err)
-		return s
-	}
-	s.client = client
-	s.disconnect = client.Disconnect
-	return s
-}
-
 func (s *MqttService) Connect() error {
 	s.setConnected(false)
 	if s.client == nil {
