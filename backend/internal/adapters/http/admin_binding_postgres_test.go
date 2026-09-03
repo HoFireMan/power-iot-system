@@ -29,6 +29,7 @@ import (
 type adminBindingHTTPFixture struct {
 	db                 *gorm.DB
 	handler            http.Handler
+	runner             *applicationauth.GormTransactionRunner
 	accessToken        string
 	nonAdminToken      string
 	unscopedAdminToken string
@@ -285,7 +286,7 @@ func newAdminBindingHTTPFixture(t *testing.T) *adminBindingHTTPFixture {
 		c.Request = r
 		router.HandleContext(c)
 	})
-	return &adminBindingHTTPFixture{db: db, handler: RequestIDHTTPMiddleware(routerHandler), accessToken: login.AccessToken, nonAdminToken: nonAdminLogin.AccessToken, unscopedAdminToken: unscopedAdminLogin.AccessToken, adminID: adminID, shopID: shopID, otherShopID: otherShopID, pointA: pointA, pointB: pointB, otherPoint: otherPoint, deviceA: deviceA, deviceB: deviceB}
+	return &adminBindingHTTPFixture{db: db, runner: runner, handler: RequestIDHTTPMiddleware(routerHandler), accessToken: login.AccessToken, nonAdminToken: nonAdminLogin.AccessToken, unscopedAdminToken: unscopedAdminLogin.AccessToken, adminID: adminID, shopID: shopID, otherShopID: otherShopID, pointA: pointA, pointB: pointB, otherPoint: otherPoint, deviceA: deviceA, deviceB: deviceB}
 }
 
 func countOperations(t *testing.T, db *gorm.DB, key string) int64 {

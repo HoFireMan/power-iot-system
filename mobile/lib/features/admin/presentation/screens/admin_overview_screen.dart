@@ -139,6 +139,7 @@ class AdminOverviewScreen extends ConsumerWidget {
                 data: (data) => _OverviewContent(
                   overview: data,
                   onOpenAssignmentHistory: openAssignmentHistory,
+                  onOpenAuditHistory: () => context.push('$routePrefix/audit-history'),
                   onReplace: replaceDevice,
                   onRelocate: relocateDevice,
                   onUnbind: unbindDevice,
@@ -172,6 +173,7 @@ class _OverviewContent extends StatelessWidget {
   const _OverviewContent({
     required this.overview,
     required this.onOpenAssignmentHistory,
+    required this.onOpenAuditHistory,
     required this.onReplace,
     required this.onRelocate,
     required this.onUnbind,
@@ -179,6 +181,7 @@ class _OverviewContent extends StatelessWidget {
 
   final AdminOverview overview;
   final VoidCallback onOpenAssignmentHistory;
+  final VoidCallback onOpenAuditHistory;
   final ValueChanged<String> onReplace;
   final ValueChanged<String> onRelocate;
   final ValueChanged<String> onUnbind;
@@ -241,6 +244,16 @@ class _OverviewContent extends StatelessWidget {
               onUnbind: () => onUnbind(assignment.id),
             );
           },
+        ),
+        Card(
+          child: ListTile(
+            key: const Key('audit-history-navigation'),
+            leading: const Icon(Icons.manage_history),
+            title: const Text('Audit History'),
+            subtitle: const Text('View read-only Admin Binding operations'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: onOpenAuditHistory,
+          ),
         ),
       ],
     );

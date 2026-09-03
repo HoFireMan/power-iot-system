@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"power-iot-backend/internal/adapters/persistence"
+	adminbindingaudit "power-iot-backend/internal/application/adminbindingaudit"
 	applicationalerts "power-iot-backend/internal/application/alerts"
 	applicationauth "power-iot-backend/internal/application/auth"
 	applicationbilling "power-iot-backend/internal/application/billing"
@@ -128,14 +129,16 @@ func MapPublicError(err error, requestID string) PublicErrorMapping {
 		code, message, status = "SHOP_NOT_FOUND", "shop not found", http.StatusNotFound
 	case errors.Is(err, applicationalerts.ErrInvalidSettings), errors.Is(err, applicationalerts.ErrInvalidCursor):
 		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusBadRequest
-	case errors.Is(err, persistence.ErrAdminBindingOverviewAuthenticationRequired):
+	case errors.Is(err, persistence.ErrAdminBindingOverviewAuthenticationRequired), errors.Is(err, adminbindingaudit.ErrAuthenticationRequired):
 		code, message, status = "AUTHENTICATION_REQUIRED", "authentication required", http.StatusUnauthorized
-	case errors.Is(err, persistence.ErrAdminBindingOverviewNotFound), domainCode == domain.ErrShopNotFound:
+	case errors.Is(err, persistence.ErrAdminBindingOverviewNotFound), errors.Is(err, adminbindingaudit.ErrHistoryNotFound), domainCode == domain.ErrShopNotFound:
 		code, message, status = "SHOP_NOT_FOUND", "shop not found", http.StatusNotFound
 	case domainCode == domain.ErrDeviceNotFound || domainCode == domain.ErrMeasurementPointNotFound || domainCode == domain.ErrAssignmentNotFound || domainCode == domain.ErrSiteScopeDenied || domainCode == domain.ErrTenantScopeDenied || domainCode == domain.ErrDeviceScopeDenied:
 		code, message, status = "RESOURCE_NOT_FOUND", "resource not found", http.StatusNotFound
-	case domainCode == domain.ErrOperationForbidden || errors.Is(err, persistence.ErrAdminBindingOverviewForbidden):
+	case domainCode == domain.ErrOperationForbidden || errors.Is(err, persistence.ErrAdminBindingOverviewForbidden) || errors.Is(err, adminbindingaudit.ErrHistoryForbidden):
 		code, message, status = "FORBIDDEN", "forbidden", http.StatusForbidden
+	case errors.Is(err, adminbindingaudit.ErrInvalidCursor), errors.Is(err, adminbindingaudit.ErrInvalidFilter):
+		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusBadRequest
 	case domainCode == domain.ErrInvalidRequest || domainCode == domain.ErrInvalidSerial || domainCode == domain.ErrMalformedMAC || domainCode == domain.ErrIdentifiersInconsistent || domainCode == domain.ErrInvalidStateTransition || domainCode == domain.ErrInvalidEffectiveTime || domainCode == domain.ErrHistoricalCorrection || domainCode == domain.ErrDeviceNotEligible:
 		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusUnprocessableEntity
 	case domainCode == domain.ErrIdempotencyKeyReused || domainCode == domain.ErrDeviceAlreadyAssigned || domainCode == domain.ErrMeasurementPointOccupied || domainCode == domain.ErrAssignmentNotCurrent || domainCode == domain.ErrConcurrentTransition || domainCode == domain.ErrAssignmentTimeConflict || domainCode == domain.ErrOverlappingAssignment || domainCode == domain.ErrSerialConflict || domainCode == domain.ErrDeviceRetired:
