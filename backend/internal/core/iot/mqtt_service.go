@@ -353,9 +353,10 @@ func (s *MqttService) telemetryIngest(data MqttPayload, receivedAt time.Time) (I
 
 func (s *MqttService) publishIngestResult(mac string, data MqttPayload, result IngestResult) {
 	switch result.Status {
-	case IngestStored, IngestDuplicate, IngestUnknownDevice, IngestUnknownAssignment, IngestConflict:
+	case IngestStored, IngestDuplicate, IngestUnknownDevice, IngestUnknownAssignment, IngestLifecycleBlocked, IngestConflict:
 		// Unknown and conflict statuses are diagnostic/non-terminal. The
-		// simulator queue only deletes on stored or duplicate.
+		// simulator queue deletes lifecycle-blocked items as a terminal discard;
+		// unknown and conflict statuses remain diagnostic/non-terminal.
 		s.publishAck(mac, TelemetryAck{BootCounter: data.BootCounter, Sequence: data.Sequence, Status: string(result.Status)})
 	}
 }
@@ -371,8 +372,13 @@ func (s *MqttService) storeLegacyTelemetry(data MqttPayload, receivedAt time.Tim
 			return err
 		}
 		var device domain.Device
-		if err := findDevice(tx, data.MacAddress, &device); err != nil {
+		if err := findDeviceForUpdate(tx, data.MacAddress, &device); err != nil {
 			return err
+		}
+		// Legacy telemetry is still authoritative when it resolves an assignment;
+		// apply the same lifecycle gate before presence, reading, or alert writes.
+		if device.LifecycleStatus != "" && device.LifecycleStatus != domain.DeviceLifecycleActive {
+			return errors.New("device lifecycle does not permit telemetry")
 		}
 		if err := tx.Model(&domain.Device{}).
 			Where("id = ?", device.ID).
@@ -514,7 +520,7 @@ func (s *MqttService) processStatus(topic string, raw []byte, receivedAt time.Ti
 			return err
 		}
 		return tx.Model(&domain.Device{}).
-			Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ? AND (last_seen IS NULL OR last_seen < ?)", topicMAC, receivedAt).
+			Where("upper(replace(replace(mac_address, ':', ''), '-', '')) = ? AND (lifecycle_status IS NULL OR lifecycle_status = ?) AND (last_seen IS NULL OR last_seen < ?)", topicMAC, domain.DeviceLifecycleActive, receivedAt).
 			Updates(updates).Error
 	})
 	if err != nil {

@@ -34,7 +34,7 @@ func (q QueuedTelemetry) Identity() TelemetryIdentity {
 }
 
 // TelemetryQueue is a bounded, FIFO, ACK-driven in-memory queue. Items leave
-// only after a matching terminal stored/duplicate ACK. A timeout, publish
+// only after a matching terminal stored/duplicate/lifecycle_blocked ACK. A timeout, publish
 // error, cancellation, disconnect, or non-terminal ACK does not mutate it.
 type TelemetryQueue struct {
 	mu             sync.Mutex

@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"power-iot-backend/internal/core/domain"
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 func TestCoverageConfigPersistenceSemantics(t *testing.T) {

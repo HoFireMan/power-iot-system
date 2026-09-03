@@ -21,7 +21,7 @@ import (
 	_ "github.com/lib/pq"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/data/reconciliation"
 	"power-iot-backend/internal/data/reconciliation/sourceowner"
 	"power-iot-backend/internal/data/reconciliation/upstream"

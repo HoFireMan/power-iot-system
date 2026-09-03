@@ -1,4 +1,3 @@
-// #C:\Code\PowerWork\power-iot-system\mobile\lib\features\shops\screens\shop_list_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';

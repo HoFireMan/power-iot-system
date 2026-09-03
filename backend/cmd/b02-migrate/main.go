@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 type drainEvidence struct {

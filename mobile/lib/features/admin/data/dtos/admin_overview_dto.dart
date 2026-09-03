@@ -4,11 +4,12 @@ import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
 
 class AdminOverviewDto {
-  const AdminOverviewDto(
-      {required this.measurementPoints,
-      required this.devices,
-      required this.activeAssignments,
-      required this.assignmentHistory});
+  const AdminOverviewDto({
+    required this.measurementPoints,
+    required this.devices,
+    required this.activeAssignments,
+    required this.assignmentHistory,
+  });
   final List<MeasurementPoint> measurementPoints;
   final List<DeviceInventory> devices;
   final List<DeviceAssignment> activeAssignments;
@@ -24,7 +25,7 @@ class AdminOverviewDto {
       'measurementPoints',
       'devices',
       'activeAssignments',
-      'assignmentHistory'
+      'assignmentHistory',
     };
     if (!value.keys.every(keys.contains)) {
       throw const FormatException('Invalid admin overview');
@@ -38,53 +39,78 @@ class AdminOverviewDto {
     }
 
     return AdminOverviewDto(
-      measurementPoints:
-          list('measurementPoints').map(_point).toList(growable: false),
+      measurementPoints: list(
+        'measurementPoints',
+      ).map(_point).toList(growable: false),
       devices: list('devices').map(_device).toList(growable: false),
-      activeAssignments:
-          list('activeAssignments').map(_assignment).toList(growable: false),
-      assignmentHistory:
-          list('assignmentHistory').map(_assignment).toList(growable: false),
+      activeAssignments: list(
+        'activeAssignments',
+      ).map(_assignment).toList(growable: false),
+      assignmentHistory: list(
+        'assignmentHistory',
+      ).map(_assignment).toList(growable: false),
     );
   }
   AdminOverview toModel() => AdminOverview(
-      measurementPoints: measurementPoints,
-      devices: devices,
-      activeAssignments: activeAssignments,
-      assignmentHistory: assignmentHistory);
+        measurementPoints: measurementPoints,
+        devices: devices,
+        activeAssignments: activeAssignments,
+        assignmentHistory: assignmentHistory,
+      );
 }
 
 MeasurementPoint _point(Object? value) {
   final m = _map(value, {'id', 'shopId', 'name'});
   return MeasurementPoint(
-      id: _string(m, 'id'),
-      shopId: _string(m, 'shopId'),
-      name: _string(m, 'name'));
+    id: _string(m, 'id'),
+    shopId: _string(m, 'shopId'),
+    name: _string(m, 'name'),
+  );
 }
 
 DeviceInventory _device(Object? value) {
-  final m = _map(value, {'id', 'name', 'serialNumber', 'macAddress', 'status'});
+  if (value is! Map || value.keys.any((k) => k is! String)) {
+    throw const FormatException('Invalid admin overview');
+  }
+  final keys = value.keys.cast<String>().toSet();
+  const required = {'id', 'name', 'serialNumber', 'macAddress', 'status'};
+  if (!keys.containsAll(required) ||
+      (keys.length != 5 && keys.length != 6) ||
+      (keys.length == 6 && !keys.contains('lifecycleStatus'))) {
+    throw const FormatException('Invalid admin overview');
+  }
+  final m = value.cast<String, Object?>();
   return DeviceInventory(
-      id: _string(m, 'id'),
-      name: _string(m, 'name'),
-      // Legacy inventory rows may have no serial and are represented by an
-      // empty string. Keep the row in the projection; UI actions filter it
-      // out where a serial is required.
-      serialNumber: _allowEmptyString(m, 'serialNumber'),
-      macAddress: _string(m, 'macAddress'),
-      status: _string(m, 'status'));
+    id: _string(m, 'id'),
+    name: _string(m, 'name'),
+    // Legacy inventory rows may have no serial and are represented by an
+    // empty string. Keep the row in the projection; UI actions filter it
+    // out where a serial is required.
+    serialNumber: _allowEmptyString(m, 'serialNumber'),
+    macAddress: _string(m, 'macAddress'),
+    status: _string(m, 'status'),
+    lifecycleStatus: keys.contains('lifecycleStatus')
+        ? _lifecycle(m, 'lifecycleStatus')
+        : 'ACTIVE',
+  );
 }
 
 DeviceAssignment _assignment(Object? value) {
-  final m = _map(
-      value, {'id', 'deviceId', 'measurementPointId', 'validFrom', 'validTo'});
+  final m = _map(value, {
+    'id',
+    'deviceId',
+    'measurementPointId',
+    'validFrom',
+    'validTo',
+  });
   final raw = m['validTo'];
   return DeviceAssignment(
-      id: _string(m, 'id'),
-      deviceId: _string(m, 'deviceId'),
-      measurementPointId: _string(m, 'measurementPointId'),
-      validFrom: _date(m, 'validFrom'),
-      validTo: raw == null ? null : parseAdminDate(raw));
+    id: _string(m, 'id'),
+    deviceId: _string(m, 'deviceId'),
+    measurementPointId: _string(m, 'measurementPointId'),
+    validFrom: _date(m, 'validFrom'),
+    validTo: raw == null ? null : parseAdminDate(raw),
+  );
 }
 
 Map<String, Object?> _map(Object? value, Set<String> keys) {
@@ -103,6 +129,14 @@ String _string(Map<String, Object?> m, String key) {
     throw const FormatException('Invalid admin overview');
   }
   return v;
+}
+
+String _lifecycle(Map<String, Object?> m, String key) {
+  final value = _string(m, key);
+  if (!const {'ACTIVE', 'DISABLED', 'RETIRED'}.contains(value)) {
+    throw const FormatException('Invalid admin overview');
+  }
+  return value;
 }
 
 String _allowEmptyString(Map<String, Object?> m, String key) {
@@ -130,9 +164,7 @@ DateTime parseAdminDate(Object? value) {
   if (match == null) {
     throw const FormatException('Invalid admin overview');
   }
-  final components = [
-    for (var i = 1; i <= 6; i++) int.parse(match.group(i)!),
-  ];
+  final components = [for (var i = 1; i <= 6; i++) int.parse(match.group(i)!)];
   final local = DateTime.utc(
     components[0],
     components[1],

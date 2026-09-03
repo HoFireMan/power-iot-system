@@ -42,6 +42,17 @@ func TestTelemetryQueueDuplicateACKCompletesPendingItemOnce(t *testing.T) {
 	}
 }
 
+func TestTelemetryQueueLifecycleBlockedACKDiscardsPendingItem(t *testing.T) {
+	queue := newTestTelemetryQueue(t, 4)
+	enqueueTelemetry(t, queue, testQueuedTelemetry(2, 21, "disabled-payload"))
+	if !queue.HandleAck(Ack{BootCounter: 2, Sequence: 21, Status: "lifecycle_blocked"}) {
+		t.Fatal("lifecycle-blocked ACK did not discard the pending item")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("queue length=%d after lifecycle-blocked ACK, want 0", queue.Len())
+	}
+}
+
 func TestTelemetryQueueNonTerminalACKKeepsPendingItem(t *testing.T) {
 	statuses := []string{"unknown_device", "unknown_assignment", "invalid", "failed"}
 	for _, status := range statuses {

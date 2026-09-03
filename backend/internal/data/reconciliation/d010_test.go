@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 func d010Fixture(t *testing.T, issuer *D010HandoffIssuer) (D010Handoff, D010HandoffContext, D007TerminalEvidence, D009Evidence) {

@@ -186,6 +186,7 @@ const (
 	ErrSerialConflict           ErrorCode = "serial_conflict"
 	ErrAssignmentNotCurrent     ErrorCode = "assignment_not_current"
 	ErrDeviceRetired            ErrorCode = "device_retired"
+	ErrDeviceLifecycleDisabled  ErrorCode = "device_disabled"
 	ErrIdempotencyKeyReused     ErrorCode = "idempotency_key_reused"
 	ErrAssignmentTimeConflict   ErrorCode = "assignment_time_conflict"
 	ErrAuthenticationRequired   ErrorCode = "authentication_required"

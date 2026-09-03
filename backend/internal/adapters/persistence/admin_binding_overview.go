@@ -30,6 +30,7 @@ type AdminMeasurementPointProjection struct {
 type AdminDeviceProjection struct {
 	ID                                     uint
 	Name, SerialNumber, MACAddress, Status string
+	LifecycleStatus                        string
 }
 type AdminAssignmentProjection struct {
 	ID                 uuid.UUID
@@ -132,15 +133,16 @@ func (r *AdminBindingOverviewRepository) findAdminBindingOverview(ctx context.Co
 		}
 		out.MeasurementPoints = points
 		var devices []struct {
-			ID           uint
-			Name         string
-			SerialNumber sql.NullString
-			MACAddress   string
-			IsOnline     bool
+			ID              uint
+			Name            string
+			SerialNumber    sql.NullString
+			MACAddress      string
+			IsOnline        bool
+			LifecycleStatus string
 		}
 		// Device.ShopID is deliberately absent: inventory is scoped by the
 		// authoritative Client owner, which is the approved admin model.
-		if err := tx.Raw(`SELECT id, name, serial_number, mac_address, is_online
+		if err := tx.Raw(`SELECT id, name, serial_number, mac_address, is_online, lifecycle_status
 			FROM devices WHERE inventory_owner_client_id = ? ORDER BY id`, auth.ClientID).Scan(&devices).Error; err != nil {
 			return err
 		}
@@ -153,7 +155,7 @@ func (r *AdminBindingOverviewRepository) findAdminBindingOverview(ctx context.Co
 			if d.SerialNumber.Valid {
 				serial = d.SerialNumber.String
 			}
-			out.Devices = append(out.Devices, AdminDeviceProjection{ID: d.ID, Name: d.Name, SerialNumber: serial, MACAddress: d.MACAddress, Status: status})
+			out.Devices = append(out.Devices, AdminDeviceProjection{ID: d.ID, Name: d.Name, SerialNumber: serial, MACAddress: d.MACAddress, Status: status, LifecycleStatus: d.LifecycleStatus})
 		}
 		var assignments []AdminAssignmentProjection
 		if err := tx.Raw(`SELECT a.id, a.device_id, a.measurement_point_id, a.valid_from, a.valid_to

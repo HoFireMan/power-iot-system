@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/data/reconciliation"
 	"power-iot-backend/internal/data/reconciliation/sourceowner"
 

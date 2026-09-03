@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 
 	"github.com/golang-migrate/migrate/v4"
 	"gorm.io/driver/postgres"

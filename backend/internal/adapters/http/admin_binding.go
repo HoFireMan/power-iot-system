@@ -14,6 +14,7 @@ import (
 	"power-iot-backend/internal/adapters/persistence"
 	applicationadmin "power-iot-backend/internal/application/adminbinding"
 	applicationadminaudit "power-iot-backend/internal/application/adminbindingaudit"
+	applicationlifecycle "power-iot-backend/internal/application/devicelifecycle"
 	"power-iot-backend/internal/core/domain"
 
 	"github.com/gin-gonic/gin"
@@ -23,9 +24,10 @@ import (
 
 // AdminBindingHandlerConfig is the composition seam for the bounded HTTP adapter.
 type AdminBindingHandlerConfig struct {
-	Executor *applicationadmin.Executor
-	DB       *gorm.DB
-	Overview AdminBindingOverviewQuery
+	Executor  *applicationadmin.Executor
+	DB        *gorm.DB
+	Overview  AdminBindingOverviewQuery
+	Lifecycle DeviceLifecycleService
 }
 type AdminBindingOverviewQuery interface {
 	FindAdminBindingOverview(context.Context, uint, uint) (persistence.AdminBindingOverview, error)
@@ -118,6 +120,11 @@ func RegisterAdminBindingRoutes(router gin.IRouter, authenticator AccessTokenAut
 	router.GET("/api/v1/admin/device-bindings", AuthenticationMiddleware(authenticator), overviewHandler(query, config.DB))
 	if config.DB != nil {
 		RegisterAdminBindingAuditHistoryRoute(router, authenticator, applicationadminaudit.New(persistence.NewAdminBindingAuditHistoryRepository(config.DB)), config.DB)
+		lifecycle := config.Lifecycle
+		if lifecycle == nil {
+			lifecycle = applicationlifecycle.New(config.DB)
+		}
+		RegisterDeviceLifecycleRoutes(router, authenticator, lifecycle, config.DB)
 	}
 }
 
@@ -312,7 +319,7 @@ func overviewJSON(v persistence.AdminBindingOverview) gin.H {
 	}
 	devices := make([]gin.H, 0, len(v.Devices))
 	for _, d := range v.Devices {
-		devices = append(devices, gin.H{"id": strconv.FormatUint(uint64(d.ID), 10), "name": d.Name, "serialNumber": d.SerialNumber, "macAddress": d.MACAddress, "status": d.Status})
+		devices = append(devices, gin.H{"id": strconv.FormatUint(uint64(d.ID), 10), "name": d.Name, "serialNumber": d.SerialNumber, "macAddress": d.MACAddress, "status": d.Status, "lifecycleStatus": d.LifecycleStatus})
 	}
 	assign := func(items []persistence.AdminAssignmentProjection) []gin.H {
 		out := make([]gin.H, 0, len(items))

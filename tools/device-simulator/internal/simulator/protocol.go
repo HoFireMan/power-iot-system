@@ -21,10 +21,12 @@ func (a Ack) Identity() TelemetryIdentity {
 	return TelemetryIdentity{BootCounter: a.BootCounter, Sequence: a.Sequence}
 }
 
-// IsTerminal reports whether the ACK authorizes local success handling.
-// Unknown, invalid, and failed statuses remain non-terminal.
+// IsTerminal reports whether the ACK authorizes local queue completion.
+// lifecycle_blocked is a terminal discard: the Backend deliberately did not
+// persist the sample and retrying it cannot make it valid for a disabled or
+// retired Device. Unknown, invalid, and failed statuses remain non-terminal.
 func (a Ack) IsTerminal() bool {
-	return a.Status == "stored" || a.Status == "duplicate"
+	return a.Status == "stored" || a.Status == "duplicate" || a.Status == "lifecycle_blocked"
 }
 
 func ParseAck(payload []byte) (Ack, error) {

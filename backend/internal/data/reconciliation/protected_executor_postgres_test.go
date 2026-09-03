@@ -13,7 +13,7 @@ import (
 	"os"
 	"strings"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"testing"
 	"time"
 

@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 // The result channel is a protected local inherited descriptor selected by

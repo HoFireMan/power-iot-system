@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"power-iot-backend/internal/core/domain"
-	"power-iot-backend/internal/data/migrations"
+	publicmigrations "power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/testsupport"
 )
 
@@ -35,8 +36,8 @@ func TestDevseedSeedsCleanB02Database(t *testing.T) {
 	if report, err := migrations.RunB02ProtectedMigrationOperator(ctx, database.DSN(), func(context.Context) error { return nil }); err != nil || report.PostCommitState != migrations.ProtectedStateCleanB02 {
 		t.Fatalf("B-02 report=%+v err=%v", report, err)
 	}
-	admission, err := migrations.BootstrapAndAdmit(ctx, database.DSN())
-	if err != nil || admission.Disposition != migrations.RuntimeServeB02 || !devseedAdmissionAccepted(admission.Disposition) {
+	admission, err := publicmigrations.BootstrapAndAdmit(ctx, database.DSN())
+	if err != nil || admission.Disposition != publicmigrations.RuntimeServeB02 || !devseedAdmissionAccepted(admission.Disposition) {
 		t.Fatalf("B-02 admission=%+v err=%v", admission, err)
 	}
 	const mac = "AABBCCDDEEFF"

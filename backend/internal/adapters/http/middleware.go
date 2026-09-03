@@ -141,7 +141,7 @@ func MapPublicError(err error, requestID string) PublicErrorMapping {
 		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusBadRequest
 	case domainCode == domain.ErrInvalidRequest || domainCode == domain.ErrInvalidSerial || domainCode == domain.ErrMalformedMAC || domainCode == domain.ErrIdentifiersInconsistent || domainCode == domain.ErrInvalidStateTransition || domainCode == domain.ErrInvalidEffectiveTime || domainCode == domain.ErrHistoricalCorrection || domainCode == domain.ErrDeviceNotEligible:
 		code, message, status = "VALIDATION_ERROR", "request validation failed", http.StatusUnprocessableEntity
-	case domainCode == domain.ErrIdempotencyKeyReused || domainCode == domain.ErrDeviceAlreadyAssigned || domainCode == domain.ErrMeasurementPointOccupied || domainCode == domain.ErrAssignmentNotCurrent || domainCode == domain.ErrConcurrentTransition || domainCode == domain.ErrAssignmentTimeConflict || domainCode == domain.ErrOverlappingAssignment || domainCode == domain.ErrSerialConflict || domainCode == domain.ErrDeviceRetired:
+	case domainCode == domain.ErrIdempotencyKeyReused || domainCode == domain.ErrDeviceAlreadyAssigned || domainCode == domain.ErrMeasurementPointOccupied || domainCode == domain.ErrAssignmentNotCurrent || domainCode == domain.ErrConcurrentTransition || domainCode == domain.ErrAssignmentTimeConflict || domainCode == domain.ErrOverlappingAssignment || domainCode == domain.ErrSerialConflict || domainCode == domain.ErrDeviceRetired || domainCode == domain.ErrDeviceLifecycleDisabled:
 		code, message, status = "CONFLICT", "binding operation conflicts with current state", http.StatusConflict
 	}
 	return PublicErrorMapping{Status: status, Error: security.NewPublicError(code, message, requestID)}

@@ -17,6 +17,7 @@ import (
 	"power-iot-backend/internal/application/adminbinding"
 	applicationauth "power-iot-backend/internal/application/auth"
 	"power-iot-backend/internal/data/migrations"
+	privatemigrations "power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/security"
 	"power-iot-backend/internal/testsupport"
 
@@ -176,8 +177,9 @@ func newAdminBindingHTTPFixture(t *testing.T) *adminBindingHTTPFixture {
 		"sql/000007_b02_coverage_foundation.up.sql",
 		"sql/000010_measurement_point_identity.up.sql",
 		"sql/000011_measurement_point_alerts.up.sql",
+		"sql/000012_device_retirement_lifecycle.up.sql",
 	} {
-		body, err := fs.ReadFile(migrations.Files, name)
+		body, err := fs.ReadFile(privatemigrations.Files, name)
 		if err != nil {
 			t.Fatalf("alerts schema read failed (%T)", err)
 		}

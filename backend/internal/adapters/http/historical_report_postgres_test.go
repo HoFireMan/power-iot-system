@@ -18,6 +18,7 @@ import (
 	applicationauth "power-iot-backend/internal/application/auth"
 	apphistoricalreport "power-iot-backend/internal/application/historicalreport"
 	"power-iot-backend/internal/data/migrations"
+	privatemigrations "power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/security"
 	"power-iot-backend/internal/testsupport"
 
@@ -265,17 +266,24 @@ func migrateHistoricalReportSchema(databaseURL string) error {
 	if err := migrations.Up(databaseURL); err != nil {
 		return err
 	}
-	body, err := fs.ReadFile(migrations.Files, "sql/000007_b02_coverage_foundation.up.sql")
-	if err != nil {
-		return err
-	}
 	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(string(body))
-	return err
+	for _, name := range []string{
+		"sql/000007_b02_coverage_foundation.up.sql",
+		"sql/000012_device_retirement_lifecycle.up.sql",
+	} {
+		body, err := fs.ReadFile(privatemigrations.Files, name)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func containsString(values []string, want string) bool {

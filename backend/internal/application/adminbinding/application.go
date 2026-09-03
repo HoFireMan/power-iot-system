@@ -466,9 +466,18 @@ func ensureEligibleDevice(device *domain.Device) error {
 	if device.SerialNumber == nil || strings.TrimSpace(*device.SerialNumber) == "" {
 		return domain.NewDomainError(domain.ErrDeviceNotEligible, "device serial number is absent")
 	}
-	// No retirement/disabled field exists in the current canonical Device model.
-	// Eligibility therefore cannot evaluate a lifecycle state in 3B-2.
-	return nil
+	// Empty is accepted only for trusted in-memory planning fixtures. Persisted
+	// rows are migration-backfilled and always carry ACTIVE/DISABLED/RETIRED.
+	switch device.LifecycleStatus {
+	case "", domain.DeviceLifecycleActive:
+		return nil
+	case domain.DeviceLifecycleDisabled:
+		return domain.NewDomainError(domain.ErrDeviceLifecycleDisabled, "device is disabled")
+	case domain.DeviceLifecycleRetired:
+		return domain.NewDomainError(domain.ErrDeviceRetired, "device is retired")
+	default:
+		return domain.NewDomainError(domain.ErrDeviceNotEligible, "device lifecycle is invalid")
+	}
 }
 
 // ensureInventoryOwnerClient requires a resolved, positive inventory owner

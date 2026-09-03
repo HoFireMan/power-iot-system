@@ -30,6 +30,14 @@ type parsedPostgresDatabaseURL struct {
 	config    *postgres.Config
 }
 
+// ParsedPostgresDatabaseURL is the non-secret result of parsing a database
+// URL. It is exposed only so the private migration authority can reuse the
+// canonical parser without importing runtime packages.
+type ParsedPostgresDatabaseURL struct {
+	DriverURL string
+	Config    *postgres.Config
+}
+
 // parseQuotedMigrationTable accepts the exact quoted forms understood by the
 // PostgreSQL migration driver: "table" or "schema"."table". It deliberately
 // rejects trailing text, empty identifiers, and any unquoted separators.
@@ -66,6 +74,14 @@ func parseQuotedMigrationTable(value string) (schema string, table string, ok bo
 // parsePostgresDatabaseURL mirrors golang-migrate's PostgreSQL URL handling for
 // the options that affect connection setup and migration metadata. The driver
 // URL is filtered before database/sql sees it because lib/pq rejects x-* keys.
+func ParsePostgresDatabaseURL(databaseURL string) (*ParsedPostgresDatabaseURL, error) {
+	parsed, err := parsePostgresDatabaseURL(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &ParsedPostgresDatabaseURL{DriverURL: parsed.driverURL, Config: parsed.config}, nil
+}
+
 func parsePostgresDatabaseURL(databaseURL string) (*parsedPostgresDatabaseURL, error) {
 	parsed, err := url.Parse(databaseURL)
 	if err != nil {
@@ -123,6 +139,10 @@ func parsePostgresDatabaseURL(databaseURL string) (*parsedPostgresDatabaseURL, e
 	}, nil
 }
 
+func MigrationMetadataIdentifiers(config *postgres.Config, schemaName string) (string, string, error) {
+	return migrationMetadataIdentifiers(config, schemaName)
+}
+
 func migrationMetadataIdentifiers(config *postgres.Config, schemaName string) (string, string, error) {
 	tableName := config.MigrationsTable
 	if tableName == "" {
@@ -139,6 +159,10 @@ func migrationMetadataIdentifiers(config *postgres.Config, schemaName string) (s
 		return schemaName, quotedTable, nil
 	}
 	return quotedSchema, quotedTable, nil
+}
+
+func QuotedMigrationTable(schemaName, tableName string) string {
+	return quotedMigrationTable(schemaName, tableName)
 }
 
 func quotedMigrationTable(schemaName, tableName string) string {
@@ -213,16 +237,6 @@ func newMigratorLocked(ctx context.Context, databaseURL string, action migration
 	fence, err := openExclusiveWriterFence(ctx, parsed)
 	if err != nil {
 		return nil, err
-	}
-	capability, err := fence.Capability()
-	if err != nil {
-		return nil, errors.Join(err, fence.Close())
-	}
-	if err := RequireProtectedWork(capability); err != nil {
-		return nil, errors.Join(err, fence.Close())
-	}
-	if err := rejectD1LGenericRoute(ctx, fence.Conn(), parsed.config); err != nil {
-		return nil, errors.Join(err, fence.Close())
 	}
 	metadata, err := inspectMigrationMetadata(ctx, fence.Conn(), parsed.config)
 	if err != nil {
@@ -489,9 +503,6 @@ func Version(databaseURL string) (uint, bool, error) {
 	}
 	defer tx.Rollback()
 	if err := AcquireSharedWriterFence(ctx, tx); err != nil {
-		return 0, false, err
-	}
-	if err := rejectD1LGenericRoute(ctx, tx, parsed.config); err != nil {
 		return 0, false, err
 	}
 	var currentSchema string

@@ -13,7 +13,7 @@ import (
 
 	"power-iot-backend/internal/adapters/persistence"
 	"power-iot-backend/internal/core/domain"
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/testsupport"
 )
 

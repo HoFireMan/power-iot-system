@@ -113,6 +113,9 @@ type DeviceType struct {
 type Device struct {
 	ID     uint `gorm:"primaryKey"`
 	ShopID uint `gorm:"index"`
+	// LifecycleStatus is the authoritative administrative lifecycle. IsOnline
+	// remains telemetry presence and must not be used as lifecycle authority.
+	LifecycleStatus string `gorm:"column:lifecycle_status;type:varchar(16);not null;default:ACTIVE"`
 	// InventoryOwnerClientID is authoritative inventory tenancy. ShopID is a
 	// compatibility placement field and must not authorize or derive tenancy.
 	InventoryOwnerClientID *uint `gorm:"column:inventory_owner_client_id;index"`

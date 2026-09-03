@@ -8,6 +8,7 @@ import (
 
 	_ "github.com/lib/pq"
 	"power-iot-backend/internal/data/migrations"
+	privatemigrations "power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/testsupport"
 )
 
@@ -26,8 +27,9 @@ func migratePersistenceTestDatabase(dsn string) error {
 		"sql/000009_billing_v1_catalog.up.sql",
 		"sql/000010_measurement_point_identity.up.sql",
 		"sql/000011_measurement_point_alerts.up.sql",
+		"sql/000012_device_retirement_lifecycle.up.sql",
 	} {
-		body, err := fs.ReadFile(migrations.Files, name)
+		body, err := fs.ReadFile(privatemigrations.Files, name)
 		if err != nil {
 			return err
 		}

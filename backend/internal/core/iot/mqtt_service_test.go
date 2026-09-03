@@ -186,6 +186,22 @@ func TestPostgresLegacyTelemetryWriteCompatibility(t *testing.T) {
 	}
 }
 
+func TestLifecycleBlockedTelemetryPublishesTerminalDiscardACK(t *testing.T) {
+	publisher := &testPublisher{}
+	service := &MqttService{ackPublisher: publisher, config: MqttConfig{CommandPrefix: CommandPrefix}}
+	service.publishIngestResult("AABBCCDDEEFF", MqttPayload{BootCounter: 4, Sequence: 9}, IngestResult{Status: IngestLifecycleBlocked})
+	if publisher.count() != 1 {
+		t.Fatal("lifecycle-blocked telemetry did not publish an ACK")
+	}
+	var ack TelemetryAck
+	if err := json.Unmarshal(publisher.last().payload.([]byte), &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.Status != string(IngestLifecycleBlocked) {
+		t.Fatalf("ACK status=%q, want %q", ack.Status, IngestLifecycleBlocked)
+	}
+}
+
 func TestUnknownDeviceDoesNotReturnTerminalStatus(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

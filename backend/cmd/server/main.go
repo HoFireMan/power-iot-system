@@ -30,7 +30,7 @@ import (
 	"power-iot-backend/internal/core/domain"
 	"power-iot-backend/internal/core/iot"
 	"power-iot-backend/internal/data/migrations"
-	"power-iot-backend/internal/deployment"
+	"power-iot-backend/internal/runtimegate"
 	"power-iot-backend/internal/security"
 )
 
@@ -87,7 +87,7 @@ func main() {
 	if runtimeMode != "PRE_CUTOVER" && runtimeMode != "POST_CUTOVER" {
 		log.Fatalf("D6_RUNTIME_MODE must be PRE_CUTOVER or POST_CUTOVER")
 	}
-	writeGate := deployment.NewWriteGate(runtimeMode != "POST_CUTOVER")
+	writeGate := runtimegate.NewWriteGate(runtimeMode != "POST_CUTOVER")
 	mqttConfig, err := iot.LoadMqttConfigFromEnv()
 	if err != nil {
 		log.Fatal(err)

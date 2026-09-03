@@ -1,4 +1,3 @@
-// #C:\Code\PowerWork\power-iot-system\mobile\lib\main.dart
 import 'package:flutter/foundation.dart'; // 用於判斷是否為 Release 模式
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

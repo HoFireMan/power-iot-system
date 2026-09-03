@@ -33,6 +33,9 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 		if err := RunMeasurementPointAlertsMigration(ctx, databaseURL, admission); err != nil {
 			return report, err
 		}
+		if err := RunDeviceLifecycleMigration(ctx, databaseURL, admission); err != nil {
+			return report, err
+		}
 		report.State = ProtectedStateCleanB02
 		report.PostCommitState = ProtectedStateCleanB02
 		report.Outcome = ProtectedAlreadyComplete
@@ -159,6 +162,21 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 	if err := alertsTx.Commit(); err != nil {
 		return report, fmt.Errorf("measurement point alerts body commit outcome unknown: %w", err)
 	}
+	lifecycleBody, err := fs.ReadFile(Files, "sql/000012_device_retirement_lifecycle.up.sql")
+	if err != nil {
+		return report, err
+	}
+	lifecycleTx, err := fence.Conn().BeginTx(ctx, nil)
+	if err != nil {
+		return report, err
+	}
+	if _, err := lifecycleTx.ExecContext(ctx, string(lifecycleBody)); err != nil {
+		_ = lifecycleTx.Rollback()
+		return report, fmt.Errorf("device lifecycle body: %w", err)
+	}
+	if err := lifecycleTx.Commit(); err != nil {
+		return report, fmt.Errorf("device lifecycle body commit outcome unknown: %w", err)
+	}
 
 	final, err := fence.Conn().BeginTx(ctx, nil)
 	if err != nil {
@@ -173,11 +191,20 @@ func RunB02Migration(ctx context.Context, databaseURL string, admission External
 		_ = final.Rollback()
 		return report, fmt.Errorf("B-02 final marker expected one dirty V6 row, affected %d", count)
 	}
+	// Verify the post-migration catalog before clearing the dirty marker. A
+	// failed proof rolls back this transaction and leaves the database visibly
+	// dirty, so runtime admission cannot mistake an incomplete migration for a
+	// clean B-02 schema.
+	if err := verifyB02Catalog(ctx, final); err != nil {
+		_ = final.Rollback()
+		return report, err
+	}
+	if err := verifyDeviceLifecycleCatalog(ctx, final); err != nil {
+		_ = final.Rollback()
+		return report, err
+	}
 	if err := final.Commit(); err != nil {
 		return report, fmt.Errorf("B-02 final marker commit outcome unknown: %w", err)
-	}
-	if err := verifyB02Catalog(ctx, fence.Conn()); err != nil {
-		return report, err
 	}
 	report.State = ProtectedStateCleanV6
 	report.PostCommitState = ProtectedStateCleanB02
