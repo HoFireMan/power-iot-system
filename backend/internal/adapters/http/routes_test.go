@@ -12,6 +12,7 @@ import (
 	"power-iot-backend/internal/deployment"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type routeLoginStub struct{}
@@ -29,10 +30,12 @@ func (routeLogoutStub) Logout(context.Context, applicationauth.AuthenticatedIden
 	return applicationauth.ErrUnauthorized
 }
 
-func TestAdminBindingRouteInventoryContainsExactlyFivePostsAndOneOverview(t *testing.T) {
+func TestAdminBindingRouteInventoryContainsExactlyFivePostsOneOverviewAndOneAuditHistory(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	RegisterAdminBindingRoutes(router, routeLogoutStub{}, AdminBindingHandlerConfig{})
+	// A non-nil DB enables the production-only audit route during inventory
+	// testing without opening a connection or mutating any database.
+	RegisterAdminBindingRoutes(router, routeLogoutStub{}, AdminBindingHandlerConfig{DB: &gorm.DB{}})
 	want := map[string]bool{
 		"POST /api/v1/admin/measurement-points":                     false,
 		"POST /api/v1/admin/device-bindings":                        false,
@@ -40,6 +43,7 @@ func TestAdminBindingRouteInventoryContainsExactlyFivePostsAndOneOverview(t *tes
 		"POST /api/v1/admin/device-bindings/:assignmentId/relocate": false,
 		"POST /api/v1/admin/device-bindings/:assignmentId/unbind":   false,
 		"GET /api/v1/admin/device-bindings":                         false,
+		"GET /api/v1/shops/:shopId/admin/binding-audits":            false,
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path

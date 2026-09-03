@@ -13,6 +13,7 @@ import (
 
 	"power-iot-backend/internal/adapters/persistence"
 	applicationadmin "power-iot-backend/internal/application/adminbinding"
+	applicationadminaudit "power-iot-backend/internal/application/adminbindingaudit"
 	"power-iot-backend/internal/core/domain"
 
 	"github.com/gin-gonic/gin"
@@ -115,6 +116,9 @@ func RegisterAdminBindingRoutes(router gin.IRouter, authenticator AccessTokenAut
 		query = persistence.NewAdminBindingOverviewRepository(config.DB)
 	}
 	router.GET("/api/v1/admin/device-bindings", AuthenticationMiddleware(authenticator), overviewHandler(query, config.DB))
+	if config.DB != nil {
+		RegisterAdminBindingAuditHistoryRoute(router, authenticator, applicationadminaudit.New(persistence.NewAdminBindingAuditHistoryRepository(config.DB)), config.DB)
+	}
 }
 
 func createMPHandler(config AdminBindingHandlerConfig) gin.HandlerFunc {
