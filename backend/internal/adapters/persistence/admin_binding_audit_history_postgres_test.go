@@ -75,7 +75,7 @@ func TestAdminBindingAuditHistoryPostgresAuthorizationProjectionFiltersPaginatio
 		if err := db.Create(&op).Error; err != nil {
 			t.Fatal(err)
 		}
-		audit := domain.AdminBindingAudit{ID: uuid.New(), OperationID: op.OperationID, RequestIdentity: op.IdempotencyKey, ActorID: admin.ID, ScopeKey: op.ScopeKey, ScopeSnapshot: op.ScopeSnapshot, ClientID: &client.ID, Action: action, OccurredAt: now.Add(time.Duration(i) * time.Second), ShopID: &target.ID, OldMeasurementPointID: &oldPoint.ID, NewMeasurementPointID: &newPoint.ID, Reason: "test", Metadata: json.RawMessage(`{}`)}
+		audit := domain.AdminBindingAudit{ID: uuid.New(), OperationID: op.OperationID, RequestIdentity: op.IdempotencyKey, ActorID: admin.ID, ScopeKey: op.ScopeKey, ScopeSnapshot: op.ScopeSnapshot, ClientID: &client.ID, Action: action, OccurredAt: now.Add(time.Duration(i/2) * time.Second), ShopID: &target.ID, OldMeasurementPointID: &oldPoint.ID, NewMeasurementPointID: &newPoint.ID, Reason: "test", Metadata: json.RawMessage(`{}`)}
 		if action != "relocate" {
 			audit.OldMeasurementPointID, audit.NewMeasurementPointID = nil, nil
 		}
@@ -94,6 +94,20 @@ func TestAdminBindingAuditHistoryPostgresAuthorizationProjectionFiltersPaginatio
 	second, err := repository.FindAdminBindingAuditHistory(context.Background(), AdminBindingAuditHistoryQuery{UserID: admin.ID, ShopID: target.ID, SessionID: session.ID, Limit: 2, Cursor: page.NextCursor})
 	if err != nil || len(second.Items) != 2 {
 		t.Fatalf("second page=%+v err=%v", second, err)
+	}
+	third, err := repository.FindAdminBindingAuditHistory(context.Background(), AdminBindingAuditHistoryQuery{UserID: admin.ID, ShopID: target.ID, SessionID: session.ID, Limit: 2, Cursor: second.NextCursor})
+	if err != nil || len(third.Items) != 1 {
+		t.Fatalf("same-timestamp third page=%+v err=%v", third, err)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, item := range append(append(page.Items, second.Items...), third.Items...) {
+		if seen[item.ID] {
+			t.Fatalf("same-timestamp cursor duplicated audit %s", item.ID)
+		}
+		seen[item.ID] = true
+	}
+	if len(seen) != 5 {
+		t.Fatalf("same-timestamp cursor skipped rows: %d", len(seen))
 	}
 	filtered, err := repository.FindAdminBindingAuditHistory(context.Background(), AdminBindingAuditHistoryQuery{UserID: admin.ID, ShopID: target.ID, SessionID: session.ID, Limit: 2, Action: "relocate", MeasurementPointID: &newPoint.ID})
 	if err != nil || len(filtered.Items) != 1 || filtered.Items[0].OldMeasurementPointName != "Old Point" || filtered.Items[0].NewMeasurementPointName != "New Point" {
