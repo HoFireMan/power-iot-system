@@ -1,7 +1,7 @@
 # CONTEXT.md
 
-Current Power-IoT mainline state and accepted checkpoints. Durable working
-rules are in `AGENTS.md`; public/product documentation remains in `README.md`.
+Current Power-IoT mainline state and accepted checkpoints. Durable working rules
+are in `AGENTS.md`; public/product documentation remains in `README.md`.
 
 ## Mainline State
 
@@ -9,9 +9,18 @@ Canonical repository:
 
 `/home/admin-195/code/power-iot-system`
 
-Live canonical Git HEAD is authoritative in Git and is intentionally not
-maintained as a hardcoded SHA in this document. Obtain it from the canonical
+Live canonical Git HEAD is authoritative in Git. Obtain it from the canonical
 repository with `git rev-parse main`.
+
+DOCUMENTATION_RECONCILED_THROUGH = **PR #52**
+
+Current documentation status: **ACCEPTED / MERGED / DOCS_RECONCILED / DEVICE_RUNTIME_PENDING**
+
+The accepted mainline through PR #52 includes the earlier Admin Binding,
+IDENT-002, Alerts V1, Assignment History, Audit History, BUG-006, and BUG-004
+checkpoints recorded below. No source, product, protocol, schema, migration,
+MQTT topic, Flutter route, or HTTP route change is authorized by this context
+reconciliation.
 
 ## Accepted Local Runtime Operator
 
@@ -37,249 +46,157 @@ SIMULATOR_APPLICATION_ACK_HEALTH = **ENABLED**
 
 SIMULATOR_BOOT_IDENTITY = **persistent monotonic local boot counter**
 
-For runtime commands and safety semantics, see:
+Normal local lifecycle operations must use the Operator rather than invented
+manual lifecycle commands. The Backend baseline was already running and was
+left untouched during this documentation task.
 
-`README.md` → **Power-IoT Local Runtime Operator**
+## Accepted Checkpoints Since the Previous Baseline
 
-Future agents must prefer the Operator over inventing manual lifecycle commands
-for normal local Power-IoT operation.
+### IDENT-002 — MeasurementPoint-centered derived identity
 
-## Current Accepted Product State
+- PR #36 implementation: `49529edf06b2d6d063b260d61cc9a88becaaf60d`
+- PR #37 documentation reconciliation: merged
 
-Latest accepted product feature checkpoint:
+Migration `000010_measurement_point_identity` established the accepted
+MeasurementPoint-centered identity boundary. AlertLog rows are backfilled only
+when an exact historical DeviceAssignment match exists at `CreatedAt`; legacy
+rows that are unattributable or ambiguous remain explicitly unresolved. The
+DailyUsage writer/reader was proven inactive, so legacy device-day rows remain
+quarantined evidence and future authoritative uniqueness is
+`(date, measurement_point_id)`. Replacement, relocation, half-open interval,
+rollback, replay, and admission-repair evidence passed. `Device.ShopID` and MAC
+remain non-authoritative.
 
-PR #34 = **READ_ONLY_FLUTTER_CACHE_01**
+**IDENT-002 is CLOSED.** This closes the identity-resolution debt; it does not
+claim that every future derived-data/reporting capability exists.
 
-MERGE_COMMIT = `8df2a67dd41b52c3beb0d84673a1004a930b2968`
+### Alerts V1
 
-Feature parent = `cd503b66f8f52a608f801f453d1da076c5b4a383`
+- PR #39 implementation: `2e6e542437087da027661da72a6512cec6a559a9`
+- PR #40 documentation: `79e0c610cba3e65aedb03ec6c6075f99acddfcee`
+- PR #41 recovery acceptance: `2daa0823690ad88849110fbef669a50d68c0ac7b`
+- PR #42–#43 acceptance/documentation governance: merged before the later
+  Admin Binding history sequence
 
-Dashboard-only durable last-successful snapshot cache is implemented and tested
-with authenticated User + authorized Shop scoping and transient stale-read
-fallback. It does not provide offline login, offline authorization, mutation
-queues, or broader product caching. Device persistence runtime remains pending
-an operator-owned Android emulator.
+Alerts V1 is accepted for development/local system integration. It includes
+MeasurementPoint-centered settings and durable edge-triggered `CURFEW_USAGE`
+lifecycle, authenticated Shop-scoped read history, MeasurementPoint filtering,
+newest-first cursor pagination, replacement/relocation behavior, out-of-order
+handling, PostgreSQL concurrency deduplication, and disposable PostgreSQL plus
+isolated Backend runtime evidence. Settings GET is Shop-member readable; PUT
+requires the existing scoped-admin capability plus Shop membership. Quiet hours
+use `Asia/Taipei` and `[start, end)` semantics; the validated per-MP threshold
+has a 10 W default.
 
-Latest accepted identity/data-integrity checkpoint:
+The Flutter Alert History and Alert Settings sources are present with focused
+model/UI integration tests. Device-level Flutter/runtime acceptance remains
+pending an operator-owned emulator. V1 does not include notification delivery,
+mark-read/read-acknowledgement semantics, daily/monthly kWh evaluators,
+per-Shop timezone configuration, or production hardening.
 
-PR #36 = **IDENT_002_RESOLUTION**
+### Admin Assignment History and Audit History
 
-MERGE_COMMIT = `49529edf06b2d6d063b260d61cc9a88becaaf60d`
+Admin Assignment History remains an accepted development capability with
+isolated Backend and Flutter evidence. It provides the authorized
+Device-to-MeasurementPoint interval timeline, current human-readable
+resolution, Active/Ended and MP/Device filters, and safe Shop transitions.
+Device-level runtime acceptance remains pending an operator-owned emulator.
 
-Feature head = `3b3088bb8bbccd458a8c4cc561635575e4a6428f`
+Admin Binding Audit History was accepted through:
 
-Schema migration `000010_measurement_point_identity` establishes
-MeasurementPoint-centered derived identity. AlertLog backfills only an exact
-historical DeviceAssignment match at CreatedAt; unattributable or ambiguous
-legacy rows remain explicitly unresolved. DailyUsage was proven inactive
-(no runtime writer or reader), so existing device-day rows remain quarantined
-legacy evidence and future authoritative uniqueness is
-`(date, measurement_point_id)`. Replacement, relocation, and half-open
-`valid_to` evidence passed. Device.ShopID and MAC remain non-authoritative.
-At the IDENT-002 checkpoint, Alerts API/settings/history, notifications, and
-Flutter Alerts integration remained incomplete; the later Alerts checkpoint
-below records the bounded V1 implementation.
+- PR #44 read slice: `8f7a36f27380a1143ddd0da14799878eb59f4931`
+- PR #45 documentation reconciliation: merged
+- PR #46 same-timestamp cursor evidence: merged
+- PR #47 UI recovery: `dc752dde12885e4dfc0c8b5776ac32a71436028f`
+- PR #48 documentation reconciliation: merged
 
-Latest accepted Alerts checkpoint:
+The read-only audit view covers the five persisted operations:
+`create_measurement_point`, `bind`, `replace`, `relocate`, and `unbind`. It is
+scoped by authenticated scoped-admin capability and active Shop authorization,
+supports Action/MeasurementPoint/Device filters, and uses stable
+`(occurred_at, id)` cursor pagination. Historical IDs and serial/MAC snapshots
+are authoritative; current Actor, Device, and MeasurementPoint names are
+nullable enrichment. Relocate rows require current authorization to both source
+and target Shops and are excluded when provenance cannot be verified.
 
-PR #39 = **MEASUREMENT_POINT_ALERTS_V1_01** (implementation)
+Flutter filter text is draft-only until Apply. Apply promotes normalized values,
+resets pagination, and generation-scoped loading/results prevent stale pages
+from repopulating a newer Shop or filter view. No audit mutation, actor filter,
+schema migration, or audit-writer change is included in this read/UI slice.
 
-MERGE_COMMIT = `2e6e542437087da027661da72a6512cec6a559a9`
+### BUG-006 — diagnostics command parity
 
-PR #40 = **MEASUREMENT_POINT_ALERTS_V1_01** (documentation)
-
-MERGE_COMMIT = `79e0c610cba3e65aedb03ec6c6075f99acddfcee`
-
-PR #41 = **ALERTS_V1_POST_MERGE_ACCEPTANCE_RECOVERY_01**
-
-MERGE_COMMIT = `2daa0823690ad88849110fbef669a50d68c0ac7b`
-
-Alerts V1 is accepted for development/local system integration after the
-recovery PostgreSQL and isolated Backend runtime gates. Migration 000011 was
-applied and replay-checked against disposable PostgreSQL; authorization,
-history filtering and same-timestamp cursor pagination, durable edge-triggered
-lifecycle, PostgreSQL concurrency deduplication, replacement/relocation, and
-out-of-order behavior were exercised. Settings updates reset the active edge
-without erasing the monotonic `last_event_at` watermark. Alert settings and
-durable curfew lifecycle state are keyed by MeasurementPoint; Device remains
-provenance only. Settings GET is Shop-member readable; settings PUT requires
-the existing scoped-admin capability plus Shop membership. Quiet hours use
-Asia/Taipei and `[start, end)` semantics. CURFEW_USAGE uses a validated
-per-MeasurementPoint threshold with a 10 W default. Alert History is
-authenticated, Shop-scoped, MeasurementPoint-filterable, newest-first,
-cursor-paginated, and read-only; unresolved legacy alerts are excluded. No
-mark-read, notification channel, or daily/monthly kWh evaluator is included.
-
-Device-level Flutter runtime acceptance remains pending an operator-owned
-emulator.
-
-Broader Alerts remain incomplete for daily kWh thresholds, monthly kWh
-thresholds, read/acknowledgement semantics, notification delivery, per-Shop
-timezones, retention policy, and broader production hardening.
-
-Latest accepted Admin Binding audit history checkpoint:
-
-PR #44 = **ADMIN_BINDING_AUDIT_HISTORY_READ_01**
-
-MERGE_COMMIT = `8f7a36f27380a1143ddd0da14799878eb59f4931`
-
-The read-only Admin Binding Audit History slice exposes the five persisted
-operations (`create_measurement_point`, `bind`, `replace`, `relocate`, and
-`unbind`) through scoped-admin plus active Shop authorization. It supports
-Action/MeasurementPoint/Device filters and stable `(occurred_at, id)` cursor
-pagination. Historical IDs and Device serial/MAC snapshots remain authoritative;
-Actor, Device, and MeasurementPoint names are current enrichment only. Relocate
-rows are target-Shop owned and require current authorization to both source and
-target Shops; otherwise the full row is excluded. No audit mutation, actor
-filter, schema migration, or audit writer change is included. Device-level
-Flutter runtime acceptance remains pending an operator-owned emulator.
-
-Latest accepted Admin Binding audit history UI recovery checkpoint:
-
-PR #47 = **ADMIN_BINDING_AUDIT_HISTORY_UI_RECOVERY_01**
-
-MERGE_COMMIT = `dc752dde12885e4dfc0c8b5776ac32a71436028f`
-
-The Flutter Audit History screen now keeps Measurement Point and Device filter
-text in draft state. Typing does not issue a request or change provider identity;
-Apply atomically promotes normalized values to the applied query and resets
-pagination. Pagination responses, loading state, errors, and terminal cursors
-are generation-scoped so stale pages cannot repopulate a newer Shop/filter view.
-Focused widget acceptance covers loading, results, empty, error/retry, draft
-filters, Apply, pagination, Shop switching, Replace, and Relocate presentation.
-Backend source and the existing route contract remain unchanged. Device runtime
-acceptance remains pending an operator-owned emulator.
-
-Latest accepted BUG-006 protocol parity checkpoint:
-
-PR #49 = **BUG_006_FIX_01**
-
-MERGE_COMMIT = `3b9f1aade94a3662b08f852261b0aaa05c578575`
+- PR #49 implementation: `3b9f1aade94a3662b08f852261b0aaa05c578575`
+- PR #50 documentation reconciliation: `2c8ae7f42f5e406d4519dc6cdb82fc062192776a`
 
 `diagnostics` is the canonical Device Protocol v1 command action and
 `report_diagnostics` is an exact compatibility alias. Both use the existing
-CommandEnvelope, existing command topic, and generic command acknowledgement.
-No diagnostic-report topic, payload, persistence, Backend report consumer,
-report-specific identifiers, authorization, or sensitive-data transport is
-implemented. Backend validation, simulator parity tests, and `iotctl` action
-help agree; existing unsupported/destructive actions, OTA handling, telemetry,
-MQTT topics, schema, migrations, Flutter, and HTTP routes are unchanged. The
-ignored local Technical Debt Register records BUG-006 as CLOSED; real firmware
-and device validation are not claimed.
+CommandEnvelope, command topic, and generic command acknowledgement. Backend,
+simulator, and `iotctl` validation agree. No diagnostic-report topic, payload,
+persistence, consumer, report-specific identity, authorization, or sensitive
+data transport exists. BUG-006 is **CLOSED**; real firmware behavior is not
+claimed. Future diagnostic reporting remains separate scope:
+`DEVICE_DIAGNOSTIC_REPORT_V1`.
 
-Latest accepted BUG-004 MQTT construction checkpoint:
+### BUG-004 — unsafe legacy MQTT constructor
 
-PR #51 = **BUG_004_FIX_01**
+- PR #51 implementation: `a54cb09e1f6d781e33967ca7bd6f4c8961713571`
+- PR #52 documentation reconciliation: merged
 
-MERGE_COMMIT = `a54cb09e1f6d781e33967ca7bd6f4c8961713571`
+The unused `NewMqttService(brokerURL, db)` constructor was removed. All
+repository Backend/tool construction remains:
 
-The unused legacy `NewMqttService(brokerURL, db)` constructor was removed.
-All repository Backend/tool construction remains
-`LoadMqttConfigFromEnv → NewMqttServiceWithConfig`, preserving TLS, CA,
-credentials, reconnect, client ID, and D6 ingestion-mode authority. No
-replacement brokerURL constructor, MQTT topic/protocol, schema, migration,
-Flutter, or HTTP route change was introduced. The ignored local Technical Debt
-Register records BUG-004 as CLOSED. Real device and production validation are
-not claimed.
+`LoadMqttConfigFromEnv → NewMqttServiceWithConfig`
 
-Earlier accepted product checkpoint retained for history:
+This preserves TLS, CA validation, credentials, reconnect, client ID, and D6
+ingestion-mode authority. No replacement brokerURL constructor or protocol,
+topic, schema, migration, Flutter, or HTTP route change was introduced.
+BUG-004 is **CLOSED**. Real-device and production validation are not claimed.
 
-PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
+## Current Accepted Development Capability Summary
 
-MERGE_COMMIT = `a48ed2112166c5b2d26167d9cdcafbdde847cd8c`
+- Auth/session/JWT integration, authenticated API flow, `/me`, and `/shops`.
+- Shop-scoped Dashboard current power, daily/month energy, Carbon projection,
+tariff/Billing configuration, historical energy/coverage, and Billing V1
+estimate semantics.
+- Authenticated Shop-scoped monthly MeasurementPoint historical energy report
+with real Flutter integration.
+- MeasurementPoint-centered historical assignment attribution across Device
+replacement and relocation.
+- Authenticated scoped-admin Admin Device Binding HTTP lifecycle: Create
+Measurement Point, Bind, Replace, Relocate, and Unbind.
+- Real Flutter Admin Binding integration with authoritative refresh, retry-safe
+request identity, and double-submit serialization.
+- Admin Assignment History and read-only Admin Binding Audit History UI slices,
+including their focused Flutter acceptance tests.
+- Alerts V1 Backend/system integration plus Flutter Alert History and Settings
+sources/tests; device-level runtime remains pending.
+- Dashboard-only durable last-successful snapshot cache V1. It is scoped by
+authenticated User and authorized Shop, supports transient stale-read fallback,
+and does not provide offline login, offline authorization, mutation queues, or
+broader product caching.
+- Local Runtime Operator accepted and ready for development use.
 
-Feature parent = `527b9014ff642fafdf92e28a2b3598fe3f642a43`
-
-Earlier accepted product checkpoint retained for history:
-
-PR #29 = **HISTORICAL-MP-ENERGY-REPORT-01**
-
-MERGE_COMMIT = `d9fac309d92347514bdc4e5c6f07d24f2104fdeb`
-
-Feature parent = `271f413292fb1ea98680624bc325593bf9913dba`
-
-PR #29 historical MP report remains an accepted earlier capability.
-
-Earlier accepted product checkpoint retained for history:
-
-PR #27 = **ADMIN-BINDING-HTTP-01**
-
-MERGE_COMMIT = `4c342b3197ace7dc7fcd13d568b984078d6dff33`
-
-Feature parent = `0fc4f2caf94fa7a9f1b1c5eea4fae785640f9a12`
-
-PR #27 Admin Binding remains an accepted earlier capability; PR #31 is the
-newer accepted product feature checkpoint.
-
-PR #25 Local Runtime Operator remains the accepted runtime/operator checkpoint:
-
-`43fc892478b44f898e8e3386650976aa69bfae06`
-
-Current accepted development capability summary:
-
-- Auth/session/JWT development integration.
-- B-02 coverage foundation and local devseed coverage configuration.
-- Measurement Point Detail read path.
-- Dashboard daily/monthly energy and Carbon summary.
-- Shop tariff classification.
-- Billing V1 configuration, historical energy/coverage, and estimate support.
-- Authenticated Shop-scoped monthly Measurement Point historical energy report.
-- Shop aggregate and per-MeasurementPoint usage/coverage facts.
-- Asia/Taipei monthly semantics with accepted cutoff and snapshot boundaries.
-- Historical DeviceAssignment attribution, including Device replacement continuity
-  under the same MeasurementPoint and relocation attribution by assignment
-  interval.
-- Report status semantics preserve null versus valid zero and partial versus
-  complete data distinctions.
-- Real Flutter historical report screen with month navigation.
-- Local PostgreSQL and Android development runtime acceptance for the
-  historical report.
-- Local devseed scoped-admin fixture support.
-- Authenticated Shop-scoped Admin Device Binding HTTP API: Create Measurement
-  Point, Bind, Replace, Relocate, and Unbind.
-- Real Flutter Admin Binding integration with authoritative refresh after
-  mutation, retry-safe request identity, and double-submit serialization.
-- Local PostgreSQL and Android development runtime verification for Admin
-  Binding.
-- Authenticated scoped Admin read-only Assignment History view implemented and
-  Flutter-tested; isolated Backend runtime verified, while device-level runtime
-  verification remains pending an operator-owned Android emulator.
-- Device ↔ MeasurementPoint interval timeline from the same authorized
-  AdminOverview snapshot with human-readable entity resolution.
-- Newest-first Active/Ended, Measurement Point, and Device filters with AND
-  semantics and safe selected-Shop transition handling.
-- Real Flutter Assignment History route and Admin Overview entry.
-- Authenticated, read-only Admin Binding Audit History for the five binding
-  operations, with scoped-admin + Shop authorization, Action/MeasurementPoint/
-  Device filters, stable cursor pagination, current-name enrichment, and
-  fail-closed cross-Shop relocation visibility.
-- Real Flutter Admin Audit History route and Admin Overview entry; no actor
-  filter or audit mutation is included.
-- Dashboard-only durable read-only cache V1 using a separate SharedPreferences
-  boundary, with strict envelope validation, stale presentation, and
-  auth/Shop isolation tests.
-- Local Runtime Operator accepted and ready for use.
-
-Current boundaries remain:
+## Current Boundaries and Next Legal Work
 
 - Production deployment and hardening remain pending.
-- Physical ESP8266/fleet validation remains pending.
-- Monthly Measurement Point historical energy reporting is implemented and
-  development/runtime verified.
-- Broader historical reporting remains incomplete, including arbitrary date
-  ranges, exports, additional report types, and production reporting hardening.
-- General Admin inventory/history remains incomplete beyond the bounded
-  Assignment History view.
-- Assignment History device-level runtime acceptance remains pending because
-  the only connected Android emulator is not operator-owned.
-- The bounded Admin Binding Audit History read slice is accepted for the five
-  binding operations; a general Admin audit platform, actor filter/directory,
-  audit mutation, and broader audit domains remain incomplete.
-- Alerts V1 is implemented as the bounded development capability described in
-  PR #39; broader Alerts remain incomplete as documented above.
-- BLE/QR provisioning remains incomplete.
-- Dashboard read-only cache V1 is implemented and tested; broader
-  offline/product caching remains incomplete.
+- Physical ESP8266/fleet validation remains pending and belongs to the external
+firmware/hardware acceptance process.
+- Device-level Flutter acceptance remains pending an operator-owned emulator;
+the connected `emulator-5554` is not operator-owned and must not be used as
+acceptance evidence.
+- Broader historical reports, exports, arbitrary date ranges, and production
+reporting hardening remain incomplete.
+- Broader Alerts remain incomplete for daily/monthly kWh thresholds,
+read/acknowledgement semantics, notification delivery, per-Shop timezones,
+retention policy, and production hardening.
+- General Admin inventory/history and broader audit domains remain incomplete
+beyond the accepted bounded slices. No actor directory/filter or audit mutation
+is implied.
+- BLE/QR provisioning, broader offline/product caching, and physical recovery
+remain incomplete or not frozen.
+- Global-admin semantics, complete tenant/role/device scope, and production
+credential/certificate lifecycle remain incomplete.
 
 Dashboard refresh contract:
 
@@ -287,129 +204,48 @@ Dashboard refresh contract:
 - **DEVELOPMENT / E2E OVERRIDE = 10 seconds**
 - **10 seconds is test acceleration only; it is not the product default.**
 
-Actual production/device MQTT telemetry interval:
+Actual production/device MQTT telemetry interval: **UNCONFIRMED**. Do not claim
+that device telemetry is 300 seconds unless separately established.
 
-**UNCONFIRMED**
+Backend current-power freshness remains **120 seconds**.
 
-Do not claim that device telemetry is 300 seconds unless separately established.
-
-Backend current-power freshness remains:
-
-**120 seconds**
-
-Do not alter or reinterpret that contract here.
-
-## Historical PR #8 / POST-I3-F1 Snapshot
-
-I3 and POST-I3-F1 were completed and merged. PR #7 merged as
-`459f0f3b121aefe7793d943e9609ac4570d144f2`; PR #8 merged as
-`05d9ccd7caaa8015943eea8dd9564e3942bef83f`. The former post-PR #8 snapshot
-listed no next active feature; it is historical and is not the current
-mainline state.
-
-## Historical POST-I3-F1 Behavior
-
-- Dashboard automatic refresh is implemented.
-- Polling runs only while the app is resumed and the Dashboard route is visible.
-- Polling stops when the app is backgrounded or the Dashboard route is covered.
-- Dashboard requests do not overlap or backlog.
-- Transient background refresh failures preserve the last successful UI data.
-- Authentication, shop selection, and `null != zero` semantics are preserved.
-- No production deployment or production readiness claim is made.
-
-## Production Boundary
+## Production and Safety Boundary
 
 - `PRODUCTION_EXECUTION_AUTHORIZED = NO`
 - `PRODUCTION_TCRFID01_MUTATED = NO`
 - `PRODUCTION_DB_MUTATED = NO`
 - `PRODUCTION_CUTOVER = NOT_STARTED`
 
-No production deployment is included in this completed feature.
+No production, TCRFID01, private firmware, OTA key, or canonical database access
+occurred. PostgreSQL validation, where required by accepted feature work, used
+disposable test databases only. Preserve unrelated untracked/private files,
+including:
 
-## Current Agent / Development Policy
+- `ADMIN_BINDING_AUDIT_HISTORY_REBASE_01.txt`
+- `infrastructure/firmware/`
+- `infrastructure/mosquitto/config/acl`
+
+## Engineering Policy
 
 Power-IoT feature-development default:
 
-**PROFILE C — Single-Subagent Sequential**
+- **PROFILE C — Single-Subagent Sequential**
+- **VERTICAL SLICE** where implementation is requested
+- **TDD**
+- **DEEP MODULES**
 
-Development style:
+Current documentation work is docs-only and must not alter source behavior.
+Profile A and D are not normal defaults. Preserve canonical contracts, use
+focused validation, keep verified/planned/production maturity labels distinct,
+and stop at the declared milestone boundary.
 
-**VERTICAL SLICE**
+The technical debt register remains canonical for debt status. At this
+checkpoint BUG-004 and BUG-006 are CLOSED, IDENT-002 is CLOSED, and unresolved
+production/physical-device gates remain deferred rather than silently closed.
 
-Each normal product feature should be implemented end-to-end through the
-relevant layers, typically:
+## Repository Preservation Boundary
 
-domain / contract
-→ backend
-→ API
-→ Flutter frontend
-→ integration
-→ real E2E
-
-Engineering method:
-
-**TDD**
-
-Design preference:
-
-**DEEP MODULES**
-
-Frontend and backend should normally be implemented as one bounded feature
-slice rather than large frontend-only or backend-only batches.
-
-Profile A and D are **NOT** normal defaults.
-
-Use another profile only when:
-
-- the user explicitly requests it; or
-- a materially exceptional task requires it and that exception is made explicit.
-
-Model/effort configuration should inherit project/global defaults and should not
-be redundantly repeated in prompts unless the user requests a specific override
-or the task materially requires escalation.
-
-## Historical A3/D2/D3 Checkpoints
-
-The following historical delivery information is retained for traceability.
-
-- A3-P1 final enforcement plan: **FROZEN**.
-- A3-D1 writer/startup gates: **ACCEPTED**.
-- A3-D2 lifecycle/readiness seams: **ACCEPTED**.
-- A3-D3 dedicated runner/recovery: **ACCEPTED** after independent ground-truth
-  audit repairs.
-- A3-D4 protected continuous orchestration: **COMPLETE / ACCEPTED**.
-- A3-D5 migration `000006` and integration: **COMPLETE / ACCEPTED**.
-- A3-D6 specification and plan: **APPROVED / FROZEN**.
-- A3-D6 implementation and production-shaped rehearsal: **COMPLETE / PASS**.
-- A3-D6 pre-production validation: **PASS**.
-
-Historical accepted checkpoints:
-
-- D2: `64bce24b72f2976e9333e9d853c0c4c78efd139b`
-- D3 re-acceptance: `2d1bcf32c04af94e57817e5cf84e47a295feff08`
-
-D2 preserved the external admission boundary, D3 metadata transition/lock/
-recovery authority, and exclusion of DML/backfill and ownership/Authz redesign.
-Those historical phases are complete and are not unresolved blockers for
-POST-I3-F1.
-
-## Historical GitHub Integration
-
-- PR #6 security reconciliation: historical phase, no longer the active phase.
-- PR #7 frontend/backend integration: **MERGED** as the I3 merge commit above.
-- PR #8 dashboard auto refresh: **MERGED** to `main` with merge commit
-  `05d9ccd7caaa8015943eea8dd9564e3942bef83f`.
-
-## Documentation and Scope Boundary
-
-The dashboard polling contract is documented in `README.md`. Local telemetry
-runtime has been proven end-to-end; the repository-wide operational procedure
-is documented in the `README.md` Local Development Runbook, while current
-workstation state is kept outside Git at
-`/home/admin-195/.local/state/power-iot/runbooks/local-runtime-state.md`. This
-context file records internal mainline progress and agent execution policy; it
-does not expand the accepted feature or authorize production activity.
-
-Never read or stage:
+Before and after documentation edits, preserve unrelated user changes and avoid
+destructive history operations. Do not read or stage:
 
 `infrastructure/firmware/certs/ota.key`
