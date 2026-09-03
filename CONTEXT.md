@@ -134,6 +134,22 @@ target Shops; otherwise the full row is excluded. No audit mutation, actor
 filter, schema migration, or audit writer change is included. Device-level
 Flutter runtime acceptance remains pending an operator-owned emulator.
 
+Latest accepted Admin Binding audit history UI recovery checkpoint:
+
+PR #47 = **ADMIN_BINDING_AUDIT_HISTORY_UI_RECOVERY_01**
+
+MERGE_COMMIT = `dc752dde12885e4dfc0c8b5776ac32a71436028f`
+
+The Flutter Audit History screen now keeps Measurement Point and Device filter
+text in draft state. Typing does not issue a request or change provider identity;
+Apply atomically promotes normalized values to the applied query and resets
+pagination. Pagination responses, loading state, errors, and terminal cursors
+are generation-scoped so stale pages cannot repopulate a newer Shop/filter view.
+Focused widget acceptance covers loading, results, empty, error/retry, draft
+filters, Apply, pagination, Shop switching, Replace, and Relocate presentation.
+Backend source and the existing route contract remain unchanged. Device runtime
+acceptance remains pending an operator-owned emulator.
+
 Earlier accepted product checkpoint retained for history:
 
 PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
