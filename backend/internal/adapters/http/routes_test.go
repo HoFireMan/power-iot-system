@@ -30,7 +30,7 @@ func (routeLogoutStub) Logout(context.Context, applicationauth.AuthenticatedIden
 	return applicationauth.ErrUnauthorized
 }
 
-func TestAdminBindingRouteInventoryContainsExactlyFivePostsOneOverviewAndOneAuditHistory(t *testing.T) {
+func TestAdminBindingRouteInventoryContainsBindingOverviewAuditAndLifecycleRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	// A non-nil DB enables the production-only audit route during inventory
@@ -44,6 +44,9 @@ func TestAdminBindingRouteInventoryContainsExactlyFivePostsOneOverviewAndOneAudi
 		"POST /api/v1/admin/device-bindings/:assignmentId/unbind":   false,
 		"GET /api/v1/admin/device-bindings":                         false,
 		"GET /api/v1/shops/:shopId/admin/binding-audits":            false,
+		"POST /api/v1/admin/devices/:deviceId/disable":              false,
+		"POST /api/v1/admin/devices/:deviceId/enable":               false,
+		"POST /api/v1/admin/devices/:deviceId/retire":               false,
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path

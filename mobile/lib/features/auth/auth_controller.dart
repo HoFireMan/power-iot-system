@@ -1,14 +1,8 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:power_iot_app/config/base_url.dart';
 import 'package:power_iot_app/core/network/authenticated_http_client.dart';
-
-/// Development must provide the API endpoint explicitly. A local default keeps
-/// the debug app usable without embedding a production host in the client.
-const developmentBaseUrl = String.fromEnvironment(
-  'POWER_IOT_BASE_URL',
-  defaultValue: 'http://localhost:8080',
-);
 
 enum AuthStatus { restoring, authenticated, unauthenticated }
 
@@ -165,7 +159,7 @@ final class AuthController extends ChangeNotifier {
 final authClientProvider = Provider<AuthenticatedHttpClient>((ref) {
   final session = AuthSession(SecureRefreshTokenStore());
   final client = AuthenticatedHttpClient(
-    baseUrl: Uri.parse(developmentBaseUrl),
+    baseUrl: resolvePowerIoTBaseUrl(),
     session: session,
   );
   ref.onDispose(client.close);

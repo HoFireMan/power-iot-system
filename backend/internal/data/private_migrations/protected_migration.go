@@ -782,6 +782,46 @@ WHERE index_namespace.nspname=current_schema()
 	return nil
 }
 
+// verifyDeviceLifecycleCatalog proves the additive lifecycle schema separately
+// from the existing B-02 catalog. Keeping this check separate lets an already
+// clean B-02 database take the standalone protected 000012 upgrade path.
+func verifyDeviceLifecycleCatalog(ctx context.Context, q ProtectedMigrationQueryer) error {
+	var dataType, nullable string
+	var defaultValue sql.NullString
+	if err := q.QueryRowContext(ctx, `
+SELECT data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema=current_schema() AND table_name='devices' AND column_name='lifecycle_status'`).Scan(&dataType, &nullable, &defaultValue); err != nil {
+		return fmt.Errorf("device lifecycle column: %w", err)
+	}
+	if dataType != "character varying" || nullable != "NO" || !defaultValue.Valid || !strings.Contains(normalizeCatalogSQL(defaultValue.String), "'active'::charactervarying") {
+		return fmt.Errorf("device lifecycle column has unexpected shape type=%s nullable=%s default=%q", dataType, nullable, defaultValue.String)
+	}
+	definition, err := b02ConstraintDefinition(ctx, q, "devices", "devices_lifecycle_status_check")
+	if err != nil {
+		return err
+	}
+	for _, fragment := range []string{"lifecycle_status", "active", "disabled", "retired"} {
+		if !strings.Contains(definition, fragment) {
+			return fmt.Errorf("device lifecycle check is missing semantic fragment %q", fragment)
+		}
+	}
+	var triggerCount int
+	if err := q.QueryRowContext(ctx, `
+SELECT count(*)
+FROM pg_trigger t
+JOIN pg_class c ON c.oid=t.tgrelid
+JOIN pg_namespace n ON n.oid=c.relnamespace
+WHERE n.nspname=current_schema() AND c.relname='devices'
+  AND t.tgname='devices_lifecycle_terminal' AND NOT t.tgisinternal`).Scan(&triggerCount); err != nil {
+		return fmt.Errorf("device lifecycle terminal trigger: %w", err)
+	}
+	if triggerCount != 1 {
+		return fmt.Errorf("device lifecycle terminal trigger count=%d", triggerCount)
+	}
+	return nil
+}
+
 func b02ConstraintDefinition(ctx context.Context, q ProtectedMigrationQueryer, table, constraint string) (string, error) {
 	var definition string
 	if err := q.QueryRowContext(ctx, `
@@ -1486,19 +1526,11 @@ func pinnedProtectedInspection(ctx context.Context, conn *sql.Conn, config *post
 // backend disappeared and that both session-scoped locks can be acquired and
 // released in canonical reverse order. The old conn is never reused.
 func discardUnknownProtectedSession(fence *ExclusiveWriterFence, lock *migrationAdvisoryLock) error {
-	if fence == nil || lock == nil || fence.pid == 0 || fence.dsn == "" {
+	if fence == nil || lock == nil || fence.BackendPID() == 0 || fence.DriverURL() == "" {
 		return ErrPhysicalConnectionDiscardRequired
 	}
-	pid, dsn, migrationKey := fence.pid, fence.dsn, lock.key
-	if fence.conn != nil {
-		_ = fence.conn.Close()
-		fence.conn = nil
-	}
-	if fence.db != nil {
-		_ = fence.db.Close()
-		fence.db = nil
-	}
-	fence.state, fence.discarded = ExclusiveUnknown, true
+	pid, dsn, migrationKey := fence.BackendPID(), fence.DriverURL(), lock.key
+	fence.DetachForUnknown()
 	lock.conn, lock.owned, lock.state, lock.discarded = nil, false, ExclusiveUnknown, true
 
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
@@ -1539,7 +1571,7 @@ func discardUnknownProtectedSession(fence *ExclusiveWriterFence, lock *migration
 					if !migrationReleased || !fenceReleased {
 						return errors.Join(ErrPhysicalConnectionDiscardRequired, ErrWriterFenceUnlockFailed)
 					}
-					fence.state, fence.discarded = ExclusiveReleased, true
+					fence.MarkDiscardedReleased()
 					lock.state, lock.discarded = ExclusiveReleased, true
 					return nil
 				}

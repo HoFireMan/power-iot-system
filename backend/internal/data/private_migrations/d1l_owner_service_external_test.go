@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 func TestD1LOwnerServicePublicProjectionHasNoRawActivationMaterial(t *testing.T) {

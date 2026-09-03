@@ -61,6 +61,19 @@ class UnbindDeviceInput {
   final String reason;
 }
 
+/// Product input for an explicit Device lifecycle command.
+class DeviceLifecycleInput {
+  const DeviceLifecycleInput({
+    required this.requestIdentity,
+    required this.deviceId,
+    this.reason = '',
+  });
+
+  final String requestIdentity;
+  final String deviceId;
+  final String reason;
+}
+
 /// Product input for creating a logical Measurement Point in the current Site.
 class CreateMeasurementPointInput {
   const CreateMeasurementPointInput({

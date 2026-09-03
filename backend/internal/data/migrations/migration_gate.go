@@ -12,49 +12,11 @@ import (
 const protectedSchemaVersion = 5
 
 var (
-	ErrMigrationGateDirty              = errors.New("migration admission refused: dirty metadata")
-	ErrMigrationGateAmbiguous          = errors.New("migration admission refused: ambiguous metadata")
-	ErrMigrationGateFuture             = errors.New("migration admission refused: unsupported future schema")
-	ErrProtectedV5Upgrade              = errors.New("migration admission refused: protected v5 upgrade requires the dedicated A3 runner")
-	ErrGuardedV6Down                   = errors.New("migration DOWN refused: clean v6 downgrade is protected")
-	ErrCleanV5MetadataRequired         = errors.New("security reconciliation requires clean v5 migration metadata")
-	ErrExternalWriterAdmissionRequired = errors.New("protected work requires external writer drain/deny evidence")
-	ErrD1LGenericRoute                 = errors.New("generic migration route is reserved for D1-L")
+	ErrMigrationGateDirty     = errors.New("migration admission refused: dirty metadata")
+	ErrMigrationGateAmbiguous = errors.New("migration admission refused: ambiguous metadata")
+	ErrMigrationGateFuture    = errors.New("migration admission refused: unsupported future schema")
+	ErrGuardedV6Down          = errors.New("migration DOWN refused: clean v6 downgrade is protected")
 )
-
-// ExternalWriterAdmission carries operator-facing summaries for diagnostics,
-// but those booleans are never authorization evidence. The unexported proof is
-// issued only by the trusted server-side orchestration seam.
-type ExternalWriterAdmission struct {
-	ManagedCooperativeWriters bool
-	DirectSQLControlled       bool
-	OperationalDrainEvidence  bool
-	evidence                  *externalWriterAdmissionEvidence
-}
-
-type externalWriterAdmissionEvidence struct {
-	managedCooperativeWriters bool
-	directSQLControlled       bool
-	operationalDrainEvidence  bool
-}
-
-// AssessExternalWriterAdmission is deliberately conservative: the repository
-// can serialize cooperating Go writers, but has no application-owned control
-// over direct SQL or deployment drain/deny evidence. D3/D6 must require and
-// supply those external prerequisites before protected cutover.
-func AssessExternalWriterAdmission() ExternalWriterAdmission {
-	return ExternalWriterAdmission{ManagedCooperativeWriters: true}
-}
-
-func RequireExternalWriterAdmission(admission ExternalWriterAdmission) error {
-	// Public summary fields are deliberately ignored. An all-true struct
-	// literal is ordinary caller input and must not authorize protected work.
-	proof := admission.evidence
-	if proof == nil || !proof.managedCooperativeWriters || !proof.directSQLControlled || !proof.operationalDrainEvidence {
-		return ErrExternalWriterAdmissionRequired
-	}
-	return nil
-}
 
 type migrationGateAction string
 
@@ -64,35 +26,11 @@ const (
 )
 
 // MigrationMetadataSnapshot is a non-authorizing observation of the configured
-// migration metadata relation. A3 authorization must additionally prove the
-// catalog and semantic invariants owned by later units.
-type migrationMetadataQueryer interface {
+// migration metadata relation. Runtime admission uses it only as one input to
+// the public schema contract; protected migration authority is separate.
+type MigrationMetadataQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}
-
-// rejectD1LGenericRoute prevents the generic migrate APIs from inspecting or
-// mutating the reserved control namespace. The configured relation check is
-// performed before any generic metadata inspection, and the catalog check
-// also catches the ordinary application URL after D1-L has been installed.
-func rejectD1LGenericRoute(ctx context.Context, q migrationMetadataQueryer, config *postgres.Config) error {
-	if config != nil && config.MigrationsTableQuoted {
-		schema, table, ok := parseQuotedMigrationTable(config.MigrationsTable)
-		if ok && schema == "security_control" && table == "control_schema_migrations" {
-			return ErrD1LGenericRoute
-		}
-	}
-	if q == nil {
-		return errors.New("D1-L generic route inspection requires a queryer")
-	}
-	var present bool
-	if err := q.QueryRowContext(ctx, "SELECT to_regclass('security_control.control_schema_migrations') IS NOT NULL").Scan(&present); err != nil {
-		return fmt.Errorf("inspect D1-L reserved namespace: %w", err)
-	}
-	if present {
-		return ErrD1LGenericRoute
-	}
-	return nil
 }
 
 type MigrationMetadataSnapshot struct {
@@ -143,11 +81,18 @@ func inspectMigrationMetadata(ctx context.Context, conn *sql.Conn, config *postg
 	return inspectMigrationMetadataOn(ctx, conn, config)
 }
 
+// InspectMigrationMetadata exposes the read-only metadata observation to the
+// private migration authority without exposing that authority to runtime
+// packages.
+func InspectMigrationMetadata(ctx context.Context, q MigrationMetadataQueryer, config *postgres.Config) (MigrationMetadataSnapshot, error) {
+	return inspectMigrationMetadataOn(ctx, q, config)
+}
+
 // inspectMigrationMetadataOn is the transaction/pinned-session adapter for the
 // canonical metadata inspection logic. It intentionally performs no driver
 // initialization, so the same observation is valid before and inside the
 // protected transaction.
-func inspectMigrationMetadataOn(ctx context.Context, q migrationMetadataQueryer, config *postgres.Config) (MigrationMetadataSnapshot, error) {
+func inspectMigrationMetadataOn(ctx context.Context, q MigrationMetadataQueryer, config *postgres.Config) (MigrationMetadataSnapshot, error) {
 	if q == nil {
 		return MigrationMetadataSnapshot{}, errors.New("migration metadata inspection requires a queryer")
 	}
@@ -200,7 +145,7 @@ func inspectMigrationMetadataOn(ctx context.Context, q migrationMetadataQueryer,
 	return snapshot, nil
 }
 
-func migrationCatalogVersion(ctx context.Context, q migrationMetadataQueryer, schemaName, metadataSchema, metadataTable string) (int, error) {
+func migrationCatalogVersion(ctx context.Context, q MigrationMetadataQueryer, schemaName, metadataSchema, metadataTable string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT c.relname
 		FROM pg_class AS c
@@ -320,78 +265,10 @@ func classifyMigrationAdmission(snapshot MigrationMetadataSnapshot, action migra
 
 func migrationGateActionName(action migrationGateAction) string { return string(action) }
 
-// inspectCleanV5Metadata is the D1 admission seam consumed by the
-// reconciliation command. It checks only metadata authority; the protected
-// executor remains responsible for the exclusive fence, fresh facts, catalog,
-// and semantic readiness proof.
-func inspectCleanV5Metadata(ctx context.Context, databaseURL string) error {
-	parsed, err := parsePostgresDatabaseURL(databaseURL)
-	if err != nil {
-		return err
-	}
-	db, err := sql.Open("postgres", parsed.driverURL)
-	if err != nil {
-		return errors.New("open PostgreSQL for migration admission")
-	}
-	defer db.Close()
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return errors.New("begin migration admission inspection")
-	}
-	defer tx.Rollback()
-	if err := AcquireSharedWriterFence(ctx, tx); err != nil {
-		return fmt.Errorf("acquire shared writer admission: %w", err)
-	}
-	var currentSchema string
-	if err := tx.QueryRowContext(ctx, "SELECT current_schema()").Scan(&currentSchema); err != nil {
-		return err
-	}
-	schemaName, tableName, err := migrationMetadataIdentifiers(parsed.config, currentSchema)
-	if err != nil {
-		return err
-	}
-	qualifiedTable := quotedMigrationTable(schemaName, tableName)
-	var relation sql.NullString
-	if err := tx.QueryRowContext(ctx, "SELECT to_regclass($1)", qualifiedTable).Scan(&relation); err != nil {
-		return err
-	}
-	if !relation.Valid || relation.String == "" {
-		return ErrCleanV5MetadataRequired
-	}
-	var snapshot MigrationMetadataSnapshot
-	rows, err := tx.QueryContext(ctx, "SELECT version, dirty FROM "+qualifiedTable+" ORDER BY version")
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var version int
-		var dirty bool
-		if err := rows.Scan(&version, &dirty); err != nil {
-			rows.Close()
-			return err
-		}
-		snapshot.Exists = true
-		snapshot.RowCount++
-		if snapshot.RowCount == 1 {
-			snapshot.Version, snapshot.Dirty, snapshot.HasVersion = version, dirty, true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if err := classifyMigrationAdmission(snapshot, migrationGateUp, protectedSchemaVersion); err != nil {
-		return err
-	}
-	if snapshot.RowCount != 1 || snapshot.Version != protectedSchemaVersion || snapshot.Dirty {
-		return fmt.Errorf("%w: %s", ErrCleanV5MetadataRequired, snapshot)
-	}
-	return nil
-}
-
-// ConfiguredMigrationTable returns the quoted authoritative metadata relation
-// for a DSN using an already-pinned connection. It performs no initialization.
+// ConfiguredMigrationTable returns the quoted migration metadata relation for
+// a DSN using an already-pinned connection. It performs no initialization.
+// Private migration authorities use this observation seam without importing
+// runtime or application packages.
 func ConfiguredMigrationTable(ctx context.Context, databaseURL string, conn *sql.Conn) (string, error) {
 	parsed, err := parsePostgresDatabaseURL(databaseURL)
 	if err != nil {
@@ -409,14 +286,4 @@ func ConfiguredMigrationTable(ctx context.Context, databaseURL string, conn *sql
 		return "", err
 	}
 	return quotedMigrationTable(schemaName, tableName), nil
-}
-
-// RequireCleanV5Metadata is the explicit D1 admission seam for A2 command
-// entrypoints. It does not perform reconciliation or claim the later D2/D3
-// catalog/readiness proof.
-func RequireCleanV5Metadata(ctx context.Context, databaseURL string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return inspectCleanV5Metadata(ctx, databaseURL)
 }

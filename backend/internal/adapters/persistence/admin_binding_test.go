@@ -18,7 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"power-iot-backend/internal/core/domain"
-	"power-iot-backend/internal/data/migrations"
+	privatemigrations "power-iot-backend/internal/data/private_migrations"
 )
 
 type persistenceFixture struct {
@@ -44,8 +44,9 @@ func openPersistenceDB(t *testing.T) *gorm.DB {
 	for _, migrationFile := range []string{
 		"sql/000007_b02_coverage_foundation.up.sql",
 		"sql/000008_dashboard_carbon_summary.up.sql",
+		"sql/000012_device_retirement_lifecycle.up.sql",
 	} {
-		body, err := fs.ReadFile(migrations.Files, migrationFile)
+		body, err := fs.ReadFile(privatemigrations.Files, migrationFile)
 		if err != nil {
 			t.Fatal(err)
 		}

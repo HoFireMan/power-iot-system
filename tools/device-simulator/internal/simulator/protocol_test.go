@@ -42,6 +42,7 @@ func TestAckTerminalClassification(t *testing.T) {
 	}{
 		{status: "stored", terminal: true},
 		{status: "duplicate", terminal: true},
+		{status: "lifecycle_blocked", terminal: true},
 		{status: "unknown_device", terminal: false},
 		{status: "unknown_assignment", terminal: false},
 		{status: "invalid", terminal: false},

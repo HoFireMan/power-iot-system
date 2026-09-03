@@ -32,6 +32,7 @@ Power IoT System 是集中部署方向的電力 IoT 平台，負責接收遠端�
 | User authentication/session/JWT | ✅ Development implemented / verified |
 | Scoped-admin Shop/Billing/Device Binding authorization | ✅ Development implemented / verified |
 | Authenticated Admin Device Binding HTTP API | ✅ Development implemented / verified |
+| Device Retirement Lifecycle V1 | ✅ Development implemented / verified; device runtime pending |
 | Measurement Point Alerts V1 | ✅ Development/local PostgreSQL and Backend runtime accepted; device runtime pending |
 | Flutter real Backend integration | ✅ Development/runtime/E2E verified |
 | Local Runtime Operator | ✅ Accepted / merged / ready for use |
@@ -302,7 +303,7 @@ The five-second interval is only a local development/test choice. Do not infer a
 MQTT publish
   → Backend validation and assignment resolution
   → PostgreSQL persistence
-  → application ACK (stored or duplicate)
+  → application ACK (stored, duplicate, or lifecycle_blocked discard)
 ```
 
 A simulator log that says only `PUBLISHED` is insufficient; the corresponding application ACK must succeed.
@@ -339,7 +340,7 @@ Telemetry availability is independent from Carbon availability and Billing estim
 
 ## Backend Interface Inventory
 
-The current server composition exposes 22 registered production HTTP routes. Query strings do not create distinct routes, and Flutter routes, MQTT topics, and tests are not counted.
+The current server composition exposes 25 registered production HTTP routes. Query strings do not create distinct routes, and Flutter routes, MQTT topics, and tests are not counted.
 
 1. `GET /`
 2. `POST /api/v1/auth/login`
@@ -363,12 +364,15 @@ The current server composition exposes 22 registered production HTTP routes. Que
 20. `POST /api/v1/admin/device-bindings/:assignmentId/replace`
 21. `POST /api/v1/admin/device-bindings/:assignmentId/relocate`
 22. `POST /api/v1/admin/device-bindings/:assignmentId/unbind`
+23. `POST /api/v1/admin/devices/:deviceId/disable`
+24. `POST /api/v1/admin/devices/:deviceId/enable`
+25. `POST /api/v1/admin/devices/:deviceId/retire`
 
 The monthly historical energy report accepts `?month=YYYY-MM` and is an authenticated Shop-scoped read: a normal authorized Shop user may read it through the server-verified User → UserShopRelation → Shop chain. It is not scoped-admin-only. It returns the Shop monthly aggregate and per-MeasurementPoint usage/coverage facts attributed through historical DeviceAssignment intervals. `MeasurementPoint` remains the stable report identity across Device replacement; relocation is attributed by the historical assignment interval. The report is development/local-runtime verified, not official utility billing or a production-ready reporting platform.
 
 Alert V1 is MeasurementPoint-centered: settings survive Device replacement at the same MeasurementPoint and do not follow relocation. Quiet hours use Asia/Taipei local time with `[start, end)` semantics, CURFEW_USAGE uses a configurable per-MeasurementPoint power threshold (default 10 W), and durable edge-triggered state prevents repeated alerts and out-of-order rewinds. Alert History is authenticated and Shop-scoped, newest-first with stable cursor pagination; it is read-only and does not expose finalized read/acknowledgement semantics. No push/email/SMS delivery or Daily/Monthly kWh evaluator is included.
 
-The authenticated scoped-admin Shop mutations are `PATCH /api/v1/shops/:shopId` and `PUT /api/v1/shops/:shopId/billing/configuration`. The authenticated, scoped-admin Admin Device Binding surface is `POST /api/v1/admin/measurement-points` (Create Measurement Point), `GET /api/v1/admin/device-bindings` (bounded workflow overview), `POST /api/v1/admin/device-bindings` (Bind), `POST /api/v1/admin/device-bindings/:assignmentId/replace` (Replace), `POST /api/v1/admin/device-bindings/:assignmentId/relocate` (Relocate), and `POST /api/v1/admin/device-bindings/:assignmentId/unbind` (Unbind). Shop reads and mutations require server-verified Shop membership and Client ownership; `is_admin` does not bypass Shop scope, and `CurrentShopID` is only current-view preference state.
+The authenticated scoped-admin Shop mutations are `PATCH /api/v1/shops/:shopId` and `PUT /api/v1/shops/:shopId/billing/configuration`. The authenticated, scoped-admin Admin Device Binding surface is `POST /api/v1/admin/measurement-points` (Create Measurement Point), `GET /api/v1/admin/device-bindings` (bounded workflow overview), `POST /api/v1/admin/device-bindings` (Bind), `POST /api/v1/admin/device-bindings/:assignmentId/replace` (Replace), `POST /api/v1/admin/device-bindings/:assignmentId/relocate` (Relocate), and `POST /api/v1/admin/device-bindings/:assignmentId/unbind` (Unbind). Shop reads and mutations require server-verified Shop membership and Client ownership; `is_admin` does not bypass Shop scope, and `CurrentShopID` is only current-view preference state. Device lifecycle commands are explicit scoped-admin `POST /api/v1/admin/devices/:deviceId/disable`, `/enable`, and `/retire` routes. Migration `000012_device_retirement_lifecycle` backfills existing Devices as `ACTIVE` and enforces the lifecycle constraint. Lifecycle state is `ACTIVE`, `DISABLED`, or terminal `RETIRED`; it is separate from online presence and is shown in the Admin inventory.
 
 MQTT requires TLS (`tls://`, TLS 1.2 minimum). The Backend subscribes to `device/upload/data` and `device/+/status`, publishes telemetry application ACKs to `device/{MAC}/telemetry/ack`, and distinguishes those ACKs from MQTT transport QoS. Device identity is the normalized uppercase MAC; protocol v1 uses `boot_counter` plus `seq` for identity/deduplication and may carry coverage interval fields. The canonical local simulator is `tools/device-simulator` and requires a successful application ACK, not only broker connectivity.
 

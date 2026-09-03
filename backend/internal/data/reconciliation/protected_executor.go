@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 
 	"github.com/google/uuid"
 	"gorm.io/driver/postgres"

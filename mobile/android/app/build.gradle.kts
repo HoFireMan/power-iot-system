@@ -5,6 +5,17 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseStoreFile = System.getenv("POWER_IOT_RELEASE_STORE_FILE")
+val releaseStorePassword = System.getenv("POWER_IOT_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("POWER_IOT_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("POWER_IOT_RELEASE_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.poweriot.mobile"
     compileSdk = flutter.compileSdkVersion
@@ -30,12 +41,31 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
+    }
+}
+
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.name.contains("Release") } && !releaseSigningConfigured) {
+        throw GradleException(
+            "Release builds require POWER_IOT_RELEASE_* signing configuration",
+        )
     }
 }
 

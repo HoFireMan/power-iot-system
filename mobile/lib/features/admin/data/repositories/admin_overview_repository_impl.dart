@@ -6,9 +6,11 @@ import 'package:power_iot_app/features/admin/domain/models/device_assignment.dar
 import 'package:power_iot_app/features/admin/domain/models/device_ref.dart';
 import 'package:power_iot_app/features/admin/domain/models/measurement_point.dart';
 import 'package:power_iot_app/features/admin/domain/repositories/admin_overview_repository.dart';
+import 'package:power_iot_app/features/admin/domain/repositories/device_lifecycle_repository.dart';
 import 'package:power_iot_app/core/network/remote_error.dart';
 
-class RemoteAdminOverviewRepository implements AdminOverviewRepository {
+class RemoteAdminOverviewRepository
+    implements AdminOverviewRepository, DeviceLifecycleRepository {
   const RemoteAdminOverviewRepository(this.client, this.shopId);
   final AuthenticatedHttpClient client;
   final String shopId;
@@ -16,100 +18,115 @@ class RemoteAdminOverviewRepository implements AdminOverviewRepository {
   @override
   Future<AdminOverview> loadOverview() async {
     final response = await client.dio.get<Object?>(
-        '/api/v1/admin/device-bindings',
-        queryParameters: {'shopId': shopId});
+      '/api/v1/admin/device-bindings',
+      queryParameters: {'shopId': shopId},
+    );
     return AdminOverviewDto.fromJson(response.data).toModel();
   }
 
   @override
   Future<MeasurementPoint> createMeasurementPoint(
-      CreateMeasurementPointInput input) async {
+    CreateMeasurementPointInput input,
+  ) async {
     final body = await _post(
-        '/api/v1/admin/measurement-points',
-        {'shopId': _positive(input.shopId), 'name': input.name},
-        input.requestIdentity,
-        action: 'create_measurement_point',
-        keys: const {'operationId', 'action', 'measurementPointId'});
+      '/api/v1/admin/measurement-points',
+      {'shopId': _positive(input.shopId), 'name': input.name},
+      input.requestIdentity,
+      action: 'create_measurement_point',
+      keys: const {'operationId', 'action', 'measurementPointId'},
+    );
     final id = _requiredString(body, 'measurementPointId');
     return MeasurementPoint(
-        id: id, shopId: input.shopId, name: input.name.trim());
+      id: id,
+      shopId: input.shopId,
+      name: input.name.trim(),
+    );
   }
 
   @override
   Future<DeviceAssignment> bindDevice(BindDeviceInput input) async {
     final body = await _post(
-        '/api/v1/admin/device-bindings',
-        {
-          'deviceRef': _ref(input.deviceRef),
-          'measurementPointId': input.measurementPointId
-        },
-        input.requestIdentity,
-        action: 'bind',
-        keys: const {
-          'operationId',
-          'action',
-          'deviceId',
-          'newMeasurementPointId',
-          'newAssignmentId',
-          'effectiveAt'
-        });
-    return _assignment(body,
-        deviceKey: 'deviceId',
-        pointKey: 'newMeasurementPointId',
-        assignmentKey: 'newAssignmentId');
+      '/api/v1/admin/device-bindings',
+      {
+        'deviceRef': _ref(input.deviceRef),
+        'measurementPointId': input.measurementPointId,
+      },
+      input.requestIdentity,
+      action: 'bind',
+      keys: const {
+        'operationId',
+        'action',
+        'deviceId',
+        'newMeasurementPointId',
+        'newAssignmentId',
+        'effectiveAt',
+      },
+    );
+    return _assignment(
+      body,
+      deviceKey: 'deviceId',
+      pointKey: 'newMeasurementPointId',
+      assignmentKey: 'newAssignmentId',
+    );
   }
 
   @override
   Future<DeviceAssignment> replaceDevice(ReplaceDeviceInput input) async {
     final body = await _post(
-        '/api/v1/admin/device-bindings/${Uri.encodeComponent(input.currentAssignmentId)}/replace',
-        {
-          'replacementDeviceRef': _ref(input.replacementDeviceRef),
-          'reason': input.reason
-        },
-        input.requestIdentity,
-        action: 'replace',
-        keys: const {
-          'operationId',
-          'action',
-          'deviceId',
-          'replacementDeviceId',
-          'oldMeasurementPointId',
-          'newMeasurementPointId',
-          'oldAssignmentId',
-          'newAssignmentId',
-          'effectiveAt'
-        });
-    return _assignment(body,
-        deviceKey: 'replacementDeviceId',
-        pointKey: 'newMeasurementPointId',
-        assignmentKey: 'newAssignmentId');
+      '/api/v1/admin/device-bindings/${Uri.encodeComponent(input.currentAssignmentId)}/replace',
+      {
+        'replacementDeviceRef': _ref(input.replacementDeviceRef),
+        'reason': input.reason,
+      },
+      input.requestIdentity,
+      action: 'replace',
+      keys: const {
+        'operationId',
+        'action',
+        'deviceId',
+        'replacementDeviceId',
+        'oldMeasurementPointId',
+        'newMeasurementPointId',
+        'oldAssignmentId',
+        'newAssignmentId',
+        'effectiveAt',
+      },
+    );
+    return _assignment(
+      body,
+      deviceKey: 'replacementDeviceId',
+      pointKey: 'newMeasurementPointId',
+      assignmentKey: 'newAssignmentId',
+    );
   }
 
   @override
   Future<DeviceAssignment> relocateDevice(RelocateDeviceInput input) async {
     final body = await _post(
-        '/api/v1/admin/device-bindings/${Uri.encodeComponent(input.currentAssignmentId)}/relocate',
-        {
-          'targetMeasurementPointId': input.targetMeasurementPointId,
-          'reason': input.reason
-        },
-        input.requestIdentity,
-        action: 'relocate',
-        keys: const {
-          'operationId',
-          'action',
-          'deviceId',
-          'oldMeasurementPointId',
-          'newMeasurementPointId',
-          'oldAssignmentId',
-          'newAssignmentId',
-          'effectiveAt'
-        });
-    return _assignment(body,
-        deviceKey: 'deviceId',
-        pointKey: 'newMeasurementPointId',
-        assignmentKey: 'newAssignmentId');
+      '/api/v1/admin/device-bindings/${Uri.encodeComponent(input.currentAssignmentId)}/relocate',
+      {
+        'targetMeasurementPointId': input.targetMeasurementPointId,
+        'reason': input.reason,
+      },
+      input.requestIdentity,
+      action: 'relocate',
+      keys: const {
+        'operationId',
+        'action',
+        'deviceId',
+        'oldMeasurementPointId',
+        'newMeasurementPointId',
+        'oldAssignmentId',
+        'newAssignmentId',
+        'effectiveAt',
+      },
+    );
+    return _assignment(
+      body,
+      deviceKey: 'deviceId',
+      pointKey: 'newMeasurementPointId',
+      assignmentKey: 'newAssignmentId',
+    );
   }
 
   @override
@@ -129,29 +146,59 @@ class RemoteAdminOverviewRepository implements AdminOverviewRepository {
       throw const FormatException('Current assignment is unavailable');
     }
     final body = await _post(
-        '/api/v1/admin/device-bindings/${Uri.encodeComponent(input.currentAssignmentId)}/unbind',
-        {'reason': input.reason},
-        input.requestIdentity,
-        action: 'unbind',
-        keys: const {
-          'operationId',
-          'action',
-          'deviceId',
-          'oldMeasurementPointId',
-          'oldAssignmentId',
-          'effectiveAt'
-        });
-    final result = _assignment(body,
-        deviceKey: 'deviceId',
-        pointKey: 'oldMeasurementPointId',
-        assignmentKey: 'oldAssignmentId',
-        closed: true);
+      '/api/v1/admin/device-bindings/${Uri.encodeComponent(input.currentAssignmentId)}/unbind',
+      {'reason': input.reason},
+      input.requestIdentity,
+      action: 'unbind',
+      keys: const {
+        'operationId',
+        'action',
+        'deviceId',
+        'oldMeasurementPointId',
+        'oldAssignmentId',
+        'effectiveAt',
+      },
+    );
+    final result = _assignment(
+      body,
+      deviceKey: 'deviceId',
+      pointKey: 'oldMeasurementPointId',
+      assignmentKey: 'oldAssignmentId',
+      closed: true,
+    );
     return DeviceAssignment(
-        id: result.id,
-        deviceId: result.deviceId,
-        measurementPointId: result.measurementPointId,
-        validFrom: current.validFrom,
-        validTo: result.validTo);
+      id: result.id,
+      deviceId: result.deviceId,
+      measurementPointId: result.measurementPointId,
+      validFrom: current.validFrom,
+      validTo: result.validTo,
+    );
+  }
+
+  @override
+  Future<void> disableDevice(DeviceLifecycleInput input) =>
+      _changeLifecycle('disable', 'disable_device', input);
+
+  @override
+  Future<void> enableDevice(DeviceLifecycleInput input) =>
+      _changeLifecycle('enable', 'enable_device', input);
+
+  @override
+  Future<void> retireDevice(DeviceLifecycleInput input) =>
+      _changeLifecycle('retire', 'retire_device', input);
+
+  Future<void> _changeLifecycle(
+    String verb,
+    String action,
+    DeviceLifecycleInput input,
+  ) async {
+    await _post(
+      '/api/v1/admin/devices/${Uri.encodeComponent(input.deviceId)}/$verb',
+      {'reason': input.reason},
+      input.requestIdentity,
+      action: action,
+      keys: const {'operationId', 'action', 'deviceId', 'lifecycleStatus'},
+    );
   }
 
   @override
@@ -159,10 +206,17 @@ class RemoteAdminOverviewRepository implements AdminOverviewRepository {
       (await loadOverview()).assignmentHistory;
 
   Future<Map<String, Object?>> _post(
-      String path, Map<String, Object?> data, String identity,
-      {required String action, required Set<String> keys}) async {
-    final response = await client.dio.post<Object?>(path,
-        data: data, options: Options(headers: {'Idempotency-Key': identity}));
+    String path,
+    Map<String, Object?> data,
+    String identity, {
+    required String action,
+    required Set<String> keys,
+  }) async {
+    final response = await client.dio.post<Object?>(
+      path,
+      data: data,
+      options: Options(headers: {'Idempotency-Key': identity}),
+    );
     final value = response.data;
     if (value is! Map || value.keys.any((k) => k is! String)) {
       throw const FormatException('Invalid admin binding result');
@@ -181,23 +235,26 @@ class RemoteAdminOverviewRepository implements AdminOverviewRepository {
   Map<String, Object?> _ref(DeviceRef ref) => <String, Object?>{
         'deviceId': ref.id == null ? null : _positive(ref.id!),
         'serialNumber': ref.serialNumber,
-        'mac': ref.macAddress
+        'mac': ref.macAddress,
       };
-  DeviceAssignment _assignment(Map<String, Object?> m,
-      {required String deviceKey,
-      required String pointKey,
-      required String assignmentKey,
-      bool closed = false}) {
+  DeviceAssignment _assignment(
+    Map<String, Object?> m, {
+    required String deviceKey,
+    required String pointKey,
+    required String assignmentKey,
+    bool closed = false,
+  }) {
     final assignment = _requiredString(m, assignmentKey),
         device = _requiredString(m, deviceKey),
         point = _requiredString(m, pointKey);
     final effective = _date(m, 'effectiveAt');
     return DeviceAssignment(
-        id: assignment,
-        deviceId: device,
-        measurementPointId: point,
-        validFrom: effective,
-        validTo: closed ? effective : null);
+      id: assignment,
+      deviceId: device,
+      measurementPointId: point,
+      validFrom: effective,
+      validTo: closed ? effective : null,
+    );
   }
 }
 

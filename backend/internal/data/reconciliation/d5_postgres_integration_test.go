@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/testsupport"
 )
 

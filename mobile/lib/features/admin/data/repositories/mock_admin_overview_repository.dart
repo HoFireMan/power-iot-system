@@ -4,9 +4,11 @@ import '../../domain/models/device_inventory.dart';
 import '../../domain/models/device_ref.dart';
 import '../../domain/models/measurement_point.dart';
 import '../../domain/repositories/admin_overview_repository.dart';
+import '../../domain/repositories/device_lifecycle_repository.dart';
 
 /// Deterministic development data for the admin overview and binding flow.
-class MockAdminOverviewRepository implements AdminOverviewRepository {
+class MockAdminOverviewRepository
+    implements AdminOverviewRepository, DeviceLifecycleRepository {
   MockAdminOverviewRepository()
       : _measurementPoints = [
           const MeasurementPoint(
@@ -31,9 +33,10 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   final Map<String, String> _relocationRequests = {};
   final Map<String, DeviceAssignment> _committedUnbindings = {};
   final Map<String, String> _unbindRequests = {};
+  final Map<String, String> _lifecycleRequests = {};
   final List<DeviceAssignment> _assignmentHistory = [];
   final List<DeviceAssignment> _activeAssignments = [];
-  final List<DeviceInventory> _devices = const [
+  final List<DeviceInventory> _devices = [
     DeviceInventory(
       id: 'device-001',
       name: 'Meter A',
@@ -150,6 +153,61 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
   }
 
   @override
+  Future<void> disableDevice(DeviceLifecycleInput input) =>
+      _changeLifecycle(input, 'DISABLED');
+
+  @override
+  Future<void> enableDevice(DeviceLifecycleInput input) =>
+      _changeLifecycle(input, 'ACTIVE');
+
+  @override
+  Future<void> retireDevice(DeviceLifecycleInput input) =>
+      _changeLifecycle(input, 'RETIRED');
+
+  Future<void> _changeLifecycle(
+    DeviceLifecycleInput input,
+    String target,
+  ) async {
+    final key = input.requestIdentity.trim();
+    if (key.isEmpty || input.deviceId.trim().isEmpty) {
+      throw ArgumentError.value(input, 'input');
+    }
+    final fingerprint = '$target|${input.deviceId}|${input.reason.trim()}';
+    final previous = _lifecycleRequests[key];
+    if (previous != null) {
+      if (previous == fingerprint) return;
+      throw StateError('Lifecycle request identity was reused.');
+    }
+    final index = _devices.indexWhere((device) => device.id == input.deviceId);
+    if (index < 0) throw StateError('Device not found.');
+    final device = _devices[index];
+    if (target == 'DISABLED' &&
+        _activeAssignments.any((a) => a.deviceId == input.deviceId)) {
+      throw StateError('Device has an active assignment.');
+    }
+    if (target == 'RETIRED' &&
+        _activeAssignments.any((a) => a.deviceId == input.deviceId)) {
+      throw StateError('Device has an active assignment.');
+    }
+    final allowed = (device.lifecycleStatus == 'ACTIVE' &&
+            (target == 'DISABLED' || target == 'RETIRED')) ||
+        (device.lifecycleStatus == 'DISABLED' &&
+            (target == 'ACTIVE' || target == 'RETIRED'));
+    if (!allowed) {
+      throw StateError('Device lifecycle transition is not allowed.');
+    }
+    _devices[index] = DeviceInventory(
+      id: device.id,
+      name: device.name,
+      serialNumber: device.serialNumber,
+      macAddress: device.macAddress,
+      status: device.status,
+      lifecycleStatus: target,
+    );
+    _lifecycleRequests[key] = fingerprint;
+  }
+
+  @override
   Future<DeviceAssignment> bindDevice(BindDeviceInput input) async {
     final requestIdentity = input.requestIdentity.trim();
     if (requestIdentity.isEmpty) {
@@ -184,8 +242,9 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
         !_isCanonicalMac(device.macAddress)) {
       throw StateError('Device is not eligible.');
     }
-    if (_activeAssignments
-        .any((assignment) => assignment.deviceId == device.id)) {
+    if (_activeAssignments.any(
+      (assignment) => assignment.deviceId == device.id,
+    )) {
       throw StateError('Device is already assigned.');
     }
     if (_activeAssignments.any(
@@ -293,9 +352,7 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     );
     _nextAssignmentIdentity++;
     _replaceHistoryEntry(closed);
-    _activeAssignments.removeWhere(
-      (assignment) => assignment.id == current.id,
-    );
+    _activeAssignments.removeWhere((assignment) => assignment.id == current.id);
     _activeAssignments.add(replacementAssignment);
     _assignmentHistory.add(replacementAssignment);
     _committedReplacements[requestIdentity] = replacementAssignment;
@@ -372,9 +429,7 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
       validTo: transitionTime,
     );
     _replaceHistoryEntry(closed);
-    _activeAssignments.removeWhere(
-      (assignment) => assignment.id == current.id,
-    );
+    _activeAssignments.removeWhere((assignment) => assignment.id == current.id);
     _committedUnbindings[requestIdentity] = closed;
     _unbindRequests[requestIdentity] = fingerprint;
 
@@ -481,9 +536,7 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     );
     _nextAssignmentIdentity++;
     _replaceHistoryEntry(closed);
-    _activeAssignments.removeWhere(
-      (assignment) => assignment.id == current.id,
-    );
+    _activeAssignments.removeWhere((assignment) => assignment.id == current.id);
     _activeAssignments.add(relocatedAssignment);
     _assignmentHistory.add(relocatedAssignment);
     _committedRelocations[requestIdentity] = relocatedAssignment;
@@ -560,9 +613,7 @@ class MockAdminOverviewRepository implements AdminOverviewRepository {
     );
     _nextAssignmentIdentity++;
     _replaceHistoryEntry(closed);
-    _activeAssignments.removeWhere(
-      (assignment) => assignment.id == current.id,
-    );
+    _activeAssignments.removeWhere((assignment) => assignment.id == current.id);
     _activeAssignments.add(changed);
     _assignmentHistory.add(changed);
   }

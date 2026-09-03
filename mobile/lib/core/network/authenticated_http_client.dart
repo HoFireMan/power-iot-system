@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:power_iot_app/config/base_url.dart';
 
 /// The only token material kept by the session after the access token is issued.
 abstract interface class RefreshTokenStore {
@@ -294,25 +295,7 @@ final class AuthenticatedHttpClient {
   }
 
   static void _validateBaseUrl(Uri value) {
-    if (!value.hasScheme || value.host.isEmpty) {
-      throw ArgumentError.value(value, 'baseUrl', 'must be an absolute URL');
-    }
-    if (value.scheme != 'https' && value.scheme != 'http') {
-      throw ArgumentError.value(value, 'baseUrl', 'must use http or https');
-    }
-    // Cleartext is intentionally limited to local development targets. No
-    // production host is embedded in the mobile client.
-    if (value.scheme == 'http' &&
-        value.host != 'localhost' &&
-        value.host != '127.0.0.1' &&
-        value.host != '10.0.2.2' &&
-        value.host != '::1') {
-      throw ArgumentError.value(
-        value,
-        'baseUrl',
-        'cleartext URLs are only allowed for local development',
-      );
-    }
+    validatePowerIoTBaseUrl(value);
   }
 
   Future<bool> _refresh({String? failedAccessToken, int? requestEpoch}) {

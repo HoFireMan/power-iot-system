@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 // MappingProgressionStatus is the semantic result of the mapping-required

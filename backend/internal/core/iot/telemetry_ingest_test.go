@@ -19,6 +19,7 @@ import (
 	"power-iot-backend/internal/adapters/persistence"
 	"power-iot-backend/internal/core/domain"
 	"power-iot-backend/internal/data/migrations"
+	privatemigrations "power-iot-backend/internal/data/private_migrations"
 )
 
 func openTelemetryIntegrationDB(t *testing.T) *gorm.DB {
@@ -31,25 +32,32 @@ func openTelemetryIntegrationDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := fs.ReadFile(migrations.Files, "sql/000007_b02_coverage_foundation.up.sql")
+	body, err := fs.ReadFile(privatemigrations.Files, "sql/000007_b02_coverage_foundation.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec(string(body)).Error; err != nil {
 		t.Fatal(err)
 	}
-	identityBody, err := fs.ReadFile(migrations.Files, "sql/000010_measurement_point_identity.up.sql")
+	identityBody, err := fs.ReadFile(privatemigrations.Files, "sql/000010_measurement_point_identity.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec(string(identityBody)).Error; err != nil {
 		t.Fatal(err)
 	}
-	alertsBody, err := fs.ReadFile(migrations.Files, "sql/000011_measurement_point_alerts.up.sql")
+	alertsBody, err := fs.ReadFile(privatemigrations.Files, "sql/000011_measurement_point_alerts.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec(string(alertsBody)).Error; err != nil {
+		t.Fatal(err)
+	}
+	lifecycleBody, err := fs.ReadFile(privatemigrations.Files, "sql/000012_device_retirement_lifecycle.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(lifecycleBody)).Error; err != nil {
 		t.Fatal(err)
 	}
 	return db

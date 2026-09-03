@@ -98,6 +98,17 @@ type ExclusiveWriterFence struct {
 	discarded bool
 }
 
+// PinExclusiveWriterFence opens and pins one physical PostgreSQL session
+// without acquiring the exclusive lock. It is an internal seam for the
+// private protected operator.
+func PinExclusiveWriterFence(ctx context.Context, dsn string) (*ExclusiveWriterFence, error) {
+	parsed, err := parsePostgresDatabaseURL(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return pinExclusiveWriterFence(ctx, parsed)
+}
+
 // OpenExclusiveWriterFence opens and pins one physical PostgreSQL session,
 // captures its backend PID, and acquires the session-level canonical lock.
 func OpenExclusiveWriterFence(ctx context.Context, dsn string) (*ExclusiveWriterFence, error) {
@@ -108,8 +119,8 @@ func OpenExclusiveWriterFence(ctx context.Context, dsn string) (*ExclusiveWriter
 	return openExclusiveWriterFence(ctx, parsed)
 }
 
-// pinExclusiveWriterFence opens and pins the private physical session but
-// does not acquire the advisory lock. D1-L derives target identity first and
+// pinExclusiveWriterFence opens and pins the physical session but does not
+// acquire the advisory lock. The operator derives target identity first and
 // then acquires the canonical fence exactly once on this same session.
 func pinExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabaseURL) (*ExclusiveWriterFence, error) {
 	if ctx == nil {
@@ -136,6 +147,47 @@ func pinExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabase
 		return nil, fmt.Errorf("capture PostgreSQL writer-fence backend PID: %w", err)
 	}
 	return fence, nil
+}
+
+// Acquire completes the exclusive ownership transition for a pinned fence.
+// It is exposed for the private operator seam; ordinary runtime writers use
+// the shared transaction-level function.
+func (f *ExclusiveWriterFence) Acquire(ctx context.Context) error {
+	return f.acquire(ctx)
+}
+
+// DriverURL returns the filtered connection URL retained for independent
+// cleanup probes. It contains no credentials beyond the caller-supplied DSN.
+func (f *ExclusiveWriterFence) DriverURL() string {
+	if f == nil {
+		return ""
+	}
+	return f.dsn
+}
+
+// DetachForUnknown closes the uncertain session before independent cleanup.
+func (f *ExclusiveWriterFence) DetachForUnknown() {
+	if f == nil {
+		return
+	}
+	if f.conn != nil {
+		_ = f.conn.Close()
+		f.conn = nil
+	}
+	if f.db != nil {
+		_ = f.db.Close()
+		f.db = nil
+	}
+	f.state, f.discarded = ExclusiveUnknown, true
+}
+
+// MarkDiscardedReleased records successful independent cleanup after an
+// uncertain session has been discarded.
+func (f *ExclusiveWriterFence) MarkDiscardedReleased() {
+	if f == nil {
+		return
+	}
+	f.state, f.discarded = ExclusiveReleased, true
 }
 
 func openExclusiveWriterFence(ctx context.Context, parsed *parsedPostgresDatabaseURL) (*ExclusiveWriterFence, error) {

@@ -9,13 +9,43 @@ import '../../domain/models/admin_overview.dart';
 import '../../domain/models/device_inventory.dart';
 import '../../domain/models/measurement_point.dart';
 import '../../data/repositories/admin_overview_repository_impl.dart';
+import '../../domain/repositories/admin_overview_repository.dart';
+import '../../domain/repositories/device_lifecycle_repository.dart';
 import '../providers/admin_overview_provider.dart';
 
-class AdminOverviewScreen extends ConsumerWidget {
+class AdminOverviewScreen extends ConsumerStatefulWidget {
   const AdminOverviewScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AdminOverviewScreen> createState() =>
+      _AdminOverviewScreenState();
+}
+
+class _AdminOverviewScreenState extends ConsumerState<AdminOverviewScreen> {
+  final _lifecyclePending = <String>{};
+  final _lifecycleIdentities = <String, String>{};
+  late final AuthController _authController;
+
+  void _resetLifecycleState(int _) {
+    _lifecyclePending.clear();
+    _lifecycleIdentities.clear();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _authController = ref.read(authControllerProvider);
+    _authController.client.addAuthEpochListener(_resetLifecycleState);
+  }
+
+  @override
+  void dispose() {
+    _authController.client.removeAuthEpochListener(_resetLifecycleState);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final overview = ref.watch(adminOverviewProvider);
     final shops = ref.watch(shopsProvider);
     final waitingForAuthorizedShop =
@@ -27,8 +57,9 @@ class AdminOverviewScreen extends ConsumerWidget {
     // mounted the legacy path. Standalone/test composition remains usable.
     var legacyMockRoute = false;
     try {
-      legacyMockRoute =
-          GoRouterState.of(context).uri.path.startsWith('/admin/mock');
+      legacyMockRoute = GoRouterState.of(
+        context,
+      ).uri.path.startsWith('/admin/mock');
     } on GoError {
       // No router state means no navigation has been requested yet.
     }
@@ -96,6 +127,79 @@ class AdminOverviewScreen extends ConsumerWidget {
       );
     }
 
+    Future<void> changeLifecycle(DeviceInventory device, String target) async {
+      final deviceId = device.id;
+      if (deviceId == null) return;
+      final key = '$deviceId:$target';
+      if (_lifecyclePending.contains(key)) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('$target device?'),
+          content: Text(
+            'This changes the administrative lifecycle of ${device.name}.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Confirm'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true ||
+          !context.mounted ||
+          _lifecyclePending.contains(key)) {
+        return;
+      }
+      _lifecyclePending.add(key);
+      final identity = _lifecycleIdentities.putIfAbsent(
+        key,
+        () =>
+            'flutter-device-lifecycle-${deviceId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '')}-$target',
+      );
+      try {
+        final repository = ref.read(adminOverviewRepositoryProvider);
+        if (repository is! DeviceLifecycleRepository) {
+          throw StateError('Device lifecycle is unavailable.');
+        }
+        final lifecycleRepository = repository as DeviceLifecycleRepository;
+        final input = DeviceLifecycleInput(
+          requestIdentity: identity,
+          deviceId: deviceId,
+        );
+        if (target == 'DISABLED') {
+          await lifecycleRepository.disableDevice(input);
+        } else if (target == 'ACTIVE') {
+          await lifecycleRepository.enableDevice(input);
+        } else {
+          await lifecycleRepository.retireDevice(input);
+        }
+        await retryAdminOverview(ref);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Device lifecycle updated.')),
+          );
+        }
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                adminErrorMessage(error, 'Unable to update device lifecycle.'),
+              ),
+            ),
+          );
+        }
+      } finally {
+        _lifecyclePending.remove(key);
+      }
+    }
+
     Future<void> unbindDevice(String assignmentId) async {
       final unbound = await context.push<bool>(
         '$routePrefix/unbind-device/$assignmentId',
@@ -117,17 +221,18 @@ class AdminOverviewScreen extends ConsumerWidget {
         child: waitingForAuthorizedShop
             ? const Center(child: Text('Loading admin overview…'))
             : overview.when(
-                loading: () => const Center(
-                  child: Text('Loading admin overview…'),
-                ),
+                loading: () =>
+                    const Center(child: Text('Loading admin overview…')),
                 error: (error, stackTrace) => Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(adminErrorMessage(
-                        error,
-                        'Unable to load admin overview. Please retry.',
-                      )),
+                      Text(
+                        adminErrorMessage(
+                          error,
+                          'Unable to load admin overview. Please retry.',
+                        ),
+                      ),
                       const SizedBox(height: 12),
                       OutlinedButton(
                         onPressed: retryOverview,
@@ -139,10 +244,12 @@ class AdminOverviewScreen extends ConsumerWidget {
                 data: (data) => _OverviewContent(
                   overview: data,
                   onOpenAssignmentHistory: openAssignmentHistory,
-                  onOpenAuditHistory: () => context.push('$routePrefix/audit-history'),
+                  onOpenAuditHistory: () =>
+                      context.push('$routePrefix/audit-history'),
                   onReplace: replaceDevice,
                   onRelocate: relocateDevice,
                   onUnbind: unbindDevice,
+                  onLifecycle: changeLifecycle,
                 ),
               ),
       ),
@@ -177,6 +284,7 @@ class _OverviewContent extends StatelessWidget {
     required this.onReplace,
     required this.onRelocate,
     required this.onUnbind,
+    required this.onLifecycle,
   });
 
   final AdminOverview overview;
@@ -185,6 +293,7 @@ class _OverviewContent extends StatelessWidget {
   final ValueChanged<String> onReplace;
   final ValueChanged<String> onRelocate;
   final ValueChanged<String> onUnbind;
+  final void Function(DeviceInventory device, String target) onLifecycle;
 
   @override
   Widget build(BuildContext context) {
@@ -194,6 +303,9 @@ class _OverviewContent extends StatelessWidget {
     };
     final pointsById = {
       for (final point in overview.measurementPoints) point.id: point,
+    };
+    final assignedDeviceIds = {
+      for (final assignment in overview.activeAssignments) assignment.deviceId,
     };
 
     return ListView(
@@ -222,8 +334,15 @@ class _OverviewContent extends StatelessWidget {
           title: 'Devices / Inventory',
           emptyMessage: 'No devices / inventory available.',
           childCount: overview.devices.length,
-          itemBuilder: (context, index) =>
-              _DeviceTile(device: overview.devices[index]),
+          itemBuilder: (context, index) {
+            final device = overview.devices[index];
+            return _DeviceTile(
+              device: device,
+              hasActiveAssignment:
+                  device.id != null && assignedDeviceIds.contains(device.id),
+              onLifecycle: onLifecycle,
+            );
+          },
         ),
         const SizedBox(height: 24),
         _Section(
@@ -278,18 +397,12 @@ class _Section extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          title,
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
+        Text(title, style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 12),
         if (childCount == 0)
           Text(emptyMessage)
         else
-          ...List.generate(
-            childCount,
-            (index) => itemBuilder(context, index),
-          ),
+          ...List.generate(childCount, (index) => itemBuilder(context, index)),
       ],
     );
   }
@@ -312,18 +425,52 @@ class _MeasurementPointTile extends StatelessWidget {
 }
 
 class _DeviceTile extends StatelessWidget {
-  const _DeviceTile({required this.device});
+  const _DeviceTile({
+    required this.device,
+    required this.hasActiveAssignment,
+    required this.onLifecycle,
+  });
 
   final DeviceInventory device;
+  final bool hasActiveAssignment;
+  final void Function(DeviceInventory device, String target) onLifecycle;
 
   @override
   Widget build(BuildContext context) {
+    final canChange = !hasActiveAssignment &&
+        (device.lifecycleStatus == 'ACTIVE' ||
+            device.lifecycleStatus == 'DISABLED');
     return Card(
       child: ListTile(
         leading: const Icon(Icons.electrical_services_outlined),
         title: Text(device.name),
         subtitle: Text(device.serialNumber),
-        trailing: Text(device.status),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(device.status),
+            const SizedBox(width: 8),
+            Chip(label: Text(device.lifecycleStatus)),
+            if (hasActiveAssignment)
+              const Padding(
+                padding: EdgeInsets.only(left: 8),
+                child: Text('Assigned — unbind first'),
+              ),
+            if (canChange)
+              PopupMenuButton<String>(
+                tooltip: 'Device lifecycle actions',
+                onSelected: (target) => onLifecycle(device, target),
+                itemBuilder: (context) => [
+                  if (device.lifecycleStatus == 'ACTIVE')
+                    const PopupMenuItem(
+                        value: 'DISABLED', child: Text('Disable'))
+                  else
+                    const PopupMenuItem(value: 'ACTIVE', child: Text('Enable')),
+                  const PopupMenuItem(value: 'RETIRED', child: Text('Retire')),
+                ],
+              ),
+          ],
+        ),
       ),
     );
   }

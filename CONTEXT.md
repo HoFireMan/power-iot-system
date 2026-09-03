@@ -209,6 +209,31 @@ that device telemetry is 300 seconds unless separately established.
 
 Backend current-power freshness remains **120 seconds**.
 
+## Public V1 Boundary Review (not published)
+
+The current working-tree refactor establishes a strict future-public boundary
+without changing repository visibility or publishing. The public staging
+allowlist is frozen at `docs/publication/PUBLIC_V1_MANIFEST.v1.txt` and is
+validated by `scripts/public-candidate-validate.sh`. It contains the Backend
+server dependency closure, generic application migrations through 000005, and
+Android-only Flutter source/wrapper files. Tests, fixtures, operational
+control-plane code, protected migration SQL/authority, infrastructure,
+firmware, and credentials remain excluded by default.
+
+`PUBLIC_CANDIDATE_VALIDATION = PASS`
+`PUBLIC_CANDIDATE_SECRET_SCAN = PASS`
+`PUBLIC_CANDIDATE_PRIVACY_SCAN = PASS`
+`PUBLIC_CANDIDATE_BACKEND_BUILD = PASS (clean public staging)`
+`PUBLIC_CANDIDATE_ANDROID_RELEASE_BUILD = PASS (explicit example HTTPS define and ephemeral validation signing)`
+
+Candidate publication remains unauthorized pending repository name, license,
+and manual security approval.
+
+The release mobile endpoint is fail-closed: `POWER_IOT_BASE_URL` must be an
+explicit safe HTTPS value; loopback is retained only for debug/local use. No
+publication, visibility change, production access, database mutation, or
+private firmware/OTA-key access is authorized by this review.
+
 ## Production and Safety Boundary
 
 - `PRODUCTION_EXECUTION_AUTHORIZED = NO`

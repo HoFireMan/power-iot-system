@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 )
 
 func testD1LResultReport() migrations.D1LBootstrapReport {

@@ -204,7 +204,7 @@ func D1LUpgradeLedger(ctx context.Context, databaseURL string, target []byte) (D
 	if !bytes.Equal(actual, target) {
 		return D1LCatalogObservation{State: D1LWrongTarget}, ErrD1LProviderBinding
 	}
-	if err := fence.acquire(ctx); err != nil {
+	if err := fence.Acquire(ctx); err != nil {
 		return D1LCatalogObservation{State: D1LUnreadable}, err
 	}
 	lock, err := acquireMigrationAdvisoryLock(ctx, fence.Conn(), parsed)
@@ -334,7 +334,7 @@ func d1LBootstrapWithHooks(ctx context.Context, cfg D1LBootstrapConfig, hooks d1
 	hooks.mark("VERIFY")
 	report.TargetFingerprint = hex.EncodeToString(actualTarget)
 	report.EvidenceDigest = hex.EncodeToString(cfg.EvidenceDigest)
-	if e = fence.acquire(ctx); e != nil {
+	if e = fence.Acquire(ctx); e != nil {
 		return report, e
 	}
 	hooks.mark("FENCE")

@@ -25,9 +25,12 @@ const (
 	IngestDuplicate         IngestResultStatus = "duplicate"
 	IngestUnknownDevice     IngestResultStatus = "unknown_device"
 	IngestUnknownAssignment IngestResultStatus = "unknown_assignment"
-	IngestConflict          IngestResultStatus = "conflict"
-	IngestInvalid           IngestResultStatus = "invalid"
-	IngestFailed            IngestResultStatus = "failed"
+	// Lifecycle-blocked telemetry is acknowledged at the transport boundary
+	// without claiming idempotency or writing readings/device presence.
+	IngestLifecycleBlocked IngestResultStatus = "lifecycle_blocked"
+	IngestConflict         IngestResultStatus = "conflict"
+	IngestInvalid          IngestResultStatus = "invalid"
+	IngestFailed           IngestResultStatus = "failed"
 )
 
 type IngestResult struct{ Status IngestResultStatus }
@@ -104,6 +107,13 @@ func (i *TelemetryIngestor) IngestContext(ctx context.Context, data MqttPayload,
 			if err := i.afterDeviceLock(); err != nil {
 				return err
 			}
+		}
+		// Device lifecycle is checked while holding the same row lock used by
+		// administrative transitions. Disabled and retired devices cannot claim
+		// telemetry idempotency keys, update presence, or write readings.
+		if device.LifecycleStatus != "" && device.LifecycleStatus != domain.DeviceLifecycleActive {
+			result.Status = IngestLifecycleBlocked
+			return nil
 		}
 
 		var digest []byte

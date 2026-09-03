@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"power-iot-backend/internal/data/migrations"
+	"power-iot-backend/internal/data/private_migrations"
 	"power-iot-backend/internal/testsupport"
 )
 

@@ -1,4 +1,3 @@
-// #C:\Code\PowerWork\power-iot-system\mobile\lib\features\shops\providers\shop_provider.dart
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // 1. 定義店家資料模型
