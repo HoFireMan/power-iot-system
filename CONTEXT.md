@@ -150,6 +150,23 @@ filters, Apply, pagination, Shop switching, Replace, and Relocate presentation.
 Backend source and the existing route contract remain unchanged. Device runtime
 acceptance remains pending an operator-owned emulator.
 
+Latest accepted BUG-006 protocol parity checkpoint:
+
+PR #49 = **BUG_006_FIX_01**
+
+MERGE_COMMIT = `3b9f1aade94a3662b08f852261b0aaa05c578575`
+
+`diagnostics` is the canonical Device Protocol v1 command action and
+`report_diagnostics` is an exact compatibility alias. Both use the existing
+CommandEnvelope, existing command topic, and generic command acknowledgement.
+No diagnostic-report topic, payload, persistence, Backend report consumer,
+report-specific identifiers, authorization, or sensitive-data transport is
+implemented. Backend validation, simulator parity tests, and `iotctl` action
+help agree; existing unsupported/destructive actions, OTA handling, telemetry,
+MQTT topics, schema, migrations, Flutter, and HTTP routes are unchanged. The
+ignored local Technical Debt Register records BUG-006 as CLOSED; real firmware
+and device validation are not claimed.
+
 Earlier accepted product checkpoint retained for history:
 
 PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
