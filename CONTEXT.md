@@ -167,6 +167,21 @@ MQTT topics, schema, migrations, Flutter, and HTTP routes are unchanged. The
 ignored local Technical Debt Register records BUG-006 as CLOSED; real firmware
 and device validation are not claimed.
 
+Latest accepted BUG-004 MQTT construction checkpoint:
+
+PR #51 = **BUG_004_FIX_01**
+
+MERGE_COMMIT = `a54cb09e1f6d781e33967ca7bd6f4c8961713571`
+
+The unused legacy `NewMqttService(brokerURL, db)` constructor was removed.
+All repository Backend/tool construction remains
+`LoadMqttConfigFromEnv → NewMqttServiceWithConfig`, preserving TLS, CA,
+credentials, reconnect, client ID, and D6 ingestion-mode authority. No
+replacement brokerURL constructor, MQTT topic/protocol, schema, migration,
+Flutter, or HTTP route change was introduced. The ignored local Technical Debt
+Register records BUG-004 as CLOSED. Real device and production validation are
+not claimed.
+
 Earlier accepted product checkpoint retained for history:
 
 PR #31 = **ADMIN-ASSIGNMENT-HISTORY-01**
