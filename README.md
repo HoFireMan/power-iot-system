@@ -79,6 +79,7 @@ MeasurementPoint 是持續存在的邏輯量測位置；Device 可被替換、�
 - persistence 成功後的 Stored / Duplicate ACK
 - 依歷史 MeasurementPoint attribution 處理延遲 telemetry
 - authenticated Shop-scoped Admin Device Binding HTTP lifecycle: Create Measurement Point, Bind, Replace, Relocate, and Unbind, with real Flutter integration and authoritative refresh
+- authenticated scoped-admin Device Retirement Lifecycle V1: Disable, Enable, and terminal Retire, with lifecycle state separate from online presence
 - authenticated MeasurementPoint-centered Alert Settings GET/PUT with scoped-admin mutation authorization
 - authenticated Shop-scoped, read-only Alert History with MeasurementPoint filtering, stable cursor pagination, and durable edge-triggered CURFEW_USAGE generation
 - authenticated Shop-scoped monthly Measurement Point historical energy report with Shop aggregate, per-MP usage/coverage, historical assignment attribution, and real Flutter integration
@@ -102,7 +103,7 @@ or unowned runtime was used for acceptance.
 Admin Binding Audit History is read-only and exposes the five persisted binding
 operations through scoped-admin plus active Shop authorization. It uses
 Action/MeasurementPoint/Device filters and stable `(occurred_at, id)` cursor
-pagination. The API adds exactly one route, `GET /api/v1/shops/:shopId/admin/binding-audits`, bringing the versioned route count to 23. Historical IDs and Device serial/MAC values are preserved; Actor,
+pagination. The API adds exactly one route, `GET /api/v1/shops/:shopId/admin/binding-audits`, bringing the versioned route count to 26. Historical IDs and Device serial/MAC values are preserved; Actor,
 Device, and MeasurementPoint names are current enrichment only. Relocate rows
 are target-Shop owned and require current authorization to both source and
 target Shops; unauthorized full rows are excluded. No audit mutation, actor
@@ -340,7 +341,7 @@ Telemetry availability is independent from Carbon availability and Billing estim
 
 ## Backend Interface Inventory
 
-The current server composition exposes 25 registered production HTTP routes. Query strings do not create distinct routes, and Flutter routes, MQTT topics, and tests are not counted.
+The current server composition exposes 26 registered production HTTP routes. Query strings do not create distinct routes, and Flutter routes, MQTT topics, and tests are not counted.
 
 1. `GET /`
 2. `POST /api/v1/auth/login`
@@ -364,9 +365,10 @@ The current server composition exposes 25 registered production HTTP routes. Que
 20. `POST /api/v1/admin/device-bindings/:assignmentId/replace`
 21. `POST /api/v1/admin/device-bindings/:assignmentId/relocate`
 22. `POST /api/v1/admin/device-bindings/:assignmentId/unbind`
-23. `POST /api/v1/admin/devices/:deviceId/disable`
-24. `POST /api/v1/admin/devices/:deviceId/enable`
-25. `POST /api/v1/admin/devices/:deviceId/retire`
+23. `GET /api/v1/shops/:shopId/admin/binding-audits`
+24. `POST /api/v1/admin/devices/:deviceId/disable`
+25. `POST /api/v1/admin/devices/:deviceId/enable`
+26. `POST /api/v1/admin/devices/:deviceId/retire`
 
 The monthly historical energy report accepts `?month=YYYY-MM` and is an authenticated Shop-scoped read: a normal authorized Shop user may read it through the server-verified User → UserShopRelation → Shop chain. It is not scoped-admin-only. It returns the Shop monthly aggregate and per-MeasurementPoint usage/coverage facts attributed through historical DeviceAssignment intervals. `MeasurementPoint` remains the stable report identity across Device replacement; relocation is attributed by the historical assignment interval. The report is development/local-runtime verified, not official utility billing or a production-ready reporting platform.
 
@@ -539,7 +541,7 @@ dart format --output=none --set-exit-if-changed .
 
 ## Mobile
 
-Flutter UI 已包含 login、dashboard、devices、shops、profile、MeasurementPoint-centered Alert History 與 Alert Settings 畫面，並使用 Riverpod 與 GoRouter。Alert History 支援 Shop scope、MeasurementPoint filter、cursor load-more、snapshot/provenance display；Alert Settings 僅向 scoped-admin 提供 mutation controls。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard、Measurement Point Detail read path，以及 authenticated Shop-scoped Admin Device Binding lifecycle integration。Flutter Admin flow 支援 Create Measurement Point、Bind、Replace、Relocate、Unbind，並在成功 mutation 後以 authoritative Backend refresh reconciliation；request identity retry safety 與 local double-submit serialization 也已驗證。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。Current accepted development capabilities include Dashboard daily/monthly energy, Dashboard Carbon summary, Shop tariff classification, Billing V1 configuration, historical energy/coverage, and billing estimates; these are system-integration capabilities, not an official utility bill. This does not imply production deployment/readiness or physical hardware validation. Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。Dashboard read-only durable cache V1 已實作並測試，只在目前 authenticated User 與 authorized Shop context 下，於 transient fetch failure 提供明確標示的 last-successful snapshot；不提供 offline login、offline authorization、mutation queue 或全功能 offline cache。BLE provisioning、QR flow 與 broader offline/product caching 仍未完成。
+Flutter UI 已包含 login、dashboard、devices、shops、profile、MeasurementPoint-centered Alert History 與 Alert Settings 畫面，並使用 Riverpod 與 GoRouter。Alert History 支援 Shop scope、MeasurementPoint filter、cursor load-more、snapshot/provenance display；Alert Settings 僅向 scoped-admin 提供 mutation controls。核心 development integration 現在使用真實 Backend：real authentication、refresh/logout、`/me`、`/shops`、remote dashboard、Measurement Point Detail read path，以及 authenticated Shop-scoped Admin Device Binding lifecycle integration。Flutter Admin flow 支援 Create Measurement Point、Bind、Replace、Relocate、Unbind，並在成功 mutation 後以 authoritative Backend refresh reconciliation；request identity retry safety 與 local double-submit serialization 也已驗證。Android → HTTP → Go → PostgreSQL E2E 與 real MQTTS → Backend → PostgreSQL → Flutter development proof 均已通過。Current accepted development capabilities include Dashboard daily/monthly energy, Dashboard Carbon summary, Shop tariff classification, Billing V1 configuration, historical energy/coverage, billing estimates, and the bounded Device Retirement Lifecycle V1. Lifecycle commands are explicit scoped-admin operations; they do not unbind Devices, rewrite assignment/history/audit facts, or establish a global-admin capability. These are system-integration capabilities, not an official utility bill. This does not imply production deployment/readiness or physical hardware validation. Dashboard 數值現在支援 automatic refresh：產品預設每 300 秒輪詢一次；local development/E2E 可使用 positive-integer `--dart-define=POWER_IOT_DASHBOARD_POLL_SECONDS=<seconds>` 覆寫（10 秒僅供加速驗證，不是產品預設）。輪詢只在 app lifecycle 為 resumed 且 Dashboard route 可見時啟用，route 被覆蓋或 app 離開 resumed 狀態時停止；這不代表 production deployment/readiness。Dashboard read-only durable cache V1 已實作並測試，只在目前 authenticated User 與 authorized Shop context 下，於 transient fetch failure 提供明確標示的 last-successful snapshot；不提供 offline login、offline authorization、mutation queue 或全功能 offline cache。BLE provisioning、QR flow 與 broader offline/product caching 仍未完成。
 
 ## Firmware Boundary
 

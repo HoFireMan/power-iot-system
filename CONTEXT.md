@@ -12,15 +12,15 @@ Canonical repository:
 Live canonical Git HEAD is authoritative in Git. Obtain it from the canonical
 repository with `git rev-parse main`.
 
-DOCUMENTATION_RECONCILED_THROUGH = **PR #52**
+DOCUMENTATION_RECONCILED_THROUGH = **PR #54**
 
 Current documentation status: **ACCEPTED / MERGED / DOCS_RECONCILED / DEVICE_RUNTIME_PENDING**
 
-The accepted mainline through PR #52 includes the earlier Admin Binding,
+The accepted mainline through PR #54 includes the earlier Admin Binding,
 IDENT-002, Alerts V1, Assignment History, Audit History, BUG-006, and BUG-004
-checkpoints recorded below. No source, product, protocol, schema, migration,
-MQTT topic, Flutter route, or HTTP route change is authorized by this context
-reconciliation.
+checkpoints plus the bounded Device Retirement Lifecycle V1 checkpoint recorded
+below. This reconciliation does not authorize publication, production access,
+unknown-device lifecycle, or broader derived-data/reporting work.
 
 ## Accepted Local Runtime Operator
 
@@ -124,6 +124,47 @@ resets pagination, and generation-scoped loading/results prevent stale pages
 from repopulating a newer Shop or filter view. No audit mutation, actor filter,
 schema migration, or audit-writer change is included in this read/UI slice.
 
+### DEVICE_RETIREMENT_LIFECYCLE_01 — bounded Device lifecycle
+
+- PR #54 implementation: `44831afefc73c595a5d9c278fb289993485c992e`
+- PR #54 merge: `021c2364db0e971e21c3f6e21c0258c2afe49452`
+
+Device lifecycle is an accepted development capability with states `ACTIVE`,
+`DISABLED`, and terminal `RETIRED`. Existing Devices are backfilled `ACTIVE` by
+protected migration `000012_device_retirement_lifecycle`; the database default,
+NOT NULL/allowed-value constraint, and terminal trigger remain authoritative.
+Disable is reversible; retire is terminal. Disable and retire reject an assigned
+Device without unbinding it. Only ACTIVE Devices enter new Bind/Replace targets.
+Lifecycle transitions use the existing operation ledger for idempotency but do
+not append Admin Binding Audit History rows.
+
+The authenticated scoped-admin HTTP surface is exactly three routes: `disable`,
+`enable`, and `retire`. Authorization uses the inventory-owner Client and live
+User→UserShopRelation→Shop facts; `Device.ShopID` and MAC are not authority.
+Telemetry locks the Device before lifecycle gating and never persists normal
+telemetry, presence, or alerts for DISABLED/RETIRED Devices. The terminal
+`lifecycle_blocked` ACK is an explicit discard, not a successful persistence ACK.
+Flutter Admin inventory refreshes authoritatively after mutation, requires
+confirmation for retirement, serializes double submits, and clears stale
+mutation state on auth/Shop changes. Device runtime and physical firmware
+acceptance remain pending.
+
+### PR #54 provenance reconciliation
+
+The exact `929302994cee76f379c9536717f2eb287b07ed8b →
+44831afefc73c595a5d9c278fb289993485c992e` delta contains 162 changed paths.
+Material clusters classify as: A `DEVICE_LIFECYCLE_REQUIRED` = 7; B
+`PREEXISTING_ACCEPTED_WORK` = 4; C `MECHANICAL_DEPENDENCY` = 2; D
+`UNAUTHORIZED_SCOPE_CONTAMINATION` = 0; E `PROVENANCE_UNRESOLVED` = 0.
+A covers the lifecycle state/migration/application/binding/telemetry/HTTP/UI
+vertical slice. B covers the already-established strict public/private boundary,
+protected migration/runtime-gate work, mobile endpoint/Android hardening, and
+its status documentation. C covers import/bootstrap adaptations needed by the
+package-path split. Repository evidence is the pre-PR54 staged migration split,
+the current public-boundary section and candidate evidence in this file, the
+existing accepted security worktree branches/reflogs, and pure-rename similarity
+in the PR diff. No D delta required repair.
+
 ### BUG-006 — diagnostics command parity
 
 - PR #49 implementation: `3b9f1aade94a3662b08f852261b0aaa05c578575`
@@ -165,6 +206,8 @@ with real Flutter integration.
 replacement and relocation.
 - Authenticated scoped-admin Admin Device Binding HTTP lifecycle: Create
 Measurement Point, Bind, Replace, Relocate, and Unbind.
+- Authenticated scoped-admin Device Retirement Lifecycle V1: Disable, Enable,
+and terminal Retire with authoritative inventory refresh.
 - Real Flutter Admin Binding integration with authoritative refresh, retry-safe
 request identity, and double-submit serialization.
 - Admin Assignment History and read-only Admin Binding Audit History UI slices,
@@ -192,7 +235,9 @@ read/acknowledgement semantics, notification delivery, per-Shop timezones,
 retention policy, and production hardening.
 - General Admin inventory/history and broader audit domains remain incomplete
 beyond the accepted bounded slices. No actor directory/filter or audit mutation
-is implied.
+is implied. Device lifecycle is limited to the accepted three-command V1 slice;
+unknown-device lifecycle, deletion, provisioning, and fleet automation remain
+out of scope.
 - BLE/QR provisioning, broader offline/product caching, and physical recovery
 remain incomplete or not frozen.
 - Global-admin semantics, complete tenant/role/device scope, and production
@@ -211,20 +256,12 @@ Backend current-power freshness remains **120 seconds**.
 
 ## Public V1 Boundary Review (not published)
 
-The current working-tree refactor establishes a strict future-public boundary
-without changing repository visibility or publishing. The public staging
-allowlist is frozen at `docs/publication/PUBLIC_V1_MANIFEST.v1.txt` and is
-validated by `scripts/public-candidate-validate.sh`. It contains the Backend
-server dependency closure, generic application migrations through 000005, and
-Android-only Flutter source/wrapper files. Tests, fixtures, operational
-control-plane code, protected migration SQL/authority, infrastructure,
-firmware, and credentials remain excluded by default.
-
-`PUBLIC_CANDIDATE_VALIDATION = PASS`
-`PUBLIC_CANDIDATE_SECRET_SCAN = PASS`
-`PUBLIC_CANDIDATE_PRIVACY_SCAN = PASS`
-`PUBLIC_CANDIDATE_BACKEND_BUILD = PASS (clean public staging)`
-`PUBLIC_CANDIDATE_ANDROID_RELEASE_BUILD = PASS (explicit example HTTPS define and ephemeral validation signing)`
+The merged PR #54 tree preserves the strict future-public boundary established
+in the accepted pre-PR54 local refactor without changing repository visibility or
+publishing. Publication-boundary manifests, scripts, and validation outputs are
+local-only operational evidence and are not asserted as part of this tracked
+documentation checkout. This reconciliation does not change those artifacts,
+perform publication validation, or authorize publication.
 
 Candidate publication remains unauthorized pending repository name, license,
 and manual security approval.
